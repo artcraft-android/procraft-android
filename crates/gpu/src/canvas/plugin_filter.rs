@@ -1,11 +1,11 @@
-//! A filter from a plugin file: one WGSL function, `filter`, with everything around it written here
+//! A filter from a plugin file: one WGSL function, `pixel`, with everything around it written here
 //! (the template in `shaders/plugin_filter_1.wgsl`). It takes a pixel of the layer and hands one
 //! back; premultiplying, the selection, the alpha lock and the layer's copy are the app's.
 //!
 //! The file is hostile until it has held up, and a GPU can't be interrupted, so what it can do is
 //! bounded before it runs:
 //! - Its text may declare functions, constants and types, nothing else, and reach nothing of the
-//!   template's but `v`, `pixel` and `canvas_size`.
+//!   template's but `v`, `layer_at` and `canvas_size`.
 //! - Its loops pay as they go round: the parsed module is rewritten so each spends from a budget
 //!   a pixel has, and stops when it is spent. That holds on every backend, the same code going to
 //!   each. With no recursion in WGSL, and calls counted in what a loop pays, a pixel can't cost more
@@ -66,11 +66,11 @@ const OWN_GLOBALS: [&str; 5] = ["host_copy", "host_chosen", "host_u", "v", "host
 const OWN_ENTRIES: [&str; 3] = ["host_main", "host_probe", "host_vs"];
 const OWN_PREFIX: &str = "host_";
 /// The template's functions a filter may call.
-const GIVEN: [&str; 2] = ["pixel", "canvas_size"];
-/// The one function it must have. WGSL keeps the word `filter` for itself, so it is taken from the
-/// text and given the name the template calls: no other use of the word can get past the parser.
-const FILTER: &str = "filter";
-const FILTER_NAMED: &str = "host_filter";
+const GIVEN: [&str; 2] = ["layer_at", "canvas_size"];
+/// The one function it must have.
+const PIXEL: &str = "pixel";
+/// What an author may well call it, which WGSL keeps for itself: said so, not left to the parser.
+const RESERVED: &str = "filter";
 
 /// A filter's code that has held up, with what its loops pay written in. Nothing has run.
 #[derive(Clone, Debug)]
@@ -128,8 +128,8 @@ fn ends_line(c: char) -> bool {
     matches!(c, '\u{A}' | '\u{B}' | '\u{C}' | '\u{D}' | '\u{85}' | '\u{2028}' | '\u{2029}')
 }
 
-/// The words of WGSL `text`, each with where it is and how deep in braces, comments left out.
-fn words(text: &str) -> Vec<(usize, &str, usize)> {
+/// The words of WGSL `text` and how deep in braces each is, comments left out.
+fn words(text: &str) -> Vec<(&str, usize)> {
     let mut found = Vec::new();
     let mut depth = 0_usize;
     let mut chars = text.char_indices().peekable();
@@ -164,7 +164,7 @@ fn words(text: &str) -> Vec<(usize, &str, usize)> {
                     end = i + c.len_utf8();
                 }
                 if let Some(word) = text.get(at..end) {
-                    found.push((at, word, depth));
+                    found.push((word, depth));
                 }
             }
             _ => {}
@@ -173,23 +173,17 @@ fn words(text: &str) -> Vec<(usize, &str, usize)> {
     found
 }
 
-/// The names `text` declares for the whole module, each with where it is.
-fn declared(text: &str) -> Vec<(usize, &str)> {
+/// The names `text` declares for the whole module.
+fn declared(text: &str) -> Vec<&str> {
     let found = words(text);
     let declares = |word: &str| matches!(word, "fn" | "struct" | "alias" | "const" | "override" | "var");
     found
         .windows(2)
         .filter_map(|pair| match pair {
-            [(_, word, 0), (at, name, _)] if declares(word) => Some((*at, *name)),
+            [(word, 0), (name, _)] if declares(word) => Some(*name),
             _ => None,
         })
         .collect()
-}
-
-/// `text` with its function `filter` under the name the template calls.
-fn filter_named(text: &str, declared: &[(usize, &str)]) -> Option<String> {
-    let (at, _) = declared.iter().find(|(_, name)| *name == FILTER)?;
-    Some(format!("{}{FILTER_NAMED}{}", text.get(..*at)?, text.get(*at + FILTER.len()..)?))
 }
 
 /// `text` as code, checked, and what its loops pay written in.
@@ -199,22 +193,27 @@ fn read(text: &str, keys: &[String]) -> Result<FilterCode, String> {
     }
     // what its text declares reaches the whole module, the template too: a function of its own
     // called `mix` would take the selection's place. So none may be a word the template uses
-    let template: HashSet<&str> = words(TEMPLATE).into_iter().map(|(_, word, _)| word).collect();
+    let template: HashSet<&str> = words(TEMPLATE).into_iter().map(|(word, _)| word).collect();
     let names = declared(text);
-    let taken = names.iter().find(|(_, name)| {
-        *name != FILTER && (template.contains(name) || name.starts_with(OWN_PREFIX) || GIVEN.contains(name))
+    if names.contains(&RESERVED) {
+        return Err(format!("{RESERVED} is a word WGSL keeps for itself: the function is called {PIXEL}"));
+    }
+    if !names.contains(&PIXEL) {
+        return Err(format!("it has no {PIXEL} function"));
+    }
+    let taken = names.iter().find(|name| {
+        **name != PIXEL && (template.contains(*name) || name.starts_with(OWN_PREFIX) || GIVEN.contains(*name))
     });
-    if let Some((_, name)) = taken {
+    if let Some(name) = taken {
         return Err(format!("it declares {name}, which is the app's"));
     }
-    let text = filter_named(text, &names).ok_or("it has no filter function")?;
-    let whole = joined(&text, keys);
+    let whole = joined(text, keys);
     let mut module = naga::front::wgsl::parse_str(&whole).map_err(|e| e.emit_to_string(&whole))?;
     holds_only_a_filter(&module)?;
     validate(&module, &whole)?;
-    let filter = function_named(&module, FILTER_NAMED).ok_or("it has no filter function")?;
+    let pixel = function_named(&module, PIXEL).ok_or("it has no pixel function")?;
     let costs = straight_costs(&module);
-    let straight = costs.get(filter.index()).copied().unwrap_or(u64::MAX);
+    let straight = costs.get(pixel.index()).copied().unwrap_or(u64::MAX);
     if straight > MOST_STRAIGHT {
         return Err(format!("it costs a pixel {straight} without a loop"));
     }
@@ -258,7 +257,7 @@ fn holds_only_a_filter(module: &Module) -> Result<(), String> {
     let values = values.map(|(handle, _)| handle);
     for (_, function) in module.functions.iter() {
         let name = function.name.as_deref().unwrap_or("");
-        if name != FILTER_NAMED && (name.starts_with(OWN_PREFIX) || GIVEN.contains(&name)) {
+        if name.starts_with(OWN_PREFIX) || GIVEN.contains(&name) {
             continue;
         }
         let locals = function.local_variables.iter();
@@ -652,7 +651,7 @@ impl Canvas {
 mod tests {
     use super::*;
 
-    const PLAIN: &str = "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
+    const PLAIN: &str = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
 
     fn keys(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -663,7 +662,7 @@ mod tests {
     }
 
     fn filter_doing(body: &str) -> String {
-        format!("fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {{ {body} }}")
+        format!("fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {{ {body} }}")
     }
 
     /// Whether every loop in `block` starts by paying.
@@ -694,7 +693,7 @@ mod tests {
         assert!(code.worst() < 100, "{}", code.worst());
         // it can use its values, and what it is given
         let text =
-            filter_doing("let n = pixel(at + vec2<f32>(1.0, 0.0)); return mix(colour, n, v.cut * canvas_size().x);");
+            filter_doing("let n = layer_at(at + vec2<f32>(1.0, 0.0)); return mix(colour, n, v.cut * canvas_size().x);");
         assert!(read_filter(&text, &keys(&["cut"])).is_ok());
         // but not one it doesn't have
         assert!(read_filter(&text, &keys(&["amount"])).is_err());
@@ -707,10 +706,10 @@ mod tests {
     #[test]
     fn what_doesnt_fit_the_shape_is_refused() {
         // what won't compile, and what isn't the one function it should be
-        assert!(read_plain("fn filter(").is_err());
+        assert!(read_plain("fn pixel(").is_err());
         assert!(read_plain("").is_err());
-        assert!(read_plain("fn filter(colour: vec4<f32>) -> vec4<f32> { return colour; }").is_err());
-        assert!(read_plain("fn filter(colour: vec4<f32>, at: vec2<f32>) -> f32 { return 1.0; }").is_err());
+        assert!(read_plain("fn pixel(colour: vec4<f32>) -> vec4<f32> { return colour; }").is_err());
+        assert!(read_plain("fn pixel(colour: vec4<f32>, at: vec2<f32>) -> f32 { return 1.0; }").is_err());
         // its own entry points, bindings and globals of any kind
         let entry = format!("{PLAIN}\n@fragment fn own() -> @location(0) vec4<f32> {{ return vec4<f32>(1.0); }}");
         assert!(read_plain(&entry).is_err());
@@ -730,6 +729,21 @@ mod tests {
         assert!(read_plain(&"x".repeat(MOST_TEXT + 1)).is_err());
         assert!(read_filter(PLAIN, &keys(&["a", "b", "c", "d", "e", "f", "g", "h", "i"])).is_err());
         assert!(read_filter(PLAIN, &keys(&["a: f32, b"])).is_err());
+    }
+
+    #[test]
+    fn the_function_is_called_pixel_and_a_file_is_told_so() {
+        assert!(read_plain(PLAIN).is_ok());
+        // filter is a word WGSL keeps for itself: said in so many words, not by the parser
+        let named = PLAIN.replace("fn pixel", "fn filter");
+        assert!(read_plain(&named).unwrap_err().contains("function is called pixel"));
+        let helper = format!("fn filter() {{}}\n{PLAIN}");
+        assert!(read_plain(&helper).unwrap_err().contains("function is called pixel"));
+        // and nowhere else does the word get past it
+        assert!(read_plain(&filter_doing("let filter = 1.0; return colour * filter;")).is_err());
+        // a file with neither
+        let other = PLAIN.replace("fn pixel", "fn apply");
+        assert!(read_plain(&other).unwrap_err().contains("no pixel function"));
     }
 
     #[test]
@@ -762,7 +776,8 @@ mod tests {
             // however it is hidden
             "/* */ fn /* */ mix(a: vec4<f32>, b: vec4<f32>, t: f32) -> vec4<f32> { return b; }",
             "// a comment\u{2028}fn mix(a: vec4<f32>, b: vec4<f32>, t: f32) -> vec4<f32> { return b; }",
-            // and what the app may give it, for the next one
+            // and what the app gives it, or may give it in the next one
+            "fn layer_at() {}",
             "fn host_new() {}",
         ] {
             assert!(read_plain(&format!("{own}\n{PLAIN}")).is_err(), "{own}");
@@ -830,8 +845,8 @@ mod tests {
         );
         let code = read_plain(&text).unwrap();
         let module = &code.module;
-        let filter = function_named(module, FILTER_NAMED).unwrap();
-        let function = module.functions.try_get(filter).unwrap();
+        let pixel = function_named(module, PIXEL).unwrap();
+        let function = module.functions.try_get(pixel).unwrap();
         let Some(Statement::Loop { body, .. }) =
             function.body.iter().find(|statement| matches!(statement, Statement::Loop { .. }))
         else {

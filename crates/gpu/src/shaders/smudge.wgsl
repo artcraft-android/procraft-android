@@ -285,7 +285,9 @@ fn mask(t: vec2<f32>) -> f32 {
         let at = clamp(vec2<i32>(floor(uv * vec2<f32>(size))), vec2<i32>(0), size - 1);
         return textureLoad(shapes, at, st.shape, 0).r;
     }
-    let lod = clamp(log2(128.0 / (st.radius + QUAD_REACH)), 0.0, st.shape_lod_cap);
+    // (a brush file's own image is bigger than the brush images, by as many levels)
+    let side = f32(textureDimensions(shapes).x);
+    let lod = clamp(log2(0.5 * side / (st.radius + QUAD_REACH)), 0.0, st.shape_lod_cap + log2(side / 256.0));
     return textureSampleLevel(shapes, shape_smp, uv, st.shape, lod).r;
 }
 

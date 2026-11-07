@@ -197,7 +197,8 @@ enum ScreenCapture {
     private static func importPlugins() {
         guard let folder = pluginFiles, let names = try? FileManager.default.contentsOfDirectory(atPath: folder) else { return }
         let plugins = PluginsModel.shared
-        for name in names where name.hasSuffix(".procraftplugin") {
+        // the old name still opens
+        for name in names where name.hasSuffix(".procraft-plugin") || name.hasSuffix(".procraftplugin") {
             guard let bytes = FileManager.default.contents(atPath: folder + "/" + name) else { continue }
             if plugins.store.inspect(bytes: bytes).refused == nil {
                 _ = plugins.store.install(bytes: bytes)
@@ -206,16 +207,16 @@ enum ScreenCapture {
         plugins.read()
     }
 
-    /// The patch called `name`, applied.
+    /// The plugin called `name`, on.
     private static func apply(_ name: String) -> PluginInfo? {
         importPlugins()
         let plugins = PluginsModel.shared
-        guard let patch = plugins.patches.first(where: { $0.name == name }) else { return nil }
-        plugins.setOn(patch, true)
-        return plugins.patches.first { $0.name == name }
+        guard let plugin = plugins.plugins.first(where: { $0.name == name }) else { return nil }
+        plugins.setOn(plugin, true)
+        return plugins.plugins.first { $0.name == name }
     }
 
-    /// The interface at `size`, through its patch.
+    /// The interface at `size`, through its plugin.
     private static func sized(_ size: Float) {
         for control in apply("Interface size")?.controls ?? [] {
             if case let .slider(slider) = control {
@@ -473,18 +474,15 @@ enum ScreenCapture {
         case "reference-image":
             model.reference.setOn(true)
             model.reference.setMode(.image)
-        case "prefs-patches":
-            importPlugins()
-            prefs(model, .patches)
         case "prefs-plugins":
             importPlugins()
             prefs(model, .plugins)
-        case "prefs-patch-on":
+        case "prefs-plugin-on":
             _ = apply("Touch position offset")
-            prefs(model, .patches)
+            prefs(model, .plugins)
         case "plugin-offer":
             if let folder = pluginFiles {
-                PluginsModel.shared.offer(URL(fileURLWithPath: folder + "/extract-lines.procraftplugin")) { _ in }
+                PluginsModel.shared.offer(URL(fileURLWithPath: folder + "/extract-lines.procraft-plugin")) { _ in }
             }
         case "adjust-plugins":
             importPlugins()

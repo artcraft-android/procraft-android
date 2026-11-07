@@ -2,7 +2,8 @@
 //! thumbnail, name, blend letter and visibility box; groups with their line and arrow; the
 //! background under them. Tap a layer to make it current, the current one for its options (where
 //! it is renamed in place), its blend letter for its blend mode and opacity, its box to show or
-//! hide it (hold it to show it alone), the plus for a new layer; hold a row and drag it to move it;
+//! hide it (hold it to show it alone), the plus for a new layer; hold a row and drag it to move it
+//! (with a mouse, just drag it up or down);
 //! slide it left for lock, duplicate and delete, or a little right to pick it. On a model: each
 //! texture set's name over its meshes (each its picture and box), the open mesh's layers under it,
 //! and under a layer its channels (colour, roughness, metalness), one of which a click paints on.
@@ -107,7 +108,8 @@ enum Way {
 }
 
 /// A press on a row, followed until let go: whose, where and when it went down, what it became,
-/// how far the row was slid as it went down, and how far it has been dragged down.
+/// how far the row was slid as it went down, how far it has been dragged down, and whether it is a
+/// mouse's (not a finger's).
 #[derive(Clone, Copy)]
 struct RowPress {
     id: u64,
@@ -116,6 +118,7 @@ struct RowPress {
     way: Way,
     start: f32,
     dy: f32,
+    mouse: bool,
 }
 
 /// The blend editor open under a layer's row: how far its modes are scrolled (points, the first
@@ -137,6 +140,9 @@ pub struct Layers {
     /// The title's menu, and Delete's question.
     title_menu: Menu,
     deleting: Alert,
+    /// Asked before a layer the meshes of a texture set share goes, and which.
+    deleting_shared: Alert,
+    shared_going: Option<u64>,
     /// Delete on a locked layer's row: why not.
     locked: Alert,
     /// A layer renamed in place: which, the name as typed, and whether it has been focused.
@@ -171,11 +177,18 @@ pub struct Layers {
     /// brightness) kept while another is painted, the meshes' and channels' pictures, and the
     /// frame the panel last showed in (the meshes are pictured anew as it opens).
     open_mesh: Option<usize>,
+    /// How far each mesh's row is slid (points, left negative), the one slid open, and a press on
+    /// one: where along it, and how far it was slid then.
+    mesh_slid: HashMap<usize, f32>,
+    mesh_swiped: Option<usize>,
+    mesh_press: Option<(usize, f32, f32)>,
     tray_for: Option<u64>,
     channel: u32,
     channel_colours: [Option<[f32; 3]>; 3],
     mesh_pictures: HashMap<usize, TextureHandle>,
     channel_pictures: HashMap<(u32, u64), TextureHandle>,
+    /// The layer whose tray is pictured, as it was then: an undo or a stroke pictures it afresh.
+    channel_pictured: Option<(u64, u64)>,
     last_frame: u64,
 }
 
@@ -185,6 +198,12 @@ enum Item<'a> {
     Set { name: String, first: bool },
     Mesh { index: usize, name: String, open: bool, corners: (f32, f32) },
     Layer { l: &'a LayerInfo, corners: (f32, f32), indent: f32, shared: bool },
+}
+
+/// Whether the layers shown are a texture set's that several meshes share.
+fn shared_by_meshes(session: &CanvasSession) -> bool {
+    let painted = session.texture_set();
+    session.model_info().is_some_and(|m| m.submeshes.iter().filter(|s| s.texture_set == painted).count() > 1)
 }
 
 /// The list's items in order: the layers (top first), or on a model each texture set's name and
@@ -258,7 +277,11 @@ impl Layers {
 
     /// A menu of the panel's is open: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
-        self.options_menu.is_open() || self.title_menu.is_open() || self.deleting.is_open() || self.locked.is_open()
+        self.options_menu.is_open()
+            || self.title_menu.is_open()
+            || self.deleting.is_open()
+            || self.deleting_shared.is_open()
+            || self.locked.is_open()
     }
 
     /// Shows the panel hanging from `button`; returns where it is (points).
@@ -279,6 +302,7 @@ impl Layers {
         let frame = ctx.cumulative_frame_nr();
         if frame > self.last_frame + 1 {
             self.mesh_pictures.clear();
+            self.channel_pictures.clear();
         }
         self.last_frame = frame;
         let top = screen.top() + pc::BAR_HEIGHT;
@@ -448,8 +472,16 @@ impl Layers {
                                     {
                                         let since = Instant::now();
                                         let way = Way::Undecided;
-                                        self.press =
-                                            Some(RowPress { id: l.id, origin, since, way, start: slide, dy: 0.0 });
+                                        let mouse = !ui.input(|i| i.any_touches());
+                                        self.press = Some(RowPress {
+                                            id: l.id,
+                                            origin,
+                                            since,
+                                            way,
+                                            start: slide,
+                                            dy: 0.0,
+                                            mouse,
+                                        });
                                     }
                                     let mut row_ui = ui.new_child(UiBuilder::new().max_rect(row));
                                     row_ui.set_clip_rect(row.intersect(ui.clip_rect()));
@@ -551,6 +583,11 @@ impl Layers {
             } else {
                 session.delete_picked();
             }
+        }
+        if self.deleting_shared.show(ctx, look) == Some(Answer::Action)
+            && let Some(id) = self.shared_going.take()
+        {
+            _ = session.delete_layer(id);
         }
         self.locked.show(ctx, look);
         rect
@@ -655,9 +692,56 @@ impl Layers {
         open: bool,
         (t, b): (f32, f32),
     ) {
-        let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+        let (place, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click_and_drag());
+        // slid left it shows Lock (or Unlock); a little right, it joins the meshes picked
+        let reach = SWIPE_BUTTON + 6.0;
+        let locked = session.submeshes_locked().get(index).copied().unwrap_or(false);
+        let swiped = self.mesh_swiped == Some(index);
+        let mut slide = self.mesh_slid.get(&index).copied().unwrap_or(if swiped { -reach } else { 0.0 });
+        let pressed = ui.input(|i| i.pointer.press_origin().filter(|_| i.pointer.primary_down()));
+        if let Some(origin) = pressed.filter(|p| self.mesh_press.is_none() && place.contains(*p)) {
+            self.mesh_press = Some((index, origin.x, slide));
+        }
+        let mut let_go = false;
+        if let Some((_, origin, start)) = self.mesh_press.filter(|p| p.0 == index) {
+            let (down, at) = ui.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
+            if let Some(at) = at.filter(|_| down) {
+                slide = (start + at.x - origin).clamp(-reach, if swiped { 0.0 } else { PICK_REACH });
+            }
+            let_go = !down;
+        }
+        if let_go {
+            self.mesh_press = None;
+            if slide > PICK_REACH / 2.0 {
+                if !session.pick_more_submeshes(index as u32) {
+                    self.notice = Some(("Those meshes aren't in the same texture set".to_owned(), true));
+                }
+                self.mesh_swiped = None;
+            } else {
+                self.mesh_swiped = (slide < -reach / 2.0).then_some(index);
+            }
+            slide = if self.mesh_swiped == Some(index) { -reach } else { 0.0 };
+        }
+        self.mesh_slid.insert(index, slide);
+        if slide < 0.0 {
+            let rect = Rect::from_min_max(pos2(place.right() - SWIPE_BUTTON, place.top()), place.max);
+            let label = if locked { "Unlock" } else { "Lock" };
+            ui.painter().rect_filled(rect, 8, argb(SWIPE_FILL));
+            text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, 15.0, Weight::Medium, argb(SWIPE_INK));
+            if ui.interact(rect, ui.scope_id().with(("mesh lock", index)), Sense::click()).clicked() {
+                session.set_submesh_locked(index as u32, !locked);
+                self.notice = Some((if locked { "Unlock mesh" } else { "Lock mesh" }.to_owned(), false));
+                self.mesh_swiped = None;
+                self.mesh_slid.remove(&index);
+            }
+        }
+        let row = place.translate(vec2(slide, 0.0));
+        // slid, it stops at the list's edge
+        let clip = ui.clip_rect();
+        ui.set_clip_rect(clip.intersect(place));
         let corners = egui::CornerRadius { nw: t as u8, ne: t as u8, sw: b as u8, se: b as u8 };
-        ui.painter().rect_filled(row, corners, if open { argb(SUBMESH_OPEN) } else { argb(LAYER_ROW) });
+        let picked = session.active_submeshes().contains(&(index as u32));
+        ui.painter().rect_filled(row, corners, if open || picked { argb(SUBMESH_OPEN) } else { argb(LAYER_ROW) });
         let tile =
             Rect::from_center_size(pos2(row.left() + 4.0 + THUMB.0 / 2.0, row.center().y), vec2(THUMB.0, THUMB.1));
         ui.painter().rect_filled(tile, 4, argb(SUBMESH_TILE));
@@ -679,6 +763,9 @@ impl Layers {
         let g = galley(ui, name, 17.0, Weight::Regular, ink, arrow.left() - 6.0 - left);
         ui.painter().galley(pos2(left, row.center().y - g.size().y / 2.0), g, ink);
         look.icon(ui, if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, arrow.center(), 16.0, ink);
+        if locked {
+            look.icon(ui, &icons::PAGE_LOCKED, pos2(arrow.left() - 4.0, row.center().y), 16.0, ink);
+        }
         let hidden = session.submeshes_hidden().get(index).copied().unwrap_or(false);
         check_box(ui, look, visibility.center(), !hidden, argb(CHECK_FILL));
         if ui.interact(visibility, ui.scope_id().with(("mesh box", index)), Sense::click()).clicked() {
@@ -687,6 +774,28 @@ impl Layers {
         } else if response.clicked() {
             self.open_mesh(session, colours, index);
         }
+        ui.set_clip_rect(clip);
+    }
+
+    /// Layer `id`'s content in `channel` replaced by a picture chosen now.
+    fn replace_map(&mut self, session: &CanvasSession, colours: &mut Colours, id: u64, channel: u32) {
+        let Some(path) = rfd::FileDialog::new().set_title("Replace Material Map Content").pick_file() else { return };
+        let Ok(picture) = image::open(&path) else {
+            self.notice = Some(("This picture can't be opened.".to_owned(), true));
+            return;
+        };
+        let rgba = picture.to_rgba8();
+        let image = ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
+        if session.replace_material_map(id, channel, image) {
+            self.notice = Some(("Replace Material Map Content".to_owned(), false));
+            self.channel_pictures.retain(|(_, l), _| *l != id);
+            self.follow_channel(session, colours);
+        }
+    }
+
+    /// The mesh picked on the model is the one open here.
+    pub fn follow_picked_mesh(&mut self, session: &CanvasSession) {
+        self.open_mesh = session.active_submeshes().first().map(|&i| i as usize);
     }
 
     /// Opens mesh `index` (its texture set's layers under it, that set painted on), or closes it.
@@ -704,6 +813,7 @@ impl Layers {
             self.tray_for = None;
             session.choose_texture_set(set);
         }
+        session.pick_submesh(index as u32);
     }
 
     /// Paints on `channel` of the texture set from now on (its layers stay the layers), with that
@@ -748,6 +858,11 @@ impl Layers {
         let w = (inner.width() - 12.0) / 3.0;
         let painted = session.model_channel();
         let tile_chosen = session.channel_tile_chosen();
+        let now = session.layer_versions().into_iter().find(|v| v.id == l.id).map(|v| (l.id, v.version));
+        if now != self.channel_pictured {
+            self.channel_pictured = now;
+            self.channel_pictures.retain(|(_, id), _| *id != l.id);
+        }
         for (c, label) in CHANNELS.iter().enumerate() {
             let c = c as u32;
             let tile =
@@ -776,12 +891,17 @@ impl Layers {
                 Weight::Regular,
                 ink,
             );
-            if ui.interact(tile, ui.scope_id().with(("channel tile", c, l.id)), Sense::click()).clicked() {
+            let pressed = ui.interact(tile, ui.scope_id().with(("channel tile", c, l.id)), Sense::click());
+            if pressed.clicked() {
                 if !l.current {
                     session.select_layer(l.id);
                 }
                 session.choose_channel_tile(c);
                 self.follow_channel(session, colours);
+            }
+            // the other button: a picture replaces what the channel holds
+            if pressed.secondary_clicked() {
+                self.replace_map(session, colours, l.id, c);
             }
         }
     }
@@ -816,6 +936,11 @@ impl Layers {
                     // as measured, a locked one is told about, not deleted
                     _ if l.locked => {
                         self.locked.tell("Locked layer selection", LOCKED_DELETE, Some(&icons::PAGE_LOCKED))
+                    }
+                    _ if shared_by_meshes(session) => {
+                        self.shared_going = Some(l.id);
+                        let on_all = format!("\u{201c}{}\u{201d} is on every mesh of this texture set.", l.name);
+                        self.deleting_shared.open("Delete shared layer?", &on_all, "Delete", Some(&icons::TRASH));
                     }
                     _ => _ = session.delete_layer(l.id),
                 }
@@ -981,8 +1106,9 @@ impl Layers {
     }
 
     /// Follows the press on a row: moved sideways it slides the row (let go past half its buttons,
-    /// it stays open; slid right past half the way, it picks the layer); held still, the row is
-    /// dragged up and down and, let go, the layer moves next to the row it is over.
+    /// it stays open; slid right past half the way, it picks the layer); held still (or, with a
+    /// mouse, moved up or down: a finger doing that scrolls the list), the row is dragged up and down
+    /// and, let go, the layer moves next to the row it is over.
     fn follow_press(
         &mut self,
         ctx: &egui::Context,
@@ -999,9 +1125,10 @@ impl Layers {
         if down {
             match p.way {
                 Way::Undecided => {
-                    if d.length() > SLOP {
-                        p.way = if d.x.abs() > d.y.abs() { Way::Swipe } else { Way::Ignored };
-                    } else if p.since.elapsed() >= HOLD {
+                    let sideways = d.x.abs() > d.y.abs();
+                    if d.length() > SLOP && (sideways || !p.mouse) {
+                        p.way = if sideways { Way::Swipe } else { Way::Ignored };
+                    } else if p.since.elapsed() >= HOLD || d.length() > SLOP {
                         // a mask stays with its layer
                         if l.is_some_and(|l| l.kind != LayerType::Mask) {
                             p.way = Way::Reorder;
@@ -1083,8 +1210,9 @@ impl Layers {
         }
     }
 
-    /// A row's visibility box at `rect`: tapped, the layer shows or hides; held, it shows alone (or,
-    /// alone already, every layer shows again), a notice saying which.
+    /// A row's visibility box at `rect`: tapped, the layer shows or hides (or, with a layer shown
+    /// alone, every layer shows again); held, it shows alone (or, alone already, every layer shows
+    /// again), a notice saying which.
     fn visibility_touch(&mut self, ui: &Ui, session: &CanvasSession, l: &LayerInfo, rect: Rect) {
         let response = ui.interact(rect, ui.scope_id().with(("visible", l.id)), Sense::click_and_drag());
         if response.is_pointer_button_down_on() {
@@ -1093,10 +1221,8 @@ impl Layers {
                 let held = since.elapsed();
                 if held >= HOLD {
                     *done = true;
-                    let on = session.solo() != Some(l.id);
-                    if session.set_solo(on.then_some(l.id)) {
-                        let said = if on { "Solo visibility on" } else { "Solo visibility off" };
-                        self.notice = Some((said.into(), false));
+                    if let Some(said) = session.hold_visibility(l.id) {
+                        self.notice = Some((said, false));
                     }
                 } else {
                     ui.ctx().request_repaint_after(HOLD - held);
@@ -1105,8 +1231,11 @@ impl Layers {
         }
         let held = self.box_press.is_some_and(|(id, _, done)| id == l.id && done);
         // as measured, the notice band says so
-        if response.clicked() && !held && session.set_layer_visible(l.id, !l.visible) {
-            self.notice = Some((if l.visible { "Hide layer" } else { "Show layer" }.to_owned(), false));
+        if response.clicked()
+            && !held
+            && let Some(said) = session.tap_visibility(l.id)
+        {
+            self.notice = Some((said, false));
         }
         if !response.is_pointer_button_down_on() && self.box_press.is_some_and(|(id, _, _)| id == l.id) {
             self.box_press = None;
@@ -1388,7 +1517,7 @@ impl Layers {
             // it takes drags too, so a press on it is never the row's
             blend_tapped = ui.interact(blend, ui.scope_id().with(("blend", l.id)), Sense::click_and_drag()).clicked();
         }
-        check_box(ui, look, visibility.center(), l.visible, box_fill);
+        check_box(ui, look, visibility.center(), l.visible && !l.soloed_out, box_fill);
         self.visibility_touch(ui, session, l, visibility);
         blend_tapped
     }
@@ -1458,7 +1587,7 @@ impl Layers {
         if ui.interact(arrow, ui.scope_id().with(("fold", l.id)), Sense::click()).clicked() {
             session.set_group_collapsed(l.id, !l.collapsed);
         }
-        check_box(ui, look, visibility.center(), l.visible, box_fill);
+        check_box(ui, look, visibility.center(), l.visible && !l.soloed_out, box_fill);
         self.visibility_touch(ui, session, l, visibility);
     }
 

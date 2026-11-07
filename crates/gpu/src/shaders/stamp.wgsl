@@ -177,7 +177,9 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         // the shape fills the quad it is drawn on, which shows on a stamp a few pixels across
         let uv = i.q * i.fill * 0.5 + 0.5;
         // the mip level that matches the quad's size on the canvas
-        let lod = clamp(log2(128.0 / (r + QUAD_REACH)), 0.0, su.shape_lod_cap);
+        // (a brush file's own image is bigger than the brush images, by as many levels)
+        let side = f32(textureDimensions(shapes).x);
+        let lod = clamp(log2(0.5 * side / (r + QUAD_REACH)), 0.0, su.shape_lod_cap + log2(side / 256.0));
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
         var s = textureSampleLevel(shapes, shape_smp, uv, su.shape, lod).r;
         if (su.shape_sharp == 1u) {

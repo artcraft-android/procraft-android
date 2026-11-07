@@ -332,7 +332,7 @@ impl Default for Colours {
 }
 
 impl Colours {
-    /// The colour model the disc and the Value sliders work in.
+    /// The colour model the disc, Classic and the Value sliders work in.
     pub fn model(&self) -> ColourModel {
         self.pickers.model
     }
@@ -376,6 +376,32 @@ impl Colours {
     pub(crate) fn model_disc(&mut self, ui: &Ui, rect: Rect) -> bool {
         let mut coords = self.model_coords();
         let changed = self.pickers.disc(ui, &mut coords, rect);
+        if changed {
+            self.set_model_coords(coords);
+        }
+        changed
+    }
+
+    /// Classic's square in `rect`, in the colour model; whether it changed the colour.
+    pub(crate) fn model_square(&mut self, ui: &Ui, rect: Rect) -> bool {
+        let mut coords = self.model_coords();
+        let changed = self.pickers.square(ui, &mut coords, rect);
+        if changed {
+            self.set_model_coords(coords);
+        }
+        changed
+    }
+
+    /// Classic's slider for channel `channel` (0 the hue) in `rect`, in the colour model; whether
+    /// it changed the colour.
+    pub(crate) fn model_slider(&mut self, ui: &Ui, rect: Rect, id: &str, channel: usize) -> bool {
+        let model = self.model();
+        let mut coords = self.model_coords();
+        let tracks = classic_tracks(model, coords);
+        let Some((place, colours)) = tracks.get(channel) else { return false };
+        let Some(to) = slider_row(ui, rect, id, *place, colours) else { return false };
+        let value = if channel == 0 && model.rgb_hue() { hue_at(HueControl::Slider, to) } else { to };
+        let changed = coords.get_mut(channel).is_some_and(|slot| set(slot, value));
         if changed {
             self.set_model_coords(coords);
         }
@@ -633,9 +659,12 @@ impl Colours {
                 let second = Rect::from_min_size(pos2(body.right() - 20.0 - swatch.x, body.top() + 21.5), swatch);
                 let first = second.translate(vec2(-(swatch.x + 7.0), 0.0));
                 if self.mode != Mode::Palettes {
-                    // the colour model, for the disc and the Value sliders
-                    let model = Rect::from_min_size(pos2(first.left() - 8.0 - 70.0, first.top()), vec2(70.0, swatch.y));
-                    self.model_button(ui, model);
+                    // the colour model, for the pages that work in one
+                    if self.mode != Mode::Harmony {
+                        let model =
+                            Rect::from_min_size(pos2(first.left() - 8.0 - 70.0, first.top()), vec2(70.0, swatch.y));
+                        self.model_button(ui, model);
+                    }
                     ui.painter().rect_filled(first, 6, srgb(self.rgb()));
                     ui.painter().rect_stroke(
                         first,
@@ -929,8 +958,9 @@ pub struct Pickers {
     ring: Option<(usize, ColourModel, TextureHandle)>,
     /// What a drag that started on the disc picker moves: the ring (true) or the disc.
     on_ring: Option<bool>,
-    /// Classic's square for its hue, and Harmony's wheel for its brightness.
-    square: Option<(u32, usize, TextureHandle)>,
+    /// Classic's square for its hue (with the model it shows), and Harmony's wheel for its
+    /// brightness.
+    square: Option<(u32, usize, ColourModel, TextureHandle)>,
     wheel: Option<(u32, usize, TextureHandle)>,
     /// Harmony's hue, saturation and brightness (Display P3) as dragged to, with the colour they
     /// made: kept while that is the colour, not worked out again from it (a dark or greyish
@@ -1036,6 +1066,7 @@ impl Pickers {
     /// Classic's saturation/brightness square in `square` (rounded 10), saturation across and
     /// brightness up; returns whether it changed `hsv`.
     pub fn square(&mut self, ui: &Ui, hsv: &mut [f32; 3], square: Rect) -> bool {
+        let model = self.model;
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let before = *hsv;
@@ -1046,18 +1077,23 @@ impl Pickers {
         }
         let hue_key = (hsv[0] * 10_000.0).round() as u32;
         let side = (square.width() * ppp).round() as usize;
-        if self.square.as_ref().is_none_or(|(h, at, _)| *h != hue_key || *at != side) {
-            let image = square_image(hsv[0], side);
-            self.square = Some((hue_key, side, ctx.load_texture("classic square", image, TextureOptions::LINEAR)));
+        if self.square.as_ref().is_none_or(|(h, at, m, _)| *h != hue_key || *at != side || *m != model) {
+            let image = if model == ColourModel::Hsb {
+                square_image(hsv[0], side)
+            } else {
+                model_square_image(model, hsv[0], side)
+            };
+            let texture = ctx.load_texture("classic square", image, TextureOptions::LINEAR);
+            self.square = Some((hue_key, side, model, texture));
         }
-        if let Some((_, _, t)) = &self.square {
+        if let Some((_, _, _, t)) = &self.square {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
             let shape = egui::epaint::RectShape::filled(square, 10, Color32::WHITE).with_texture(t.id(), uv);
             ui.painter().add(egui::Shape::Rect(shape));
         }
         // the knob may hang over the square's edge
         let at = pos2(square.left() + hsv[1] * square.width(), square.top() + (1.0 - hsv[2]) * square.height());
-        knob(ui, at, 10.75, srgb(hsv_to_rgb(*hsv)));
+        knob(ui, at, 10.75, srgb(model.to_rgb(*hsv)));
         *hsv != before
     }
 
@@ -1131,26 +1167,20 @@ impl Pickers {
 
 impl Colours {
     /// Classic: the saturation/brightness square (344, rounded 10), then sliders for the hue,
-    /// saturation and brightness.
+    /// saturation and brightness, all in the colour model (its third channel for the brightness).
     /// Short, the square is `side` tall (still 344 wide).
     fn classic(&mut self, ui: &Ui, session: &CanvasSession, body: Rect, top: f32, side: f32) {
         let square = Rect::from_min_size(pos2(body.left() + 16.0, top), vec2(SQUARE, side));
-        let mut changed = self.pickers.square(ui, &mut self.hsv, square);
+        let mut changed = self.model_square(ui, square);
         let row = |i: f32| {
             Rect::from_min_size(
                 pos2(body.left() + 20.0, square.bottom() + SLIDER_ROW * i),
                 vec2(body.width() - 40.0, SLIDER_ROW),
             )
         };
-        changed |= hue_slider(ui, row(0.0), "classic hue", &mut self.hsv);
-        let pure = srgb(hsv_to_rgb([self.hsv[0], 1.0, 1.0]));
-        if let Some(v) = slider_row(ui, row(1.0), "classic saturation", self.hsv[1], &[argb(SATURATION_GREY), pure]) {
-            changed |= set(&mut self.hsv[1], v);
-        }
-        if let Some(v) = slider_row(ui, row(2.0), "classic brightness", self.hsv[2], &[Color32::BLACK, Color32::WHITE])
-        {
-            changed |= set(&mut self.hsv[2], v);
-        }
+        changed |= self.model_slider(ui, row(0.0), "classic hue", 0);
+        changed |= self.model_slider(ui, row(1.0), "classic saturation", 1);
+        changed |= self.model_slider(ui, row(2.0), "classic brightness", 2);
         if changed {
             self.send(session);
         }
@@ -1899,6 +1929,49 @@ fn square_image(hue: f32, side: usize) -> egui::ColorImage {
     egui::ColorImage::new([side, side], pixels)
 }
 
+/// The most pixels across Classic's square has in a model other than HSB.
+const MODEL_SQUARE: usize = 256;
+
+/// Classic's square for a model other than HSB, at most [`MODEL_SQUARE`] pixels: saturation across
+/// and the model's third channel up. Worked out in bands on threads of their own, and small, as a
+/// hue drag redraws it every frame (it is a soft gradient: drawn up, it looks the same).
+fn model_square_image(model: ColourModel, hue: f32, side: usize) -> egui::ColorImage {
+    let side = side.clamp(1, MODEL_SQUARE);
+    let mut pixels = vec![Color32::BLACK; side * side];
+    let step = (side.max(2) - 1) as f32;
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).clamp(1, 8);
+    let rows = side.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, chunk) in pixels.chunks_mut(rows * side).enumerate() {
+            scope.spawn(move || {
+                for (k, px) in chunk.iter_mut().enumerate() {
+                    let (x, y) = ((k % side) as f32 / step, (band * rows + k / side) as f32 / step);
+                    *px = srgb(model.to_rgb([hue, x, 1.0 - y]));
+                }
+            });
+        }
+    });
+    egui::ColorImage::new([side, side], pixels)
+}
+
+/// Classic's three sliders in `model` at `coords`: where each stands, and the colours along it.
+fn classic_tracks(model: ColourModel, [h, s, t]: [f32; 3]) -> [(f32, Vec<Color32>); 3] {
+    let along = |at: &dyn Fn(f32) -> [f32; 3], n: usize| -> Vec<Color32> {
+        (0..=n).map(|k| srgb(model.to_rgb(at(k as f32 / n as f32)))).collect()
+    };
+    let hue = if model.rgb_hue() {
+        let hues = SLIDER_HUES.iter().map(|d| srgb(model.to_rgb([d / 360.0, 1.0, model.ring_third(d / 360.0)])));
+        (hue_position(HueControl::Slider, h), hues.collect())
+    } else {
+        (h, along(&|v| [v, 1.0, model.ring_third(v)], 24))
+    };
+    if model == ColourModel::Hsb {
+        let pure = srgb(hsv_to_rgb([h, 1.0, 1.0]));
+        return [hue, (s, vec![argb(SATURATION_GREY), pure]), (t, vec![Color32::BLACK, Color32::WHITE])];
+    }
+    [hue, (s, along(&|v| [h, v, t], 8)), (t, along(&|v| [h, s, v], 12))]
+}
+
 /// A row of equal swatches in `rect` (its corners rounded as given); returns the one tapped, with
 /// its place.
 fn swatch_row(
@@ -2166,6 +2239,40 @@ mod tests {
         assert!((h2 - h).abs() < 0.01 && (s2 - s).abs() < 0.02, "{h2} {s2} (was {h} {s})");
         // a colour set elsewhere is worked out afresh
         assert_eq!(pickers.harmony_hsv(0xFF0000, false), p3_hsv_of(0xFF0000, false));
+    }
+
+    #[test]
+    fn classic_s_sliders_are_hsb_s_as_they_were_and_follow_another_model() {
+        let [hue, saturation, brightness] = classic_tracks(ColourModel::Hsb, [0.3, 0.4, 0.5]);
+        assert_eq!(hue.0, hue_position(HueControl::Slider, 0.3));
+        let slider: Vec<Color32> = SLIDER_HUES.iter().map(|h| srgb(hsv_to_rgb([h / 360.0, 1.0, 1.0]))).collect();
+        assert_eq!(hue.1, slider);
+        assert_eq!(saturation, (0.4, vec![argb(SATURATION_GREY), srgb(hsv_to_rgb([0.3, 1.0, 1.0]))]));
+        assert_eq!(brightness, (0.5, vec![Color32::BLACK, Color32::WHITE]));
+        // the same colour stands elsewhere in OKLab, its hue evenly along the slider
+        let coords = ColourModel::Oklab.of_rgb([0.8, 0.2, 0.1], 0.0);
+        let [hue, saturation, lightness] = classic_tracks(ColourModel::Oklab, coords);
+        assert_eq!((hue.0, saturation.0, lightness.0), (coords[0], coords[1], coords[2]));
+        assert_eq!(lightness.1.first(), Some(&Color32::BLACK));
+        assert_eq!(lightness.1.last(), Some(&Color32::WHITE));
+        assert_ne!(coords, rgb_to_hsv([0.8, 0.2, 0.1]));
+    }
+
+    #[test]
+    fn classic_s_square_shows_the_model() {
+        let image = |model| model_square_image(model, 0.0, 16);
+        for model in [ColourModel::Hls, ColourModel::Hsy, ColourModel::Oklab] {
+            let square = image(model);
+            let at = |x: usize, y: usize| square.pixels.get(y * 16 + x).copied();
+            assert_eq!(at(0, 0), Some(Color32::WHITE), "{model:?}");
+            assert_eq!(at(15, 15), Some(Color32::BLACK), "{model:?}");
+        }
+        // its picture stays small however big the square is drawn
+        assert_eq!(model_square_image(ColourModel::Oklab, 0.2, 4000).size, [MODEL_SQUARE, MODEL_SQUARE]);
+        // HLS's middle row is the pure hue at the right, where HSB's top row has it
+        let hls = image(ColourModel::Hls);
+        let pure = hls.pixels.get(7 * 16 + 15).copied().unwrap_or_default();
+        assert!(pure.r() > 220 && pure.g() < 40 && pure.b() < 40, "{pure:?}");
     }
 
     #[test]

@@ -92,7 +92,8 @@ fn fs_overlay(i: Out) -> @location(0) vec4<f32> {
     } else {
         // as a stamp's: filling its quad, at the same mip level
         let uv = i.q * i.fill * 0.5 + 0.5;
-        let lod = clamp(log2(128.0 / (r / zoom + QUAD_REACH)), 0.0, ou.shape_lod_cap);
+        let side = f32(textureDimensions(shapes).x);
+        let lod = clamp(log2(0.5 * side / (r / zoom + QUAD_REACH)), 0.0, ou.shape_lod_cap + log2(side / 256.0));
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
         a = select(0.0, textureSampleLevel(shapes, shape_smp, uv, ou.shape, lod).r, inside);
     }

@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -66,7 +67,6 @@ import io.github.artcraftandroid.procraft.core.HalftoneKind
 import io.github.artcraftandroid.procraft.core.NoiseKind
 import io.github.artcraftandroid.procraft.core.PerspectiveKind
 import io.github.artcraftandroid.procraft.core.PluginControl
-import io.github.artcraftandroid.procraft.core.PluginInfo
 import io.github.artcraftandroid.procraft.core.PluginSlider
 import io.github.artcraftandroid.procraft.core.pluginSliderAlong
 import io.github.artcraftandroid.procraft.core.pluginSliderAt
@@ -102,20 +102,29 @@ private fun MenuRow(label: String, onTap: () -> Unit) {
 fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
     val filters = remember { vm.plugins.filters() }
     var showFilters by remember { mutableStateOf(false) }
+    androidx.activity.compose.BackHandler(enabled = showFilters) { showFilters = false }
     Popover(330.dp, arrowX, modifier) {
         // a 52 header, the title's capitals from 28.5 below the panel's top; the groups 8 into the
         // list under it
-        Box(Modifier.fillMaxWidth().height(52.dp).padding(start = 24.dp, top = 22.5.dp)) {
-            Text(if (showFilters) "Plugins" else "Adjustments", color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        if (showFilters) {
+            // turned to the filters, the way back is the panels' own, the title beside it
+            Row(Modifier.fillMaxWidth().height(52.dp).padding(start = 8.dp, top = 17.dp, bottom = 1.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(44.dp, 34.dp).clickable { showFilters = false }, contentAlignment = Alignment.Center) {
+                    Icon(PcIcons.ChevronLeft, contentDescription = "Back", tint = Pc.PanelTitle, modifier = Modifier.size(22.dp))
+                }
+                Text("Plugins", color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            }
+        } else {
+            Box(Modifier.fillMaxWidth().height(52.dp).padding(start = 24.dp, top = 22.5.dp)) {
+                Text("Adjustments", color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            }
         }
         Column(
             Modifier.verticalScroll(rememberScrollState()).padding(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (showFilters) {
-                MenuGroup(listOf<PluginInfo?>(null) + filters) { filter ->
-                    if (filter == null) MenuRow("Adjustments") { showFilters = false } else MenuRow(filter.name) { vm.startPluginFilter(filter) }
-                }
+                MenuGroup(filters) { filter -> MenuRow(filter.name) { vm.startPluginFilter(filter) } }
             } else {
                 for (group in Adjustment.groups) {
                     MenuGroup(group) { a -> MenuRow(a.label) { vm.startAdjustment(a) } }

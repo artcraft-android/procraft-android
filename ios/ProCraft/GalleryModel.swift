@@ -510,6 +510,9 @@ final class GalleryModel {
         if case .model = kind {
             return .said("Painting on models isn't here yet.")
         }
+        if kind == .modelArtwork {
+            return .said("Painting on models isn't here yet.")
+        }
         if tag == "8BPS" {
             return bringPsd(copy, title: title, folder: folder)
         }

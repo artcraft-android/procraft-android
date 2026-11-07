@@ -1,9 +1,9 @@
 //! Touch position offset: moves where a stroke lands by two sliders, for a pen whose ink doesn't
-//! sit under its tip. It's a patch, not part of the app: it builds to a WebAssembly module, and
-//! `tools/pack_patch.py` makes a `.procraftplugin` file of it.
+//! sit under its tip. It's a plugin, not part of the app: it builds to a WebAssembly module, and
+//! `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
 //! The app calls the two functions below and gives it nothing else. They are its whole interface,
-//! written down at the top of `crates/core/src/patch_run.rs`.
+//! written down at the top of `crates/core/src/plugin_run.rs`.
 
 #![no_std]
 

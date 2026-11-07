@@ -132,6 +132,7 @@ pub struct Interface {
     /// show it, or open Layers).
     blocked: Option<(Blocked, u64)>,
     blocked_alert: Alert,
+    model_warning_alert: Alert,
     /// Share's PDF asks how well it keeps its pictures first (for this format).
     pdf_alert: Alert,
     pdf_for: Option<Format>,
@@ -233,6 +234,7 @@ impl Default for Interface {
             styled: false,
             blocked: None,
             blocked_alert: Alert::default(),
+            model_warning_alert: Alert::default(),
             pdf_alert: Alert::default(),
             pdf_for: None,
             plugin_alert: Alert::default(),
@@ -286,6 +288,8 @@ impl Interface {
 
     /// `session` is shown now (at `scale` window pixels a point): it paints in the colour chosen.
     pub fn opened(&mut self, session: &Arc<CanvasSession>, scale: f32) {
+        // each artwork its own Reference window, none if it never had one
+        self.reference.restore(session);
         self.model = session.model_info().is_some();
         self.lighting.forget();
         // brush files given while no canvas was open
@@ -293,6 +297,7 @@ impl Interface {
         session.set_touch_layer_opacity(None);
         if self.model {
             crate::lighting::light_model(session);
+            self.model_warnings(session);
         }
         self.layers.forget();
         self.text.forget();
@@ -317,6 +322,7 @@ impl Interface {
     /// The artwork is put away (to the gallery, for another, or with the window): brushes coming
     /// in from files are waited for, Recolor ends keeping what it filled, and Layer Opacity ends.
     pub fn closing(&mut self, session: &CanvasSession) {
+        self.reference.keep(session);
         self.library.finish_importing(session);
         self.end_recolor(session);
         session.set_touch_layer_opacity(None);
@@ -343,7 +349,7 @@ impl Interface {
         crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
     }
 
-    /// The patches and plugins, which say how big the interface shows.
+    /// The plugins, which say how big the interface shows.
     pub fn plugins(&self) -> &procraft_core::Plugins {
         &self.prefs.plugins
     }
@@ -719,7 +725,11 @@ impl Interface {
             self.actions_panel.closed();
         }
         self.transform.show(&ctx, &mut self.look, session, &mut backdrops);
-        self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT);
+        crate::model_picture::show(&ctx, &mut self.look, session);
+        if let Some(on) = self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT, self.model) {
+            self.prefs.selection_x_ray = on;
+            self.prefs.keep();
+        }
         if let Some(asked) = self.adjustments.show(
             &ctx,
             &mut self.look,
@@ -732,7 +742,10 @@ impl Interface {
             self.adjustment_asked(session, asked);
         }
         let hold = std::time::Duration::from_secs_f32(self.gestures.delay(GesturePurpose::Eyedropper).max(0.0));
-        match self.reference.show(&ctx, &mut self.look, session, hold) {
+        let picked = self.reference.show(&ctx, &mut self.look, session, hold);
+        // kept with the artwork as it changes, a toggle elsewhere last frame included
+        self.reference.keep(session);
+        match picked {
             Some(crate::reference::Picked::Moving { at, side, rgba, rgb }) => {
                 self.overlays.pick_reference(&ctx, at, side, &rgba, rgb);
             }
@@ -757,6 +770,7 @@ impl Interface {
         self.layer_choice(&ctx, session);
         self.quick_menu(&ctx, session);
         self.blocked_alert(&ctx, session);
+        _ = self.model_warning_alert.show(&ctx, &mut self.look);
         self.pdf_quality_alert(&ctx);
         self.plugin_alert(&ctx);
         self.export_card.show(&ctx, &mut self.look);
@@ -1260,6 +1274,14 @@ impl Interface {
     /// Layer Select at window point (`x`, `y`): the top layer drawn there becomes current, and
     /// the others drawn there are listed to choose from.
     fn layer_select(&mut self, ctx: &egui::Context, session: &CanvasSession, x: f32, y: f32) {
+        // on a model, the mesh there is picked
+        if self.model && !session.model_flat() {
+            if let Some(said) = session.pick_submesh_at(x, y) {
+                self.layers.follow_picked_mesh(session);
+                self.overlays.notice(said, false);
+            }
+            return;
+        }
         let ids = session.layers_at(x, y);
         let Some(&top) = ids.first() else {
             crate::files::say("Nothing is drawn there.");
@@ -1382,13 +1404,10 @@ impl Interface {
             QuickAction::FillLayer => _ = id.map(|id| session.fill_layer(id)),
             QuickAction::SelectLayer => _ = id.map(|id| session.select_layer_contents(id)),
             QuickAction::AlphaLock => _ = current.map(|l| session.set_layer_alpha_lock(l.id, !l.alpha_lock)),
-            QuickAction::LayerVisibility => _ = current.map(|l| session.set_layer_visible(l.id, !l.visible)),
+            QuickAction::LayerVisibility => _ = current.map(|l| session.tap_visibility(l.id)),
             QuickAction::Solo => {
-                if let Some(id) = id {
-                    let on = session.solo() != Some(id);
-                    if session.set_solo(on.then_some(id)) {
-                        self.overlays.notice(if on { "Solo visibility on" } else { "Solo visibility off" }, false);
-                    }
+                if let Some(said) = id.and_then(|id| session.hold_visibility(id)) {
+                    self.overlays.notice(said, false);
                 }
             }
             QuickAction::Copy => self.copy_layer(session),
@@ -1732,7 +1751,11 @@ impl Interface {
             // (a mask that takes what is pasted has no use for a copy of the picture)
             Some(Pasted::Picture { image, private: false }) if session.paste_picture_into_mask(image.clone()) => {}
             Some(Pasted::Picture { image, private }) => {
-                if session.insert_image(image, private).is_some() {
+                if self.model && !session.model_flat() {
+                    if !session.model_picture_begin(image, true) {
+                        crate::files::no_room(session);
+                    }
+                } else if session.insert_image(image, private).is_some() {
                     self.toggle_transform(session);
                 } else {
                     crate::files::no_room(session);
@@ -1748,6 +1771,12 @@ impl Interface {
     fn paste_own(&mut self, session: &CanvasSession, private: bool) {
         self.open = None;
         let Some(image) = self.clipboard.clone() else { return };
+        if self.model && !session.model_flat() {
+            if !session.model_picture_begin(image, false) {
+                crate::files::no_room(session);
+            }
+            return;
+        }
         let pasted = if private { session.paste_private(image) } else { session.paste(image) };
         if pasted.is_none() {
             crate::files::no_room(session);
@@ -1789,6 +1818,24 @@ impl Interface {
                 format!("\u{201c}{}\u{201d} holds no layers to change.", l.name),
                 &crate::icons::FOLDER,
                 None,
+            ),
+            Blocked::MeshHidden => (
+                "Mesh is hidden",
+                format!(
+                    "\u{201c}{}\u{201d} can't be painted while it is hidden.",
+                    session.meant_mesh_name().unwrap_or_default()
+                ),
+                &crate::icons::EYE_STRUCK,
+                Some("Show"),
+            ),
+            Blocked::MeshLocked => (
+                "Mesh is locked",
+                format!(
+                    "\u{201c}{}\u{201d} can't be painted while it is locked.",
+                    session.meant_mesh_name().unwrap_or_default()
+                ),
+                &crate::icons::PAGE_LOCKED,
+                Some("Unlock"),
             ),
         };
         self.blocked = Some((why, l.id));
@@ -1845,7 +1892,7 @@ impl Interface {
     /// being told something.
     pub fn plugin_alert(&mut self, ctx: &egui::Context) {
         if let Some(said) = self.prefs.plugins.take_moved_notice() {
-            self.plugin_alert.tell("Now a patch", &said, None);
+            self.plugin_alert.tell("Now a plugin", &said, None);
         }
         let Some(answer) = self.plugin_alert.show(ctx, &mut self.look) else { return };
         let Some(bytes) = self.plugin_file.take().filter(|_| answer == Answer::Action) else { return };
@@ -1855,6 +1902,25 @@ impl Interface {
         }
     }
 
+    /// Says what a model newly opened may not paint well with.
+    fn model_warnings(&mut self, session: &CanvasSession) {
+        let warnings = session.take_model_warnings();
+        if warnings.is_empty() {
+            return;
+        }
+        let names: Vec<String> = warnings.into_iter().map(procraft_core::model_warning_name).collect();
+        self.model_warning_alert.ask(Asking {
+            title: "Unsupported model features".into(),
+            message: format!("Painting on this model may not go as expected because of:\n{}", names.join("\n")),
+            action: "OK".into(),
+            icon: None,
+            destructive: false,
+            extra: None,
+            first: None,
+            alone: true,
+        });
+    }
+
     /// The blocked alert, while it shows: unlock or show the layer, or open Layers.
     fn blocked_alert(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let Some(answer) = self.blocked_alert.show(ctx, &mut self.look) else { return };
@@ -1862,6 +1928,7 @@ impl Interface {
         match answer {
             Answer::Extra if why == Blocked::Locked => _ = session.set_layer_locked(id, false),
             Answer::Extra if why == Blocked::Hidden => _ = session.set_layer_visible(id, true),
+            Answer::Extra if matches!(why, Blocked::MeshHidden | Blocked::MeshLocked) => session.free_meant_meshes(),
             Answer::Action => self.open = Some(Popover::Layers),
             _ => {}
         }
@@ -2540,7 +2607,12 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
             let rgba = picture.to_rgba8();
             let image =
                 procraft_core::ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
-            Inserted::Picture(session.insert_image(image, private).is_some())
+            let on_model = session.model_info().is_some() && !session.model_flat();
+            Inserted::Picture(if on_model {
+                session.model_picture_begin(image, true)
+            } else {
+                session.insert_image(image, private).is_some()
+            })
         }
         Err(_) => Inserted::Failed("This picture can't be opened."),
     }

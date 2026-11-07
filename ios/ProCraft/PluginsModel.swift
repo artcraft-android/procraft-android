@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// How big the interface shows, as a patch says (1: as measured). SwiftUI has no density to turn,
+/// How big the interface shows, as a plugin says (1: as measured). SwiftUI has no density to turn,
 /// so each screen is laid out in a window smaller or larger by this and scaled to fill the real one
 /// (`sized`): their points are this much bigger than the window's. A view drawing pixels (the
 /// canvas's) is scaled with them, and takes this many more pixels to its point to stay at the
@@ -16,7 +16,7 @@ final class Interface {
     /// The real window, in its own points.
     private(set) var window = CGSize.zero
 
-    /// Asks the patches again, for the window as it stands.
+    /// Asks the plugins again, for the window as it stands.
     func ask() {
         guard window.width > 0, window.height > 0 else { return }
         let asked = PluginsModel.shared.store.interfaceScale(width: Float(window.width), height: Float(window.height))
@@ -31,7 +31,7 @@ final class Interface {
         }
         let was = scale
         ask()
-        // a patch may fit itself to the window: what hit-tests the canvas's handles goes with it
+        // a plugin may fit itself to the window: what hit-tests the canvas's handles goes with it
         if scale != was {
             PluginsModel.shared.onChange()
         }
@@ -75,8 +75,8 @@ extension View {
     }
 }
 
-/// The patches and the plugins kept in the app's folder, each value kept as text, as the core reads
-/// it; and what their two pages and the one screen that asks about a file draw.
+/// The plugins kept in the app's folder, each value kept as text, as the core reads it; and what
+/// their page and the one screen that asks about a file draw.
 @Observable
 final class PluginsModel {
     static let shared = PluginsModel()
@@ -84,11 +84,10 @@ final class PluginsModel {
     private static let keptKey = "pluginValues"
 
     @ObservationIgnored let store: Plugins
-    private(set) var patches: [PluginInfo] = []
     private(set) var plugins: [PluginInfo] = []
-    /// Goes up with any change that may move what a patch answers, for what asks it again.
+    /// Goes up with any change that may move what a plugin answers, for what asks it again.
     private(set) var changes = 0
-    /// Words for someone who changed a setting that now comes as a patch, said once.
+    /// Words for someone who changed a setting that now comes as a plugin, said once.
     private(set) var movedNotice: String?
     /// A plugin file waiting on the one screen that asks about it, and what it holds.
     private(set) var offer: PluginOffer?
@@ -114,9 +113,8 @@ final class PluginsModel {
         UserDefaults.standard.set(kept, forKey: Self.keptKey)
     }
 
-    /// The two lists as they stand: a patch may have stopped on a stroke since they were read.
+    /// The list as it stands: a plugin may have stopped on a stroke since it was read.
     func read() {
-        patches = store.patches()
         plugins = store.plugins()
     }
 
@@ -131,7 +129,7 @@ final class PluginsModel {
         movedNotice = nil
     }
 
-    /// Applies or unapplies a patch: it goes on or off its hooks at once, and its values wait for it.
+    /// Turns a plugin on or off: it goes on or off its hooks at once, and its values wait for it.
     func setOn(_ plugin: PluginInfo, _ on: Bool) {
         guard store.setOn(id: plugin.id, on: on) else { return }
         keep(plugin.onKey, on ? "true" : "false")

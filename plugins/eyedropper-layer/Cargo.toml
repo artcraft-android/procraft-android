@@ -1,10 +1,10 @@
 [package]
-name = "touch-offset"
+name = "eyedropper-layer"
 version = "1.0.0"
 edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "A patch for ProCraft: moves where a stroke lands by two sliders"
+description = "A plugin for ProCraft: the eyedropper picks from the current layer alone"
 
 [lib]
 crate-type = ["cdylib"]

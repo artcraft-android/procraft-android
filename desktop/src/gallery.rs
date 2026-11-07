@@ -2117,6 +2117,18 @@ impl Played {
 /// The frames of the artwork in `dir`, at no more than `side` pixels and [`PLAYED_MOST`] together.
 fn read_frames(dir: String, side: u32) -> Option<PlayedFrames> {
     let session = procraft_core::CanvasSession::open(dir).ok()?;
+    // a model goes round
+    if session.model_info().is_some() {
+        if !session.draw_without_window() {
+            return None;
+        }
+        let count = session.model_preview_frames();
+        let fit = (PLAYED_MOST / 4.0 / f64::from(count.max(1))).sqrt() as u32;
+        let pictures: Vec<_> = (0..count).filter_map(|i| session.model_preview_picture(i, side.min(fit))).collect();
+        let order = (0..pictures.len() as u32).collect();
+        let (fps, playback) = (session.model_preview_fps(), procraft_core::AnimationPlayback::Loop);
+        return Some(PlayedFrames { pictures, order, fps, playback });
+    }
     let settings = session.animation_settings().filter(|s| !s.pages)?;
     if !session.draw_without_window() {
         return None;

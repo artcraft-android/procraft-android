@@ -1416,7 +1416,7 @@ final class CanvasModel {
     /// What was cut or copied, on a new layer; a private one is left out of the gallery's thumbnail.
     func paste(isPrivate: Bool = false) {
         guard let image = clipboard else { return }
-        // through a patch it takes a moment on a big canvas: the screen doesn't wait for it
+        // through a plugin it takes a moment on a big canvas: the screen doesn't wait for it
         if !isPrivate, session.pastesIntoMask() {
             closePanels()
             let session = session
@@ -1839,6 +1839,8 @@ final class CanvasModel {
                 toggleVisible(b.layer)
             case .emptyGroup:
                 break
+            case .meshHidden, .meshLocked:
+                session.freeMeantMeshes()
             }
         }
         if openLayers {
@@ -2027,7 +2029,7 @@ final class CanvasModel {
     // MARK: keeping the artwork
 
     /// Watches for a failed autosave, told once until a save succeeds again, and for what stops away
-    /// from any touch: a patch or a smudge the GPU had no memory for, or its device lost. A patch's
+    /// from any touch: a plugin or a smudge the GPU had no memory for, or its device lost. A plugin's
     /// card says so too, once its page reads the list again.
     private func watchSaves() {
         let session = session

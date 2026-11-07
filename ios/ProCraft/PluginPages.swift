@@ -3,21 +3,19 @@ import SwiftUI
 /// The tag on a card.
 private var pluginTag: Color { Look.shared.light ? Color(argb: 0x1400_0000) : Color(argb: 0x1FFF_FFFF) }
 
-/// The patches, or the plugins, a page of the panel: a card each, drawn from what the list says of
-/// them.
+/// The plugins, a page of the panel: a card each, drawn from what the list says of them.
 struct PluginsPage: View {
     let model: CanvasModel
-    let patches: Bool
     let onBack: () -> Void
 
     @State private var plugins = PluginsModel.shared
     @State private var importing = false
 
     var body: some View {
-        let shown = patches ? plugins.patches : plugins.plugins
+        let shown = plugins.plugins
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
-                PageHeader(title: patches ? "Patches" : "Plugins", onBack: onBack)
+                PageHeader(title: "Plugins", onBack: onBack)
                 Spacer(minLength: 0)
                 Text(verbatim: "Import")
                     .font(.system(size: 17))
@@ -32,7 +30,7 @@ struct PluginsPage: View {
             ScrollView {
                 VStack(spacing: 20) {
                     if shown.isEmpty {
-                        Text(verbatim: "Nothing imported yet. Import a .procraftplugin file to add one.")
+                        Text(verbatim: "Nothing imported yet. Import a .procraft-plugin file to add one.")
                             .font(.system(size: 15))
                             .foregroundStyle(Pc.actionsRow)
                             .padding(16)
@@ -58,8 +56,8 @@ struct PluginsPage: View {
     }
 }
 
-/// A patch or plugin: its name and tag, what it does, what is the matter with it, its controls
-/// whatever they are, and the row that applies or removes it.
+/// A plugin: its name and tag, what it does, what is the matter with it, its controls whatever
+/// they are, and the rows that turn it on or off and remove it.
 private struct PluginCard: View {
     let model: CanvasModel
     let plugin: PluginInfo
@@ -115,22 +113,15 @@ private struct PluginCard: View {
         let plugins = PluginsModel.shared
         VStack(spacing: 0) {
             about
-            // an extra's always, a patch's once applied; a filter's are on its own panel
-            if plugin.on, plugin.problem == nil, plugin.kind != .filter {
+            // a filter's own controls are on its panel; what the card shows comes with the list
+            if plugin.on, plugin.problem == nil {
                 ForEach(plugin.controls.indices, id: \.self) { i in
                     line
                     control(plugin.controls[i])
                 }
             }
-            if plugin.kind == .patch {
-                line
-                RowView(row: .act(plugin.on ? "Unapply" : "Apply", action: { plugins.setOn(plugin, !plugin.on) }))
-            }
-            // a filter that stopped stays off until someone asks
-            if plugin.kind == .filter, !plugin.on {
-                line
-                RowView(row: .act("Turn on", action: { plugins.setOn(plugin, true) }))
-            }
+            line
+            RowView(row: .act(plugin.on ? "Turn off" : "Turn on", action: { plugins.setOn(plugin, !plugin.on) }))
             if plugin.source == .file {
                 line
                 RowView(row: .act("Remove", action: {
@@ -178,7 +169,7 @@ private struct PluginSliderRow: View {
 }
 
 /// The one screen that asks whether to import a plugin file: what it is, and what it can do. Also
-/// where a setting that has moved to a patch is said, once.
+/// where a setting that has moved to a plugin is said, once.
 struct PluginAlerts: View {
     @State private var plugins = PluginsModel.shared
     /// What went wrong keeping a file.
@@ -188,7 +179,7 @@ struct PluginAlerts: View {
         ZStack {
             AlertView(
                 content: plugins.movedNotice.map {
-                    AlertContent(title: "Now a patch", message: $0, action: "OK", destructive: false, alone: true)
+                    AlertContent(title: "Now a plugin", message: $0, action: "OK", destructive: false, alone: true)
                 },
                 onCancel: { plugins.movedNoticeRead() },
                 onAction: { plugins.movedNoticeRead() }
@@ -215,8 +206,7 @@ extension CanvasModel {
     /// The session goes by the plugins that reach a canvas.
     func applyPlugins() {
         let plugins = PluginsModel.shared.store
-        session.usePatches(plugins: plugins)
-        session.setFillGap(pixels: plugins.fillGap())
+        session.usePlugins(plugins: plugins)
         session.setInterfaceSize(size: Float(Interface.shared.scale))
     }
 

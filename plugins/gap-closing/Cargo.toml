@@ -1,10 +1,10 @@
 [package]
-name = "paste-into-masks"
+name = "gap-closing"
 version = "1.0.0"
 edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "A patch for ProCraft: Paste puts the picture's brightness into the current mask"
+description = "A plugin for ProCraft: ColorDrop keeps out of gaps in the lines that bound it"
 
 [lib]
 crate-type = ["cdylib"]

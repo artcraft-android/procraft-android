@@ -674,7 +674,12 @@ private fun StudioPad(vm: CanvasViewModel, modifier: Modifier) {
     val sphere = STUDIO_TABS.getOrNull(vm.studioTab)?.name == "Materials" || vm.pad3d
     androidx.compose.runtime.LaunchedEffect(sphere) { vm.showPadSphere(sphere) }
     Box(modifier.background(PadBehind)) {
-        androidx.compose.ui.viewinterop.AndroidView(factory = { PadSurfaceView(it, vm) }, modifier = Modifier.fillMaxSize())
+        // in a layout of its own, which clips it: Android 10 and 11 clear a surface's hole as far as
+        // its view is clipped, and the Compose holder doesn't clip, so all the window drawn so far went
+        androidx.compose.ui.viewinterop.AndroidView(
+            factory = { android.widget.FrameLayout(it).apply { addView(PadSurfaceView(it, vm)) } },
+            modifier = Modifier.fillMaxSize(),
+        )
         // drawn over the surface's hole until the pad has a frame of its own
         if (!vm.padShown) Box(Modifier.fillMaxSize().background(PadBehind))
         Row(Modifier.offset(21.dp, 21.dp).height(43.dp).onGloballyPositioned { vm.padButtonCentre = it.boundsInWindow().center.x }

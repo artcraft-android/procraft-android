@@ -93,7 +93,7 @@ fun BoxScope.ReferenceWindow(vm: CanvasViewModel) {
 }
 
 /** Touches here go no further: not to the picture under a bar. */
-private val Modifier.ownTouches get() = pointerInput(Unit) {
+private fun Modifier.ownTouches(): Modifier = pointerInput(Unit) {
     awaitEachGesture { awaitFirstDown(requireUnconsumed = false).consume() }
 }
 
@@ -112,11 +112,11 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
     val density = LocalDensity.current
     val config = LocalConfiguration.current
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let(vm::importReference) }
-    val picture = vm.referenceSize
+    val picture = vm.referenceShown
     val tall = TopBarHeight + picture.height + BottomBarHeight
-    // the first time: in the middle near the bottom of the screen
+    // the first time in the middle near the bottom of the screen; then kept on it, and no bigger
     SideEffect {
-        with(density) { vm.placeReference(config.screenWidthDp.dp.toPx(), config.screenHeightDp.dp.toPx(), tall.toPx()) }
+        with(density) { vm.placeReference(config.screenWidthDp.dp.toPx(), config.screenHeightDp.dp.toPx(), (TopBarHeight + BottomBarHeight).toPx()) }
     }
     val at = vm.referenceOffset.takeIf { it != Offset.Unspecified } ?: Offset.Zero
     // room around the window for the handles, which reach past its corners (touches outside a
@@ -130,7 +130,7 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
             // back; a finger moves it, two zoom and move it, a finger held still picks a colour
             // from it; touches here never reach the canvas under the window
             val shown = when (vm.referenceMode) {
-                CanvasViewModel.ReferenceMode.CANVAS -> vm.referenceCanvas
+                CanvasViewModel.ReferenceMode.CANVAS, CanvasViewModel.ReferenceMode.MODEL -> vm.referenceCanvas
                 CanvasViewModel.ReferenceMode.IMAGE -> vm.referenceImage
                 CanvasViewModel.ReferenceMode.FACE -> null
             }
@@ -160,7 +160,7 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                     }
                 }
                 when (vm.referenceMode) {
-                    CanvasViewModel.ReferenceMode.CANVAS -> Unit
+                    CanvasViewModel.ReferenceMode.CANVAS, CanvasViewModel.ReferenceMode.MODEL -> Unit
                     CanvasViewModel.ReferenceMode.IMAGE -> {
                         if (vm.referenceImage == null) {
                             Box(
@@ -189,7 +189,7 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                 )
             }.background(BarFill)
             val (topSlide, bottomSlide) = with(density) { -TopBarHeight.toPx() * (1f - barsShown) to (BottomBarHeight.toPx() + 1f) * (1f - barsShown) }
-            Box(Modifier.offset { IntOffset(0, topSlide.roundToInt()) }.fillMaxWidth().height(TopBarHeight).clipToBounds().overPicture(topSlide).ownTouches) {
+            Box(Modifier.offset { IntOffset(0, topSlide.roundToInt()) }.fillMaxWidth().height(TopBarHeight).clipToBounds().overPicture(topSlide).ownTouches()) {
                 Text("Reference", color = TitleInk, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.align(Alignment.TopStart).padding(start = 20.dp, top = 10.dp))
                 Row(Modifier.align(Alignment.CenterEnd).padding(end = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE && vm.referenceImage != null) {
@@ -206,14 +206,16 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
             }
             val bottomTop = with(density) { (tall - BottomBarHeight).toPx() } + bottomSlide
             Box(
-                Modifier.align(Alignment.BottomStart).offset { IntOffset(0, bottomSlide.roundToInt()) }.fillMaxWidth().height(BottomBarHeight).clipToBounds().overPicture(bottomTop).ownTouches,
+                Modifier.align(Alignment.BottomStart).offset { IntOffset(0, bottomSlide.roundToInt()) }.fillMaxWidth().height(BottomBarHeight).clipToBounds().overPicture(bottomTop).ownTouches(),
                 contentAlignment = Alignment.Center,
             ) {
                 Row(
                     Modifier.width(270.dp).height(35.dp).clip(CircleShape).background(SegmentTrack).padding(2.dp),
                     horizontalArrangement = Arrangement.spacedBy(11.dp),
                 ) {
-                    for ((mode, label) in listOf(CanvasViewModel.ReferenceMode.CANVAS to "Canvas", CanvasViewModel.ReferenceMode.IMAGE to "Image", CanvasViewModel.ReferenceMode.FACE to "Face")) {
+                    // on a model the third is the model itself
+                    val third = if (vm.modelOpen) CanvasViewModel.ReferenceMode.MODEL to "3D" else CanvasViewModel.ReferenceMode.FACE to "Face"
+                    for ((mode, label) in listOf(CanvasViewModel.ReferenceMode.CANVAS to "Canvas", CanvasViewModel.ReferenceMode.IMAGE to "Image", third)) {
                         val on = vm.referenceMode == mode
                         Box(
                             Modifier.weight(1f).fillMaxHeight().clip(CircleShape).background(if (on) Pc.Accent else Color.Transparent)

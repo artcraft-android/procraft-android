@@ -1,4 +1,4 @@
-//! A patch's code: a WebAssembly module, interpreted under caps on its time and memory. It gets no
+//! A plugin's code: a WebAssembly module, interpreted under caps on its time and memory. It gets no
 //! imports at all, no files, network or layers, so all it ever sees is the numbers a hook hands it
 //! and all it can do is hand some back.
 //!
@@ -14,22 +14,34 @@
 //!   time: `procraft_row_buffer(bytes: i32) -> i32` says where in its exported `memory` a row of that
 //!   many bytes can go, and for each row, written there, `procraft_paste_row(at: i32, width: i32)`
 //!   turns its `width` RGBA pixels (premultiplied, top to bottom) into what the mask holds, in place.
+//! - `procraft_fill_mask() -> i32`: for the hook `fill_mask`, whether a fill being let go has
+//!   anything to go through (not 0). If it has, it goes through on a thread of its own, a row at a
+//!   time, in bits: `procraft_fill_begin(width: i32, height: i32, seed_x: i32, seed_y: i32) -> i32`
+//!   says where in its exported `memory` a row goes, `width` bits in 64-bit words, low bit first.
+//!   `procraft_fill_row(y: i32)` takes each row written there, `procraft_fill_run() -> i32` works it
+//!   out (not 0: something comes out), and `procraft_fill_out(y: i32)` puts each row of what comes
+//!   out there. All it can do is take away: what isn't in the fill stays out of it, and the seed
+//!   stays in.
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
-//!   place in the manifest: each as the patch starts, then each as it changes. Needed if it has any.
+//!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::{Duration, Instant};
 
 use wasmi::errors::ErrorKind;
 use wasmi::{
     Config, EnforcedLimits, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode,
-    TypedFunc, ValType,
+    TypedFunc, TypedResumableCall, ValType, WasmParams, WasmResults,
 };
 
-/// The module's name in a patch's folder.
-pub(crate) const MODULE: &str = "patch.wasm";
+/// The module's name in a plugin's folder.
+pub(crate) const MODULE: &str = "plugin.wasm";
 /// The most a module may be, and may ask for as it runs, in bytes.
 pub(crate) const MOST_MODULE: usize = 1 << 20;
 const MOST_MEMORY: usize = 16 << 20;
+/// What a plugin on the fill hook may ask for: a few planes of a bit a pixel, for the fills
+/// [`MOST_FILL`] lets through.
+const MOST_FILL_MEMORY: usize = 64 << 20;
 const MOST_TABLE: usize = 10_000;
 const MOST_CALLS_DEEP: usize = 256;
 /// What it may spend, in roughly one a step: to start up, and on one sample or control. A sample
@@ -40,6 +52,16 @@ const SAMPLE_FUEL: u64 = 100_000;
 /// a fair conversion takes, and what never ends is stopped on its first row.
 const PIXEL_FUEL: u64 = 64;
 const ROW_FUEL: u64 = 10_000;
+/// What a fill may spend, to start with and by the pixel of its box, and how long it may take
+/// whatever it has left: a long thin maze across a third of a picture takes about 850 a pixel, and
+/// fuel goes at very different speeds by what is done with it. A long call goes in slices, the time
+/// looked at between them.
+const FILL_FUEL: u64 = 20_000_000;
+const FILL_PIXEL_FUEL: u64 = 1024;
+const MOST_FILL_TIME: Duration = Duration::from_secs(30);
+const FUEL_SLICE: u64 = 200_000_000;
+/// The most pixels of a fill's box that go through a plugin: a whole canvas of 8192 a side.
+pub(crate) const MOST_FILL: u64 = 8194 * 8194;
 /// How far a sample may be moved, window pixels: further was never meant.
 const MOST_MOVE: f32 = 16_384.0;
 /// The scales an interface can be used at: past these nobody could reach the page to undo it.
@@ -51,16 +73,22 @@ const INTERFACE_SCALE: &str = "procraft_interface_scale";
 const PASTE_MASK: &str = "procraft_paste_mask";
 const ROW_BUFFER: &str = "procraft_row_buffer";
 const PASTE_ROW: &str = "procraft_paste_row";
+const FILL_MASK: &str = "procraft_fill_mask";
+const FILL_BEGIN: &str = "procraft_fill_begin";
+const FILL_ROW: &str = "procraft_fill_row";
+const FILL_RUN: &str = "procraft_fill_run";
+const FILL_OUT: &str = "procraft_fill_out";
 const MEMORY: &str = "memory";
 const CONTROL: &str = "procraft_control";
 
-/// What a patch may step into, by the name a manifest gives it.
+/// What a plugin may step into, by the name a manifest gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Hook {
     Position,
     PickLayer,
     InterfaceScale,
     PasteMask,
+    FillMask,
 }
 
 impl Hook {
@@ -70,17 +98,19 @@ impl Hook {
             "pick_layer" => Some(Hook::PickLayer),
             "interface_scale" => Some(Hook::InterfaceScale),
             "paste_mask" => Some(Hook::PasteMask),
+            "fill_mask" => Some(Hook::FillMask),
             _ => None,
         }
     }
 
-    /// What it lets a patch do, for the screen that asks whether to import one.
+    /// What it lets a plugin do, for the screen that asks whether to import one.
     pub(crate) fn sentence(self) -> &'static str {
         match self {
-            Hook::Position => "This patch can change where your strokes land.",
-            Hook::PickLayer => "This patch can make the eyedropper read the current layer alone.",
-            Hook::InterfaceScale => "This patch can make the interface bigger or smaller.",
-            Hook::PasteMask => "This patch can put what you paste into the current mask.",
+            Hook::Position => "This plugin can change where your strokes land.",
+            Hook::PickLayer => "This plugin can make the eyedropper read the current layer alone.",
+            Hook::InterfaceScale => "This plugin can make the interface bigger or smaller.",
+            Hook::PasteMask => "This plugin can put what you paste into the current mask.",
+            Hook::FillMask => "This plugin can take parts out of a ColorDrop fill.",
         }
     }
 
@@ -99,13 +129,21 @@ impl Hook {
                 exports(module, PASTE_MASK, &[], &[ValType::I32])
                     && exports(module, ROW_BUFFER, &[ValType::I32], &[ValType::I32])
                     && exports(module, PASTE_ROW, &[ValType::I32, ValType::I32], &[])
-                    && module.exports().any(|export| export.name() == MEMORY && export.ty().memory().is_some())
+                    && has_memory(module)
+            }
+            Hook::FillMask => {
+                exports(module, FILL_MASK, &[], &[ValType::I32])
+                    && exports(module, FILL_BEGIN, &[ValType::I32; 4], &[ValType::I32])
+                    && exports(module, FILL_ROW, &[ValType::I32], &[])
+                    && exports(module, FILL_RUN, &[], &[ValType::I32])
+                    && exports(module, FILL_OUT, &[ValType::I32], &[])
+                    && has_memory(module)
             }
         }
     }
 }
 
-/// Why a patch stopped, or never ran. Each stays on its card, in plain words.
+/// Why a plugin stopped, or never ran. Each stays on its card, in plain words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stop {
     TooSlow,
@@ -136,7 +174,7 @@ fn stop_of(error: &wasmi::Error) -> Stop {
     }
 }
 
-/// `run`, a panic in the interpreter counting as a crash of the patch: a file must not take the
+/// `run`, a panic in the interpreter counting as a crash of the plugin: a file must not take the
 /// app down with it.
 fn guarded<T>(run: impl FnOnce() -> Result<T, Stop>) -> Result<T, Stop> {
     catch_unwind(AssertUnwindSafe(run)).unwrap_or(Err(Stop::Crashed))
@@ -186,7 +224,11 @@ fn exports(module: &Module, name: &str, params: &[ValType], results: &[ValType])
     })
 }
 
-/// Whether `bytes` is a module a patch on `hooks` can be: valid, wanting nothing from outside, and
+fn has_memory(module: &Module) -> bool {
+    module.exports().any(|export| export.name() == MEMORY && export.ty().memory().is_some())
+}
+
+/// Whether `bytes` is a module a plugin on `hooks` can be: valid, wanting nothing from outside, and
 /// exporting what it must (`controls`: it has some). Nothing in it runs.
 pub(crate) fn can_run(bytes: &[u8], hooks: &[Hook], controls: bool) -> bool {
     if bytes.len() > MOST_MODULE || !code_counts_hold(bytes) {
@@ -201,7 +243,50 @@ pub(crate) fn can_run(bytes: &[u8], hooks: &[Hook], controls: bool) -> bool {
     fits.unwrap_or(false)
 }
 
-/// A patch's module, instantiated, with what it has of ours to call.
+/// What the fill hook calls.
+struct FillCalls {
+    mask: TypedFunc<(), i32>,
+    begin: TypedFunc<(i32, i32, i32, i32), i32>,
+    row: TypedFunc<i32, ()>,
+    run: TypedFunc<(), i32>,
+    out: TypedFunc<i32, ()>,
+}
+
+/// `func` called on what is `left` of a long call's fuel, in slices, until `until`.
+fn long_call<P: WasmParams, R: WasmResults>(
+    store: &mut Store<StoreLimits>,
+    func: &TypedFunc<P, R>,
+    params: P,
+    left: &mut u64,
+    until: Instant,
+) -> Result<R, Stop> {
+    let give = (*left).min(FUEL_SLICE);
+    *left -= give;
+    store.set_fuel(give).map_err(|_| Stop::Damaged)?;
+    let mut call = func.call_resumable(&mut *store, params).map_err(|e| stop_of(&e))?;
+    loop {
+        match call {
+            TypedResumableCall::Finished(result) => {
+                // what the slice had left goes back
+                *left += store.get_fuel().unwrap_or(0);
+                return Ok(result);
+            }
+            TypedResumableCall::HostTrap(_) => return Err(Stop::Crashed),
+            TypedResumableCall::OutOfFuel(paused) => {
+                let need = paused.required_fuel();
+                if need > *left || *left == 0 || Instant::now() >= until {
+                    return Err(Stop::TooSlow);
+                }
+                let give = (*left).min(FUEL_SLICE.max(need));
+                *left -= give;
+                store.set_fuel(give).map_err(|_| Stop::Damaged)?;
+                call = paused.resume(&mut *store).map_err(|e| stop_of(&e))?;
+            }
+        }
+    }
+}
+
+/// A plugin's module, instantiated, with what it has of ours to call.
 pub(crate) struct Running {
     store: Store<StoreLimits>,
     position: Option<TypedFunc<(f32, f32), i64>>,
@@ -210,18 +295,36 @@ pub(crate) struct Running {
     paste_mask: Option<TypedFunc<(), i32>>,
     row_buffer: Option<TypedFunc<i32, i32>>,
     paste_row: Option<TypedFunc<(i32, i32), ()>>,
+    fill: Option<FillCalls>,
     memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
 }
 
 impl Running {
+    /// `bytes` started, under the caps of a plugin on `hooks`, and told `controls`.
+    pub(crate) fn start_on(bytes: &[u8], controls: &[f32], hooks: &[Hook]) -> Result<Running, Stop> {
+        let most_memory = if hooks.contains(&Hook::FillMask) { MOST_FILL_MEMORY } else { MOST_MEMORY };
+        Running::start_within(bytes, controls, most_memory)
+    }
+
     /// `bytes` started, under its caps, and told `controls`.
+    #[cfg(test)]
     pub(crate) fn start(bytes: &[u8], controls: &[f32]) -> Result<Running, Stop> {
+        Running::start_within(bytes, controls, MOST_MEMORY)
+    }
+
+    /// How much memory it has come to ask for, bytes.
+    #[cfg(test)]
+    pub(crate) fn memory_used(&self) -> usize {
+        self.memory.as_ref().map_or(0, |memory| memory.data(&self.store).len())
+    }
+
+    fn start_within(bytes: &[u8], controls: &[f32], most_memory: usize) -> Result<Running, Stop> {
         let mut running = guarded(|| {
             let engine = engine();
             let module = Module::new(&engine, bytes).map_err(|_| Stop::Damaged)?;
             let limits = StoreLimitsBuilder::new()
-                .memory_size(MOST_MEMORY)
+                .memory_size(most_memory)
                 .table_elements(MOST_TABLE)
                 .instances(1)
                 .memories(1)
@@ -239,6 +342,15 @@ impl Running {
             let paste_mask = instance.get_typed_func(&store, PASTE_MASK).ok();
             let row_buffer = instance.get_typed_func(&store, ROW_BUFFER).ok();
             let paste_row = instance.get_typed_func(&store, PASTE_ROW).ok();
+            let fill = (|| {
+                Some(FillCalls {
+                    mask: instance.get_typed_func(&store, FILL_MASK).ok()?,
+                    begin: instance.get_typed_func(&store, FILL_BEGIN).ok()?,
+                    row: instance.get_typed_func(&store, FILL_ROW).ok()?,
+                    run: instance.get_typed_func(&store, FILL_RUN).ok()?,
+                    out: instance.get_typed_func(&store, FILL_OUT).ok()?,
+                })
+            })();
             let memory = instance.get_memory(&store, MEMORY);
             let control = instance.get_typed_func(&store, CONTROL).ok();
             Ok(Running {
@@ -249,6 +361,7 @@ impl Running {
                 paste_mask,
                 row_buffer,
                 paste_row,
+                fill,
                 memory,
                 control,
             })
@@ -326,6 +439,59 @@ impl Running {
         })
     }
 
+    /// Whether it says a fill being let go has anything to go through.
+    pub(crate) fn fill_mask(&mut self) -> Result<bool, Stop> {
+        let Running { store, fill, .. } = self;
+        let Some(fill) = fill else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            fill.mask.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// `rows`, a fill of `width` × `height` from `seed`, a bit a pixel in words of 64, through it: a
+    /// long call, on fuel by its area. What comes out comes out of `rows`, which is no use if it
+    /// stops. Whether anything did.
+    pub(crate) fn fill(
+        &mut self,
+        rows: &mut [u64],
+        width: usize,
+        height: usize,
+        seed: (usize, usize),
+    ) -> Result<bool, Stop> {
+        let Running { store, fill, memory, .. } = self;
+        let (Some(fill), Some(memory)) = (fill.as_ref(), memory.as_ref()) else { return Ok(false) };
+        let words = width.div_ceil(64).max(1);
+        let until = Instant::now() + MOST_FILL_TIME;
+        let mut left = FILL_FUEL + FILL_PIXEL_FUEL * (width * height) as u64;
+        guarded(|| {
+            let size = (width as i32, height as i32, seed.0 as i32, seed.1 as i32);
+            let at = long_call(store, &fill.begin, size, &mut left, until)?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            let mut bytes = vec![0_u8; words * 8];
+            for (y, row) in rows.chunks_exact(words).enumerate() {
+                for (to, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(row) {
+                    *to = word.to_le_bytes();
+                }
+                memory.write(&mut *store, place, &bytes).map_err(|_| Stop::Nonsense)?;
+                long_call(store, &fill.row, y as i32, &mut left, until)?;
+            }
+            if long_call(store, &fill.run, (), &mut left, until)? == 0 {
+                return Ok(false);
+            }
+            for (y, row) in rows.chunks_exact_mut(words).enumerate() {
+                long_call(store, &fill.out, y as i32, &mut left, until)?;
+                memory.read(&*store, place, &mut bytes).map_err(|_| Stop::Nonsense)?;
+                for (word, from) in row.iter_mut().zip(bytes.as_chunks::<8>().0) {
+                    *word &= !u64::from_le_bytes(*from);
+                }
+            }
+            let kept = rows.get(seed.1 * words + seed.0 / 64).is_some_and(|word| word >> (seed.0 % 64) & 1 == 1);
+            if kept { Ok(true) } else { Err(Stop::Nonsense) }
+        })
+    }
+
     /// Where it says a sample at (x, y) lands.
     pub(crate) fn position(&mut self, x: f32, y: f32) -> Result<(f32, f32), Stop> {
         let Running { store, position, .. } = self;
@@ -344,7 +510,7 @@ impl Running {
 pub(crate) mod tests {
     use super::*;
 
-    /// Moves a sample by its two controls, as a patch of real use does.
+    /// Moves a sample by its two controls, as a plugin of real use does.
     pub(crate) const OFFSET: &str = r#"(module
         (global $x (mut f32) (f32.const 0))
         (global $y (mut f32) (f32.const 0))
@@ -371,7 +537,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_patch_moves_a_sample_by_what_its_controls_say() {
+    fn a_plugin_moves_a_sample_by_what_its_controls_say() {
         let bytes = wat::parse_str(OFFSET).unwrap();
         assert!(can_run(&bytes, &[Hook::Position], true));
         let mut running = Running::start(&bytes, &[3.0, -2.0]).unwrap();
@@ -553,6 +719,105 @@ pub(crate) mod tests {
         let mut rgba = vec![0_u8; 16];
         let mut running = started(&paste_module("(i32.const 65536)", "(unreachable)"));
         assert_eq!(running.paste_rows(&mut rgba, 4), Err(Stop::Crashed));
+    }
+
+    /// A fill module: `begin` says where rows go, `run` and `out` do what they are given.
+    pub(crate) fn fill_module(begin: &str, run: &str, out: &str) -> Vec<u8> {
+        let text = format!(
+            r#"(module (memory (export "memory") 2)
+                (func (export "procraft_fill_mask") (result i32) (i32.const 1))
+                (func (export "procraft_fill_begin") (param i32 i32 i32 i32) (result i32) {begin})
+                (func (export "procraft_fill_row") (param i32))
+                (func (export "procraft_fill_run") (result i32) {run})
+                (func (export "procraft_fill_out") (param $y i32) {out}))"#
+        );
+        wat::parse_str(text).unwrap()
+    }
+
+    pub(crate) const FILL_AT: &str = "(i32.const 65536)";
+    /// Takes out all of each row's first word but its lowest bit.
+    pub(crate) const TAKES_MOST: &str = "(i64.store (i32.const 65536) (i64.const -2))";
+
+    #[test]
+    fn a_fill_goes_through_a_row_at_a_time_and_only_loses_pixels() {
+        let bytes = fill_module(FILL_AT, "(i32.const 1)", TAKES_MOST);
+        assert!(can_run(&bytes, &[Hook::FillMask], false));
+        let mut running = started(&bytes);
+        assert_eq!(running.fill_mask(), Ok(true));
+        // two rows, a word each: what wasn't in the fill doesn't come in
+        let mut rows = vec![0b1011_u64, 0b0100];
+        assert_eq!(running.fill(&mut rows, 64, 2, (0, 0)), Ok(true));
+        assert_eq!(rows, [1, 0]);
+    }
+
+    #[test]
+    fn a_fill_nothing_comes_out_of_stays_as_it_was() {
+        let bytes = fill_module(FILL_AT, "(i32.const 0)", TAKES_MOST);
+        let mut rows = vec![0b1011_u64];
+        assert_eq!(started(&bytes).fill(&mut rows, 64, 1, (0, 0)), Ok(false));
+        assert_eq!(rows, [0b1011]);
+    }
+
+    #[test]
+    fn the_fill_hook_needs_its_memory_and_all_its_exports() {
+        let good = fill_module(FILL_AT, "(i32.const 0)", "");
+        assert!(can_run(&good, &[Hook::FillMask], false));
+        let no_memory = r#"(module
+            (func (export "procraft_fill_mask") (result i32) (i32.const 1))
+            (func (export "procraft_fill_begin") (param i32 i32 i32 i32) (result i32) (i32.const 0))
+            (func (export "procraft_fill_row") (param i32))
+            (func (export "procraft_fill_run") (result i32) (i32.const 0))
+            (func (export "procraft_fill_out") (param i32)))"#;
+        assert!(!can_run(&wat::parse_str(no_memory).unwrap(), &[Hook::FillMask], false));
+        let one_short = r#"(module (memory (export "memory") 1)
+            (func (export "procraft_fill_mask") (result i32) (i32.const 1)))"#;
+        assert!(!can_run(&wat::parse_str(one_short).unwrap(), &[Hook::FillMask], false));
+    }
+
+    #[test]
+    fn a_fill_that_goes_wrong_says_how() {
+        let says = |begin: &str, run: &str, out: &str| {
+            let mut rows = vec![!0_u64; 4];
+            started(&fill_module(begin, run, out)).fill(&mut rows, 64, 4, (0, 0))
+        };
+        assert_eq!(says(FILL_AT, "(loop (br 0)) (i32.const 1)", ""), Err(Stop::TooSlow));
+        assert_eq!(says(FILL_AT, "(unreachable)", ""), Err(Stop::Crashed));
+        assert_eq!(says("(unreachable)", "(i32.const 1)", ""), Err(Stop::Crashed));
+        assert_eq!(says(FILL_AT, "(i32.const 1)", "(unreachable)"), Err(Stop::Crashed));
+        // rows put nowhere
+        assert_eq!(says("(i32.const -8)", "(i32.const 1)", ""), Err(Stop::Nonsense));
+        assert_eq!(says("(i32.const 1000000)", "(i32.const 1)", ""), Err(Stop::Nonsense));
+        // what it can't be let do: take the seed itself
+        assert_eq!(says(FILL_AT, "(i32.const 1)", "(i64.store (i32.const 65536) (i64.const -1))"), Err(Stop::Nonsense));
+    }
+
+    #[test]
+    fn a_fill_gets_more_memory_than_other_hooks_and_no_more_than_that() {
+        let grows =
+            |pages: usize| fill_module(FILL_AT, &format!("(drop (memory.grow (i32.const {pages}))) (i32.const 0)"), "");
+        let fits = MOST_MEMORY / 65536 + 16;
+        let over = MOST_FILL_MEMORY / 65536;
+        let run = |bytes: &[u8], hooks: &[Hook]| {
+            let mut rows = vec![!0_u64];
+            Running::start_on(bytes, &[], hooks).unwrap().fill(&mut rows, 64, 1, (0, 0))
+        };
+        assert_eq!(run(&grows(fits), &[Hook::FillMask]), Ok(false));
+        assert_eq!(run(&grows(over), &[Hook::FillMask]), Err(Stop::Memory));
+        // a plugin on any other hook has the cap it always had
+        assert_eq!(run(&grows(fits), &[Hook::Position]), Err(Stop::Memory));
+    }
+
+    #[test]
+    fn a_long_call_is_held_to_its_fuel_by_the_fill_s_area() {
+        // about 5 a turn, so past what a small fill may spend, and well inside what a large one may
+        let body = "(local $i i32) (local.set $i (i32.const 6000000))
+            (loop (local.set $i (i32.sub (local.get $i) (i32.const 1))) (br_if 0 (local.get $i)))
+            (i32.const 0)";
+        let bytes = fill_module(FILL_AT, body, "");
+        let mut rows = vec![!0_u64; 1];
+        assert_eq!(started(&bytes).fill(&mut rows, 64, 1, (0, 0)), Err(Stop::TooSlow));
+        let mut rows = vec![!0_u64; 1024 * 16];
+        assert_eq!(started(&bytes).fill(&mut rows, 1024, 1024, (0, 0)), Ok(false));
     }
 
     #[test]

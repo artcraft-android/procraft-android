@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 
 use procraft_engine::brush::{
-    Author, Brush, FullGrain, GrainFile, Notches, PressureCurves, ResetPoint, Source, StockImage, StockImages,
+    Author, Brush, FullGrain, GrainFile, Notches, PressureCurves, ResetPoint, ShapeFile, Source, StockImage,
+    StockImages,
 };
 use procraft_engine::brushfile::{self, Texture};
 use procraft_engine::curve::Curve;
@@ -137,6 +138,10 @@ struct SavedBrush {
     /// What its file gave the grain beyond that, the image kept in a file of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     grain_file: Option<SavedGrainFile>,
+    /// A shape at more than that holds, as its file gave it: the id and side of the image, kept in
+    /// a file of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shape_full: Option<(u64, u32)>,
     /// The shipped shape and grain images it uses, where they differ from its origin's (-1: none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shape_image: Option<i64>,
@@ -413,6 +418,7 @@ impl State {
             grain_file: brush
                 .grain_file_now()
                 .map(|f| SavedGrainFile { width: f.width, full: f.full.as_ref().map(|g| (g.id, g.side)) }),
+            shape_full: brush.shape_file_now().map(|f| (f.full.id, f.full.side)),
             shape_image: image(brush.shape.image, base.shape.image),
             grain_image: image(brush.grain.image, base.grain.image),
             thumbnail: brush.thumbnail.as_deref().map(procraft_engine::base64::encode),
@@ -467,6 +473,10 @@ impl State {
             width: f.width,
             full: f.full.map(|(id, side)| FullGrain { id, side, pixels: None }),
         });
+        brush.shape_file = b
+            .shape_full
+            .zip(brush.shape.source.as_ref())
+            .map(|((id, side), source)| ShapeFile { source: source.id, full: FullGrain { id, side, pixels: None } });
         for (text, material) in [(&b.metallic_source, &mut brush.metallic), (&b.roughness_source, &mut brush.roughness)]
         {
             if let Some(text) = text {

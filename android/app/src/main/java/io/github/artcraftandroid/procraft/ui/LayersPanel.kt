@@ -6,6 +6,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -567,7 +569,7 @@ private fun SwipeRow(
                 // the only layer can't go: it is cleared instead
                 val alone = vm.layers.count { it.kind != LayerType.MASK } == 1
                 SwipeAction(if (alone) "Clear" else "Delete", SwipeDelete, Color.White) {
-                    if (alone) vm.clear(l) else vm.delete(l)
+                    if (alone) vm.clear(l) else vm.deleteAsking(l)
                     onOpen(false)
                 }
             }
@@ -677,7 +679,7 @@ private fun GroupRow(
             Icon(if (l.collapsed) PcIcons.ChevronRight else PcIcons.ChevronDown, contentDescription = if (l.collapsed) "Open" else "Close", tint = ink, modifier = Modifier.size(16.dp))
         }
         Box(Modifier.size(44.dp, GroupHeight).visibilityTouch(vm, l), contentAlignment = Alignment.Center) {
-            CheckBox(l.visible, if (l.current || l.picked) Color.White else Pc.CheckFill)
+            CheckBox(l.visible && !l.soloedOut, if (l.current || l.picked) Color.White else Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
     }
@@ -761,7 +763,7 @@ private fun LayerRow(
             }
         }
         Box(Modifier.size(44.dp, 47.dp).visibilityTouch(vm, l), contentAlignment = Alignment.Center) {
-            CheckBox(l.visible, if (selected || l.picked) Color.White else Pc.CheckFill)
+            CheckBox(l.visible && !l.soloedOut, if (selected || l.picked) Color.White else Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
     }
@@ -775,13 +777,23 @@ private val TileFill = Color(0xFF3B3B3D)
  * the layer; the one painted on (of the current layer) blue. A tap paints on it.
  */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun ChannelTray(vm: CanvasViewModel, l: LayerInfo) {
     Row(Modifier.fillMaxWidth().height(159.dp).background(TrayFill).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         listOf("Color", "Roughness", "Metallic").forEachIndexed { c, label ->
             val chosen = l.current && vm.channelTileChosen && vm.modelChannel == c
+            // held, a picture replaces what the channel holds
+            val replace = androidx.activity.compose.rememberLauncherForActivityResult(
+                androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
+            ) { uri -> uri?.let { vm.replaceMaterialMap(l, c, it) } }
             Column(
                 Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(6.dp)).background(if (chosen) Pc.Accent else TileFill)
-                    .clickable {
+                    .combinedClickable(
+                        onLongClick = {
+                            val images = androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly
+                            replace.launch(androidx.activity.result.PickVisualMediaRequest(images))
+                        },
+                    ) {
                         if (!l.current) vm.selectLayer(l.id)
                         vm.chooseChannelTile(c)
                     }
@@ -1100,8 +1112,45 @@ private val SubmeshTile = Color(0xFF434246)
 @Composable
 private fun SubmeshRow(vm: CanvasViewModel, index: Int, name: String, open: Boolean, shape: Shape) {
     val hidden = vm.submeshesHidden.getOrNull(index) == true
+    val locked = vm.submeshesLocked.getOrNull(index) == true
+    val picked = index in vm.activeSubmeshes
+    // slid left it shows Lock (or Unlock); a little right, it joins the meshes picked
+    val reach = with(LocalDensity.current) { (SwipeButton + 6.dp).toPx() }
+    val pickReach = with(LocalDensity.current) { PickReach.toPx() }
+    val offset = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    var opened by remember { mutableStateOf(false) }
+    Box(Modifier.clipToBounds()) {
+    if (offset.value < 0f) {
+        Row(Modifier.matchParentSize(), horizontalArrangement = Arrangement.End) {
+            SwipeAction(if (locked) "Unlock" else "Lock", SwipeFill, SwipeInk) {
+                vm.toggleSubmeshLocked(index)
+                opened = false
+                scope.launch { offset.animateTo(0f, Motion.swipeSettle()) }
+            }
+        }
+    }
     Row(
-        Modifier.fillMaxWidth().height(RowHeight).clip(shape).background(if (open) SubmeshOpen else Pc.LayerRow)
+        Modifier.offset { IntOffset(offset.value.roundToInt(), 0) }
+            .pointerInput(index, opened, reach) {
+                detectHorizontalDragGestures(
+                    onHorizontalDrag = { change, amount ->
+                        change.consume()
+                        scope.launch { offset.snapTo((offset.value + amount).coerceIn(-reach, if (opened) 0f else pickReach)) }
+                    },
+                    onDragEnd = {
+                        if (offset.value > pickReach / 2f) {
+                            vm.pickMoreSubmeshes(index)
+                            opened = false
+                        } else {
+                            opened = offset.value < -reach / 2f
+                        }
+                        scope.launch { offset.animateTo(if (opened) -reach else 0f, Motion.swipeSettle()) }
+                    },
+                    onDragCancel = { scope.launch { offset.animateTo(if (opened) -reach else 0f, Motion.swipeSettle()) } },
+                )
+            }
+            .fillMaxWidth().height(RowHeight).clip(shape).background(if (open || picked) SubmeshOpen else Pc.LayerRow)
             .clickable { vm.openSubmesh(index) },
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1109,6 +1158,7 @@ private fun SubmeshRow(vm: CanvasViewModel, index: Int, name: String, open: Bool
             vm.submeshThumbnails[index]?.let { Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(4.dp)) }
         }
         Text(name, color = Pc.PanelTitle, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = 29.dp, end = 6.dp))
+        if (locked) Icon(PcIcons.PageLocked, contentDescription = "Locked", tint = Pc.PanelTitle, modifier = Modifier.size(16.dp))
         Box(Modifier.offset(x = 8.dp).size(44.dp, 51.dp).clickable { vm.openSubmesh(index) }, contentAlignment = Alignment.Center) {
             Icon(if (open) PcIcons.ChevronDown else PcIcons.ChevronRight, contentDescription = if (open) "Close" else "Open", tint = Pc.PanelTitle, modifier = Modifier.size(16.dp))
         }
@@ -1116,6 +1166,7 @@ private fun SubmeshRow(vm: CanvasViewModel, index: Int, name: String, open: Bool
             CheckBox(!hidden, Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
+    }
     }
 }
 
@@ -1139,7 +1190,7 @@ private fun BackgroundRow(vm: CanvasViewModel) {
     }
 }
 
-/** A layer's visibility box: tapped, shown or hidden; held, shown alone (or every layer again). */
+/** A layer's visibility box: tapped, shown or hidden (or, with a layer shown alone, every layer again); held, shown alone (or every layer again). */
 private fun Modifier.visibilityTouch(vm: CanvasViewModel, l: LayerInfo): Modifier =
     pointerInput(l) { detectTapGestures(onTap = { vm.toggleVisible(l) }, onLongPress = { vm.toggleSolo(l) }) }
 

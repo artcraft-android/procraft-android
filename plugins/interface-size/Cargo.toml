@@ -1,10 +1,10 @@
 [package]
-name = "eyedropper-layer"
+name = "interface-size"
 version = "1.0.0"
 edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "A patch for ProCraft: the eyedropper picks from the current layer alone"
+description = "A plugin for ProCraft: the whole interface a little bigger or smaller"
 
 [lib]
 crate-type = ["cdylib"]

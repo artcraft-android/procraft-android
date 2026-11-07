@@ -370,6 +370,17 @@ private struct BlockedDialog: View {
                 title: "Group is empty", message: "\u{201C}\(name)\u{201D} holds no layers to change.",
                 action: "Open Layers", icon: PcIcons.folder, destructive: false
             )
+        // only on a model, which this app doesn't open yet
+        case .meshHidden:
+            return AlertContent(
+                title: "Mesh is hidden", message: "\u{201C}\(model.session.meantMeshName() ?? "")\u{201D} can't be painted while it is hidden.",
+                action: "Open Layers", icon: PcIcons.eyeStruck, destructive: false, extra: "Show"
+            )
+        case .meshLocked:
+            return AlertContent(
+                title: "Mesh is locked", message: "\u{201C}\(model.session.meantMeshName() ?? "")\u{201D} can't be painted while it is locked.",
+                action: "Open Layers", icon: PcIcons.pageLocked, destructive: false, extra: "Unlock"
+            )
         }
     }
 }

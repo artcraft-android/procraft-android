@@ -1,10 +1,10 @@
 [package]
-name = "interface-size"
+name = "paste-into-masks"
 version = "1.0.0"
 edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "A patch for ProCraft: the whole interface a little bigger or smaller"
+description = "A plugin for ProCraft: Paste puts the picture's brightness into the current mask"
 
 [lib]
 crate-type = ["cdylib"]
@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 [workspace]
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = true
 panic = "abort"
 strip = true

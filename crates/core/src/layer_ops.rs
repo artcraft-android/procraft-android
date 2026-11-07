@@ -135,7 +135,7 @@ impl CanvasSession {
             return false;
         }
         let [r, g, b] = st.color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
-        let mask = st.selection.clone();
+        let mask = st.reach_selection();
         // only what is selected changes, and with the alpha locked only what is painted: only
         // that is read back and filled
         let (w, h) = (st.doc.width(), st.doc.height());

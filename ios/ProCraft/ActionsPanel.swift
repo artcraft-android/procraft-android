@@ -85,8 +85,8 @@ struct ActionsPanel: View {
                 CursorPage { page = .main }
             case .pressure:
                 PressurePage(model: model) { page = .main }
-            case .patches, .plugins:
-                PluginsPage(model: model, patches: page == .patches) { page = .main }
+            case .plugins:
+                PluginsPage(model: model) { page = .main }
             }
         }
         .overlay(alignment: .topLeading) {
@@ -248,7 +248,6 @@ struct ActionsPanel: View {
                     .act("Gesture controls", action: {
                         withAnimation(Motion.studioIn) { model.gestureControlsOpen = true }
                     }),
-                    .act("Patches", action: { page = .patches }),
                     .act("Plugins", action: { page = .plugins }),
                 ],
                 [
