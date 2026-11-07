@@ -163,6 +163,9 @@ final class CanvasModel {
     private(set) var selecting = false
     /// The export card, and its Cancel tapped.
     var exportShown: ProgressShown?
+    /// The import card while a file's brushes come in: how far, and its name.
+    var importShown: ProgressShown?
+    @ObservationIgnored var importCancelled = false
     @ObservationIgnored var exportCancelled = false
     /// How a picture is being brought in; what waits for a PDF's quality; what a small alert says.
     var insertAsk: InsertAsk?
@@ -662,12 +665,36 @@ final class CanvasModel {
     /// set is shown.
     func importBrushes(from url: URL, then: (() -> Void)? = nil) {
         let name = url.lastPathComponent
+        // the import card: its pie creeps on while the file is read, full with a check once done
+        guard importShown == nil, exportShown == nil else {
+            then?()
+            return
+        }
+        importCancelled = false
+        importShown = ProgressShown(progress: 0, detail: name)
+        var creep: Float = 0
+        let creeping = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self, !self.importCancelled else { return }
+            creep += (0.95 - creep) * 0.03
+            self.importShown = ProgressShown(progress: creep, detail: name)
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let bytes = url.readPicked()
             let read = bytes.flatMap { readBrushes(bytes: $0, fileName: name) }
             then?()
             DispatchQueue.main.async {
+                creeping.invalidate()
                 guard let self else { return }
+                guard !self.importCancelled else {
+                    self.importShown = nil
+                    return
+                }
+                if read != nil {
+                    self.importShown = ProgressShown(progress: 1, done: true, detail: name)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { self.importShown = nil }
+                } else {
+                    self.importShown = nil
+                }
                 if bytes == nil {
                     self.showNotice("This file could not be read.", warning: true)
                 } else if let read {

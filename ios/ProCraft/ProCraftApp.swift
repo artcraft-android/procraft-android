@@ -421,6 +421,8 @@ enum ScreenCapture {
         case "page-assist":
             model.animationAssist.setAssist(true, pages: true)
             model.addLayer()
+        case "import-card":
+            model.importShown = ProgressShown(progress: 0.4, detail: "Inking.brushset")
         case "companion":
             UserDefaults.standard.set(true, forKey: "singleTouchCompanion")
             model.readAppSettings()

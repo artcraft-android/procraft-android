@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// A name edited where it is shown: focused with the keyboard up; done on the keyboard's return or
 /// when focus leaves, once.
@@ -29,6 +30,10 @@ struct InlineName: View {
             .onAppear {
                 value = name
                 focused = true
+                // the whole name chosen, so typing replaces it
+                DispatchQueue.main.async {
+                    UIApplication.shared.sendAction(#selector(UIResponder.selectAll(_:)), to: nil, from: nil, for: nil)
+                }
             }
     }
 

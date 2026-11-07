@@ -219,6 +219,11 @@ struct CanvasScreen: View {
                 ProgressCard(shown: model.exportShown, title: "Exporting", glyph: PcIcons.tabShare) {
                     model.exportCancelled = true
                 }
+                // its Cancel: the card goes at once, and the brushes read are left out
+                ProgressCard(shown: model.importShown, title: "Importing", glyph: PcIcons.tabImport) {
+                    model.importCancelled = true
+                    model.importShown = nil
+                }
                 AlertView(
                     content: model.pdfAsking != nil ? AlertContent(
                         title: "PDF quality", action: "Best", icon: PcIcons.page, destructive: false,
