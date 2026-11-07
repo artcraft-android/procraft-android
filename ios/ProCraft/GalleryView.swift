@@ -452,10 +452,91 @@ struct GalleryView: View {
     }
 
     var body: some View {
-        GeometryReader { place in
+        cards(catchers(GeometryReader { place in screenContent(place) }))
+            .onAppear {
+                model.onOpen = onOpen
+                model.reload()
+                #if DEBUG
+                    // the capture says what it wants once the window is up
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showForCapture() }
+                #endif
+            }
+            // an artwork just left is saved while the gallery shows: its new thumbnail read then
+            .onReceive(NotificationCenter.default.publisher(for: Gallery.keptNotification)) { note in
+                model.artworkSaved()
+                if let reason = note.object as? String {
+                    failure = saveFailureSaid(reason: reason)
+                }
+            }
+            .alert("Can't open the artwork", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(verbatim: failure ?? "")
+            }
+            .fileImporter(isPresented: $importAsked, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+                if case let .success(urls) = result {
+                    model.importFiles(urls)
+                }
+            }
+            .photosPicker(isPresented: $photoAsked, selection: $photo, matching: .images)
+            .onChange(of: photo) { _, item in
+                guard let item else { return }
+                photo = nil
+                Task { @MainActor in
+                    model.newFromPicture(try? await item.loadTransferable(type: Data.self))
+                }
+            }
+    }
+
+    /// What reads the gallery's touches on the window, and the gallery growing back from a stack.
+    private func catchers<Content: View>(_ content: Content) -> some View {
+        content
+            .background(Pc.galleryBackground.ignoresSafeArea())
+            // Preview has the whole screen, its close button where the status bar's battery is
+            .statusBarHidden(previewing != nil)
+            .background {
+                PinchCatcher(
+                    onBegin: startOpening(at:),
+                    onChange: { scale, middle in opening?.follow(scale: scale, at: middle) },
+                    onEnd: { opening?.end() }
+                )
+            }
+            .background { GalleryDragCatcher(model: model, shown: drag, canStart: quiet) }
+            .background { PressCatcher(model: model, presses: presses) { quiet() || selecting } }
+            .onChange(of: model.leftStack) {
+                regrown = 0
+                flown = 0
+                withAnimation(Motion.stackPop) {
+                    regrown = 1
+                    flown = 1
+                }
+            }
+    }
+
+    /// What shows over the whole gallery: Preview, the alerts, the cards.
+    private func cards<Content: View>(_ content: Content) -> some View {
+        content
+            .overlay {
+                ZStack {
+                    previews
+                }
+            }
+            .overlay { alerts }
+            .overlay {
+                ProgressCard(shown: model.exportShown, title: "Exporting", glyph: PcIcons.tabShare, onCancel: model.cancelExport)
+            }
+            .overlay {
+                ProgressCard(shown: model.importShown, title: "Importing", glyph: PcIcons.tabImport, onCancel: model.cancelImport)
+            }
+            .overlay {
+                ProgressCard(shown: recovery, title: "Gallery Recovery", glyph: PcIcons.tabImport, onCancel: nil)
+            }
+    }
+
+    private func screenContent(_ place: GeometryProxy) -> some View {
             let screen = Interface.shared.screen(place.size)
             let renamed = renaming != nil || about
-            ZStack(alignment: .topLeading) {
+            return ZStack(alignment: .topLeading) {
                 VStack(spacing: 0) {
                     header(screen.size)
                     if model.entries.isEmpty {
@@ -507,75 +588,6 @@ struct GalleryView: View {
             }
             .animation(Motion.studioIn, value: model.customOpen)
             .sized(screen)
-        }
-        .background(Pc.galleryBackground.ignoresSafeArea())
-        // Preview has the whole screen, its close button where the status bar's battery is
-        .statusBarHidden(previewing != nil)
-        .background {
-            PinchCatcher(
-                onBegin: startOpening(at:),
-                onChange: { scale, middle in opening?.follow(scale: scale, at: middle) },
-                onEnd: { opening?.end() }
-            )
-        }
-        .background { GalleryDragCatcher(model: model, shown: drag, canStart: quiet) }
-        .background { PressCatcher(model: model, presses: presses) { quiet() || selecting } }
-        .onChange(of: model.leftStack) {
-            regrown = 0
-            flown = 0
-            withAnimation(Motion.stackPop) {
-                regrown = 1
-                flown = 1
-            }
-        }
-        .overlay {
-            ZStack {
-                previews
-            }
-        }
-        .overlay { alerts }
-        .overlay {
-            ProgressCard(shown: model.exportShown, title: "Exporting", glyph: PcIcons.tabShare, onCancel: model.cancelExport)
-        }
-        .overlay {
-            ProgressCard(shown: model.importShown, title: "Importing", glyph: PcIcons.tabImport, onCancel: model.cancelImport)
-        }
-        .overlay {
-            ProgressCard(shown: recovery, title: "Gallery Recovery", glyph: PcIcons.tabImport, onCancel: nil)
-        }
-        .onAppear {
-            model.onOpen = onOpen
-            model.reload()
-            #if DEBUG
-                // the capture says what it wants once the window is up
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showForCapture() }
-            #endif
-        }
-        // an artwork just left is saved while the gallery shows: its new thumbnail read then
-        .onReceive(NotificationCenter.default.publisher(for: Gallery.keptNotification)) { note in
-            model.artworkSaved()
-            if let reason = note.object as? String {
-                failure = saveFailureSaid(reason: reason)
-            }
-        }
-        .alert("Can't open the artwork", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(verbatim: failure ?? "")
-        }
-        .fileImporter(isPresented: $importAsked, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            if case let .success(urls) = result {
-                model.importFiles(urls)
-            }
-        }
-        .photosPicker(isPresented: $photoAsked, selection: $photo, matching: .images)
-        .onChange(of: photo) { _, item in
-            guard let item else { return }
-            photo = nil
-            Task { @MainActor in
-                model.newFromPicture(try? await item.loadTransferable(type: Data.self))
-            }
-        }
     }
 
     #if DEBUG
