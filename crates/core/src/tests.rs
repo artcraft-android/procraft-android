@@ -5747,13 +5747,23 @@ fn a_layer_that_doesnt_show_takes_no_paint_and_says_why_until_shown() {
     s.set_brush_size(0.4);
     assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
     dot(&s, 80.0);
-    // Show ends solo; the stroke left nothing behind, and the next one paints
-    assert!(s.show_layer(top));
+    // Show ticks its own box only (ticked already: nothing), so solo stays and so does the alert
+    assert_eq!(s.show_layer(top), None);
+    assert_eq!((s.solo(), s.why_blocked()), (Some(first), Some(Blocked::Hidden)));
+    // its box tapped ends solo (as in the panel); the stroke left nothing behind, the next paints
+    assert!(s.tap_visibility(top).is_some());
     assert_eq!((s.solo(), s.why_blocked()), (None, None));
     assert_eq!([pixel(&s, 20, 50), pixel(&s, 80, 50)], [black, white]);
     dot(&s, 80.0);
     assert_eq!(pixel(&s, 80, 50), black);
-    assert!(!s.show_layer(top), "it shows already");
+    // hidden by its own box, Show ticks it: one step, told as a tap is
+    assert!(s.set_layer_visible(top, false));
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    assert_eq!(s.show_layer(top).as_deref(), Some("Show layer"));
+    assert_eq!(s.why_blocked(), None);
+    s.undo();
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    s.redo();
 
     // in a hidden group: visible itself, but not seen
     let group = s.group_picked();
@@ -5764,32 +5774,33 @@ fn a_layer_that_doesnt_show_takes_no_paint_and_says_why_until_shown() {
     s.set_brush_size(0.4);
     assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
     dot(&s, 50.0);
-    assert!(s.show_layer(top));
-    assert!(s.layers().iter().all(|l| l.visible));
+    // Show leaves the group hidden: the alert stays until the group's box is ticked
+    assert_eq!(s.show_layer(top), None);
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    assert!(s.set_layer_visible(group, true));
     assert_eq!(s.why_blocked(), None);
     assert_eq!(pixel(&s, 50, 50), white);
     dot(&s, 50.0);
     assert_eq!(pixel(&s, 50, 50), black);
-    // showing it is one step
     s.undo();
-    assert_eq!(s.why_blocked(), None, "the stroke undone");
     s.undo();
-    assert_eq!(s.why_blocked(), Some(Blocked::Hidden), "and the showing");
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden), "the stroke and the group's box undone");
     // the group itself current: its own alert, whatever hides it
     assert!(s.select_layer(group));
     assert_eq!(s.why_blocked(), Some(Blocked::GroupHidden));
     assert!(s.set_layer_visible(group, true));
     assert!(s.set_solo(Some(first)));
     assert_eq!(s.why_blocked(), Some(Blocked::GroupHidden));
-    assert!(s.show_layer(group));
-    assert_eq!((s.solo(), s.why_blocked()), (None, None));
+    assert_eq!(s.show_layer(group), None, "its box was ticked: solo stays");
+    assert!(s.set_solo(None));
+    assert_eq!(s.why_blocked(), None);
     assert!(s.set_layer_visible(group, false));
     assert!(s.select_layer(top));
 
     // a mask shown alone shows its layer with it, which takes paint
     let s = reopened(&s, "mask-alone");
     s.set_brush_size(0.4);
-    assert!(s.show_layer(top));
+    assert!(s.set_layer_visible(group, true));
     let mask = s.add_mask(top).unwrap();
     assert!(s.set_solo(Some(mask)));
     assert!(s.select_layer(top));
@@ -5839,6 +5850,30 @@ fn a_stroke_or_a_fill_with_a_group_current_says_so() {
     assert!(s.delete_layer(layer));
     assert!(s.select_layer(group));
     assert_eq!(s.why_blocked(), Some(Blocked::EmptyGroup));
+    assert_eq!(s.why_unpainted(), Some(Blocked::Group));
+}
+
+#[test]
+fn a_group_with_a_hidden_layer_in_it_takes_no_change_and_says_so() {
+    use crate::layers::{Blocked, HiddenBy};
+    let Some(s) = session(64, 64) else { return };
+    let lower = s.layers()[0].id;
+    let upper = s.add_layer();
+    assert!(s.pick_layer(lower));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.set_layer_visible(lower, false));
+    assert!(s.select_layer(group));
+    // the group's own box ticked: still hidden for a change, as a group, a stroke too
+    assert_eq!(s.why_blocked(), Some(Blocked::GroupHidden));
+    assert_eq!(s.why_unpainted(), Some(Blocked::GroupHidden));
+    assert_eq!(s.hidden_by(), Some(HiddenBy::Inside));
+    // the visible layer in it takes them
+    assert!(s.select_layer(upper));
+    assert_eq!((s.why_blocked(), s.hidden_by()), (None, None));
+    assert!(s.set_layer_visible(lower, true));
+    assert!(s.select_layer(group));
+    assert_eq!(s.why_blocked(), None);
     assert_eq!(s.why_unpainted(), Some(Blocked::Group));
 }
 

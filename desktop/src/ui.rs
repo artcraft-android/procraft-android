@@ -38,19 +38,17 @@ fn is_picture(path: &std::path::Path) -> bool {
     PICTURES.contains(&extension.as_str())
 }
 
-/// Why layer or group `l`, which doesn't show, takes no change: hidden itself, left out while
-/// another layer is shown alone, or in what is hidden.
-fn hidden_message(l: &procraft_core::LayerInfo) -> String {
-    let why = if !l.visible {
-        "it is hidden"
-    } else if l.soloed_out {
-        "another layer is shown alone"
-    } else if l.kind == procraft_core::LayerType::Mask {
-        "its layer is hidden"
-    } else {
-        "its group is hidden"
+/// Why layer or group `name`, which would hide a change, takes none, by what hides it (`by`).
+fn hidden_message(name: &str, by: Option<procraft_core::HiddenBy>) -> String {
+    use procraft_core::HiddenBy as H;
+    let why = match by {
+        Some(H::MaskLayer) => "its layer is hidden",
+        Some(H::Group) => "its group is hidden",
+        Some(H::Inside) => "a layer in it is hidden",
+        Some(H::Solo) => "another layer is shown alone",
+        Some(H::Itself) | None => "it is hidden",
     };
-    format!("\u{201c}{}\u{201d} can't be changed while {why}.", l.name)
+    format!("\u{201c}{name}\u{201d} can't be changed while {why}.")
 }
 /// A video's frames come in at the animation's frame rate, or this one; this many at most.
 const VIDEO_FPS: u32 = 15;
@@ -1831,7 +1829,7 @@ impl Interface {
             ),
             Blocked::Hidden | Blocked::GroupHidden => (
                 if why == Blocked::Hidden { "Layer is hidden" } else { "Group is hidden" },
-                hidden_message(&l),
+                hidden_message(&l.name, session.hidden_by()),
                 &crate::icons::EYE_STRUCK,
                 Some("Show"),
             ),
@@ -1955,8 +1953,12 @@ impl Interface {
         let Some((why, id)) = self.blocked.take() else { return };
         match answer {
             Answer::Extra if why == Blocked::Locked => _ = session.set_layer_locked(id, false),
-            // shown, whatever hid it (its box, a group's, another layer shown alone)
-            Answer::Extra if matches!(why, Blocked::Hidden | Blocked::GroupHidden) => _ = session.show_layer(id),
+            // its own box ticked (what else hides it stays)
+            Answer::Extra if matches!(why, Blocked::Hidden | Blocked::GroupHidden) => {
+                if let Some(said) = session.show_layer(id) {
+                    self.overlays.notice(said, false);
+                }
+            }
             Answer::Extra if matches!(why, Blocked::MeshHidden | Blocked::MeshLocked) => session.free_meant_meshes(),
             Answer::Action => self.open = Some(Popover::Layers),
             _ => {}

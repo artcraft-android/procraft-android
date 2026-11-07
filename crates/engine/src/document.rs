@@ -334,6 +334,21 @@ impl Layer {
     }
 }
 
+/// Why a change to a layer would go unseen (see [`Document::unseen`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unseen {
+    /// Its own box is off.
+    Itself,
+    /// A mask whose layer is hidden.
+    MaskLayer,
+    /// A group it is in is hidden.
+    Group,
+    /// A group with something hidden in it (a layer, a group or a mask, at any depth).
+    Inside,
+    /// Left out while another layer is shown alone, and so is every layer picked with it.
+    Solo,
+}
+
 /// Largest canvas edge, pixels.
 pub const MAX_CANVAS_EDGE: u32 = 16384;
 
@@ -670,6 +685,27 @@ impl Document {
     /// left out while another layer is shown alone.
     pub fn in_picture(&self, id: LayerId) -> bool {
         self.shows(id) && !self.soloed_out(id)
+    }
+
+    /// Why a change to layer `id` (a stroke, a transform, an adjustment...) would go unseen, if it
+    /// would, as such a change is told: its box is off; a mask on a hidden layer; in a hidden
+    /// group; a group with something hidden in it; or left out while another layer is shown
+    /// alone, and so is every layer picked with it.
+    pub fn unseen(&self, id: LayerId) -> Option<Unseen> {
+        let l = self.layer(id)?;
+        if !l.visible {
+            return Some(Unseen::Itself);
+        }
+        if self.mask_owner(id).is_some_and(|o| self.layer(o).is_none_or(|o| !o.visible)) {
+            return Some(Unseen::MaskLayer);
+        }
+        if !self.shows(id) {
+            return Some(Unseen::Group);
+        }
+        if l.kind == LayerKind::Group && self.layers.iter().any(|o| !o.visible && self.is_inside(o.id, id)) {
+            return Some(Unseen::Inside);
+        }
+        (self.soloed_out(id) && self.picked().iter().all(|p| self.soloed_out(*p))).then_some(Unseen::Solo)
     }
 
     /// The layer mask `id` belongs to, if it is a mask.
@@ -1984,6 +2020,52 @@ mod tests {
         // one shown alone on a hidden layer can't show: it opens with every layer shown
         d.set_visible(a, false);
         assert_eq!(d.clone().repaired().solo, None);
+    }
+
+    #[test]
+    fn a_change_goes_unseen_on_a_hidden_layer_in_a_hidden_group_or_a_group_holding_one() {
+        let mut d = Document::new(10, 10);
+        let below = d.current();
+        let a = d.add_layer();
+        let m = d.add_mask(a).unwrap();
+        assert!(d.set_current(a));
+        let inner = d.group_chosen().unwrap();
+        assert!(d.set_current(inner));
+        let outer = d.group_chosen().unwrap();
+        for id in [below, a, m, inner, outer] {
+            assert_eq!(d.unseen(id), None, "{id:?}");
+        }
+        // hidden itself; a mask on a hidden layer; anything in a hidden group, at any depth
+        d.set_visible(a, false);
+        assert_eq!(d.unseen(a), Some(Unseen::Itself));
+        assert_eq!(d.unseen(m), Some(Unseen::MaskLayer));
+        // a group with something hidden in it, at any depth, a mask too
+        assert_eq!(d.unseen(inner), Some(Unseen::Inside));
+        assert_eq!(d.unseen(outer), Some(Unseen::Inside));
+        d.set_visible(a, true);
+        d.set_visible(m, false);
+        assert_eq!(d.unseen(outer), Some(Unseen::Inside));
+        assert_eq!(d.unseen(a), None, "a hidden mask leaves its layer seen");
+        d.set_visible(m, true);
+        d.set_visible(outer, false);
+        assert_eq!(d.unseen(outer), Some(Unseen::Itself));
+        for id in [a, m, inner] {
+            assert_eq!(d.unseen(id), Some(Unseen::Group), "{id:?}");
+        }
+        d.set_visible(outer, true);
+        // left out while another is shown alone, unless a layer picked with it shows
+        d.solo = Some(below);
+        assert_eq!(d.unseen(a), Some(Unseen::Solo));
+        assert_eq!(d.unseen(below), None);
+        assert!(d.set_current(a));
+        assert!(d.toggle_pick(below));
+        assert_eq!(d.unseen(a), None);
+        d.solo = Some(outer);
+        assert!(d.set_current(below));
+        assert!(d.toggle_pick(a));
+        assert_eq!(d.unseen(below), None);
+        d.clear_picks();
+        assert_eq!(d.unseen(below), Some(Unseen::Solo));
     }
 
     #[test]

@@ -3144,7 +3144,7 @@ impl State {
     /// carried onto the current texture set's layer.
     pub(crate) fn scene_stroke_begin(&mut self, pointer: PointerKind, samples: &[PenSample]) {
         let current = self.doc.current();
-        if !self.doc.in_picture(current)
+        if self.doc.unseen(current).is_some()
             || self
                 .doc
                 .layer(current)
