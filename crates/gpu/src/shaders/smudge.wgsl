@@ -642,7 +642,10 @@ fn km_mix(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> {
         let ra = km_reflectance(la, i);
         let rb = km_reflectance(lb, i);
         let ks = (ca * (1.0 - ra) * (1.0 - ra) / (2.0 * ra) + cb * (1.0 - rb) * (1.0 - rb) / (2.0 * rb)) / (ca + cb);
-        let r = 1.0 + ks - sqrt(ks * ks + 2.0 * ks);
+        // 1 + ks - sqrt(ks² + 2ks), written without the subtraction of two nearly equal large
+        // numbers, which in 32 bits leaves a few percent where nothing should be reflected and
+        // greys saturated colours out
+        let r = 1.0 / (1.0 + ks + sqrt(ks * ks + 2.0 * ks));
         xyz = xyz + vec3<f32>(KM_CMF_X[i], KM_CMF_Y[i], KM_CMF_Z[i]) * r;
     }
     return km_encoded(KM_XYZ_RGB * xyz);
