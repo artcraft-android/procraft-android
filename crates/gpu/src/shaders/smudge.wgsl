@@ -393,7 +393,8 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
         let through = shape * clamp(2.0 * g, 0.0, 1.0);
         // never at nothing: what the shape or grain leaves out stays out at any strength
         let cut = max(1.0 - sqrt(st.alpha), 0.12);
-        let strongest = max(held, smoothstep(cut - 0.06, cut + 0.06, through));
+        // and how far each part goes over: all the way from two thirds strength up, less below
+        let strongest = max(held, smoothstep(cut - 0.06, cut + 0.06, through) * clamp(1.5 * st.alpha, 0.0, 1.0));
         amount[k] = strongest;
         out = mix(first, carried(p), strongest);
     }
