@@ -97,6 +97,9 @@ pub struct Interface {
     /// A Save As being written: where and at which edits, or why it couldn't be.
     pub saving: Option<std::sync::mpsc::Receiver<Result<(std::path::PathBuf, u64), String>>>,
     open: Option<Popover>,
+    /// The background's colour being picked in the colour panel: the brush's colour to give back
+    /// when it closes, and the last colour the background took.
+    background_pick: Option<(u32, [f32; 3])>,
     pub(crate) colours: Colours,
     drop: ColourDrop,
     library: Library,
@@ -215,6 +218,7 @@ impl Default for Interface {
             saving: None,
             inserting: Vec::new(),
             open: None,
+            background_pick: None,
             colours: Colours::default(),
             drop: ColourDrop::default(),
             library: Library::default(),
@@ -726,6 +730,7 @@ impl Interface {
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
         }
+        self.follow_background_pick(session);
         // the colour panel dragged out by its grabber: a window over the canvas until closed
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
         // the colour model chosen on the panel, kept; the panel works in the one kept
@@ -2097,6 +2102,33 @@ impl Interface {
         goes_on
     }
 
+    /// The background's row tapped: the colour panel opens on the background's colour, and what
+    /// is picked in it goes to the background (live, one undo step when it closes), the brush's
+    /// colour given back then, as Procreate does.
+    fn start_background_pick(&mut self, session: &CanvasSession) {
+        let b = session.background();
+        let brush = to_hex(self.colours.rgb());
+        self.colours.set_rgb(session, to_hex([b.r, b.g, b.b]));
+        self.background_pick = Some((brush, [b.r, b.g, b.b]));
+        self.open = Some(Popover::Colour);
+    }
+
+    /// Takes what the colour panel shows to the background while its colour is picked, and ends
+    /// the pick when the panel has closed.
+    fn follow_background_pick(&mut self, session: &CanvasSession) {
+        let Some((brush, last)) = self.background_pick else { return };
+        let now = self.colours.rgb();
+        let open = self.open == Some(Popover::Colour);
+        if !open {
+            session.set_background_color(now[0], now[1], now[2], true);
+            self.colours.set_rgb(session, brush);
+            self.background_pick = None;
+        } else if now != last {
+            session.set_background_color(now[0], now[1], now[2], false);
+            self.background_pick = Some((brush, now));
+        }
+    }
+
     /// The open panel, hanging from its button; a press anywhere else, or Escape, closes it.
     fn popover(
         &mut self,
@@ -2138,6 +2170,9 @@ impl Interface {
                 }
                 if std::mem::take(&mut self.layers.layer_opacity) {
                     self.start_layer_opacity(session);
+                }
+                if std::mem::take(&mut self.layers.pick_background) {
+                    self.start_background_pick(session);
                 }
                 shown
             }
