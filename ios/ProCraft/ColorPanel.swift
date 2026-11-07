@@ -965,21 +965,15 @@ private struct SwatchGrid: View {
                         if let rgb, droppable, c is BrushColor {
                             DropSwatch(model: model, rgb: rgb, onHold: { model.setSwatch(index, slot, nil) }) { c.setRgb(rgb) }
                         } else {
-                            Button {
+                            PressCell(onHold: rgb == nil ? nil : { model.setSwatch(index, slot, nil) }) {
                                 if let rgb {
                                     c.setRgb(rgb)
                                 } else {
                                     model.setSwatch(index, slot, c.rgb())
                                 }
-                            } label: {
+                            } content: {
                                 Rectangle().fill(rgb.map(canvasColor) ?? Pc.emptySlot)
                             }
-                            .buttonStyle(PressScaleStyle())
-                            .simultaneousGesture(LongPressGesture().onEnded { _ in
-                                if rgb != nil {
-                                    model.setSwatch(index, slot, nil)
-                                }
-                            })
                         }
                     }
                 }
@@ -1006,7 +1000,9 @@ private struct PaletteTiles: View {
         LazyVGrid(columns: Array(repeating: GridItem(.fixed(120), spacing: 0), count: across), spacing: 0) {
             ForEach(filled, id: \.slot) { tile in
                 let bright = max((tile.rgb >> 16) & 0xFF, (tile.rgb >> 8) & 0xFF, tile.rgb & 0xFF) >= 217
-                Button { c.setRgb(tile.rgb) } label: {
+                PressCell(onHold: { model.setSwatch(index, tile.slot, nil) }) {
+                    c.setRgb(tile.rgb)
+                } content: {
                     ZStack(alignment: .bottomLeading) {
                         canvasColor(tile.rgb)
                         // dark lettering on bright colours
@@ -1017,8 +1013,6 @@ private struct PaletteTiles: View {
                     }
                     .frame(width: 120, height: 120)
                 }
-                .buttonStyle(PressScaleStyle())
-                .simultaneousGesture(LongPressGesture().onEnded { _ in model.setSwatch(index, tile.slot, nil) })
             }
         }
     }
@@ -1451,16 +1445,25 @@ private struct DropSwatch: View {
     }
 }
 
-/// What it is on shrinks while pressed and springs back when let go, as swatches do.
-struct PressScaleStyle: ButtonStyle {
-    var pressed = Motion.swatchPressed
-    var press = Motion.swatchPress
-    var release = Motion.swatchRelease
+/// A swatch or tile: tapped `onTap`, held `onHold` (and then not tapped); it shrinks while pressed
+/// and springs back when let go.
+private struct PressCell<Content: View>: View {
+    var onHold: (() -> Void)?
+    let onTap: () -> Void
+    @ViewBuilder let content: () -> Content
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? pressed : 1)
-            .animation(configuration.isPressed ? press : release, value: configuration.isPressed)
+    @State private var pressed = false
+
+    var body: some View {
+        content()
+            .scaleEffect(pressed ? Motion.swatchPressed : 1)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+            .onLongPressGesture(minimumDuration: 0.5, maximumDistance: 10) {
+                onHold?()
+            } onPressingChanged: { down in
+                withAnimation(down ? Motion.swatchPress : Motion.swatchRelease) { pressed = down }
+            }
     }
 }
 
