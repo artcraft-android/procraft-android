@@ -1766,6 +1766,26 @@ fn a_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
 }
 
 #[test]
+fn a_stamps_little_bleed_still_lays_its_strong_parts_whole() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // one hard dry stamp at full pressure, with a little of the pressure's bleed (a brush file's
+    // 0.0075, as Procreate brushes often have): its middle, whole without the bleed, stays whole
+    let laid = |bleed: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+        canvas.add_stamps(&[Stamp { grain_bleed: bleed, ..dot(Vec2::new(32.0, 32.0), 24.0) }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 64, 32, 32)[3]
+    };
+    let (plain, bled) = (laid(0.0), laid(0.0075));
+    assert!(plain > 250 && bled > 250, "{plain} {bled}");
+}
+
+#[test]
 fn a_wet_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
