@@ -144,12 +144,14 @@ fn spoiled(keys: &std::collections::HashSet<egui::Key>, pointer_down: bool, scro
     pointer_down || scrolled || keys.iter().any(|key| !is_modifier(*key))
 }
 
-/// One row of the list laid out: its keys and what it does as galleys, and the action the keys can
-/// be bound to again (none where the platform keeps them).
+/// One row of the list laid out: its keys and what it does as galleys, the action the keys can be
+/// bound to again (none where the platform keeps them), and where it sits in the list, for its
+/// pointer target.
 struct LaidRow {
     keys: Arc<Galley>,
     does: Arc<Galley>,
     action: Option<KeyAction>,
+    index: usize,
 }
 
 /// The rows of a group laid out: its heading, its rows, and how tall it is.
@@ -163,6 +165,7 @@ struct Laid {
 fn lay_out(painter: &egui::Painter, groups: Vec<ShortcutGroup>) -> Vec<Laid> {
     let galley =
         |s: String, width: f32, colour: u32, weight: Weight| painter.layout(s, weight.font(14.0), argb(colour), width);
+    let mut index = 0;
     groups
         .into_iter()
         .map(|g| {
@@ -172,7 +175,9 @@ fn lay_out(painter: &egui::Painter, groups: Vec<ShortcutGroup>) -> Vec<Laid> {
                 .map(|r| {
                     let keys = galley(r.keys, KEYS_WIDTH - 12.0, TITLE, Weight::Medium);
                     let does = galley(r.does, COLUMN - KEYS_WIDTH, INK, Weight::Regular);
-                    LaidRow { keys, does, action: r.action }
+                    let row = LaidRow { keys, does, action: r.action, index };
+                    index += 1;
+                    row
                 })
                 .collect();
             let height = HEADING_HEIGHT
@@ -314,15 +319,19 @@ fn panel(
                             // between two rows' lines still chooses one of them
                             let slot = Rect::from_min_size(pos2(x, y), vec2(COLUMN, row_height + ROW_GAP));
                             let mut over = false;
-                            if closable && let Some(action) = row.action {
+                            if closable {
+                                // every row lights as one, to follow it across the columns; only
+                                // the ones the platform doesn't keep take a new key on a click
                                 let response =
-                                    ui.interact(slot, ui.scope_id().with(("shortcut", action.key())), Sense::click());
+                                    ui.interact(slot, ui.scope_id().with(("shortcut", row.index)), Sense::click());
                                 over = response.hovered();
-                                if over {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                }
-                                if response.clicked() {
-                                    *capturing = Some(action);
+                                if let Some(action) = row.action {
+                                    if over {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if response.clicked() {
+                                        *capturing = Some(action);
+                                    }
                                 }
                             }
                             if row.action.is_some() && *capturing == row.action {
@@ -399,6 +408,25 @@ mod tests {
         // 420 and 470 tall
         assert_eq!(heights(2), vec![vec![200.0, 220.0], vec![100.0, 80.0, 180.0, 110.0]]);
         assert_eq!(heights(3), vec![vec![200.0], vec![220.0, 100.0], vec![80.0, 180.0, 110.0]]);
+    }
+
+    #[test]
+    fn every_row_gets_its_own_pointer_target() {
+        // rows are hovered by index (they have no action to name them by), so two rows sharing one
+        // would light and click together
+        let ctx = egui::Context::default();
+        // the fonts arrive with the first frame; the rows cannot be laid out before them (and a
+        // frame's texture deltas must be taken or dropped on purpose)
+        let mut first = ctx.run_pass(egui::RawInput::default(), |_| {});
+        first.textures_delta.clear();
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("lay out")));
+        let laid = lay_out(&painter, procraft_core::key_shortcut_list(true, false));
+        let mut targets: Vec<usize> = laid.iter().flat_map(|group| &group.rows).map(|row| row.index).collect();
+        assert!(!targets.is_empty());
+        let rows = targets.len();
+        targets.sort_unstable();
+        targets.dedup();
+        assert_eq!(targets.len(), rows, "two rows share a pointer target");
     }
 
     #[test]
