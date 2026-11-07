@@ -109,7 +109,6 @@ private val ListCorner = 8.dp
 /** A group's row height, and how far in each level of group sits. */
 private val GroupHeight = 44.dp
 private val GroupIndent = 21.dp
-private val GroupLine = Color(0xFF4E4E4E)
 private val MaskOwnerRow = Color(0xFF2C5281)
 /** Swiping a row left shows these buttons, each this wide, this far apart. */
 private val SwipeButton = 82.dp
@@ -673,7 +672,8 @@ private fun GroupRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val ink = if (l.current || l.picked) Color.White else Pc.PanelTitle
-        Box(Modifier.padding(start = 4.dp).size(93.dp, 4.dp).clip(RoundedCornerShape(2.dp)).background(GroupLine))
+        // what the group holds, as Procreate shows it: a thumbnail of its layers, not a rule
+        Box(Modifier.padding(start = 4.dp)) { Thumb(vm, l, RoundedCornerShape(4.dp), width = 93.dp, height = 34.dp) }
         LockedName(l, ink, name, Modifier.weight(1f))
         Box(Modifier.offset(x = 8.dp).size(44.dp, GroupHeight).clickable(onClick = onToggle), contentAlignment = Alignment.Center) {
             Icon(if (l.collapsed) PcIcons.ChevronRight else PcIcons.ChevronDown, contentDescription = if (l.collapsed) "Open" else "Close", tint = ink, modifier = Modifier.size(16.dp))
@@ -833,13 +833,13 @@ private fun CheckBox(checked: Boolean, fill: Color) {
 }
 
 @Composable
-private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
+private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape, width: Dp = 93.dp, height: Dp = 61.dp) {
     Box(
-        Modifier.size(width = 93.dp, height = 61.dp).clip(shape)
-            // a mask's thumbnail sits on white
+        Modifier.size(width = width, height = height).clip(shape)
+            // a mask's thumbnail sits on white; a group's and a locked layer's show what is clear
             .then(
                 when {
-                    l.alphaLock -> Modifier.drawBehind { checker() }
+                    l.alphaLock || l.kind == LayerType.GROUP -> Modifier.drawBehind { checker() }
                     l.kind == LayerType.MASK -> Modifier.background(Color.White)
                     else -> Modifier.background(Pc.ThumbBackground)
                 },

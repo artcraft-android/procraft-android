@@ -916,6 +916,18 @@ impl CanvasSession {
         let id = LayerId(id);
         let no_canvas = || procraft_gpu::GpuError::Readback("no canvas".into());
         let read = || -> Result<procraft_gpu::Thumbnail, procraft_gpu::GpuError> {
+            let group_pending = {
+                let mut guard = self.shared.lock();
+                let st = &mut *guard;
+                let is_group = st.doc.layer(id).is_some_and(|l| l.kind == LayerKind::Group);
+                if is_group {
+                    let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Err(no_canvas()) };
+                    Some(canvas.start_group_thumbnail(gpu, &mut st.doc, id, max_side)?)
+                } else {
+                    None
+                }
+            };
+            if let Some(pending) = group_pending { return pending.pixels(); }
             let first = {
                 let mut guard = self.shared.lock();
                 let st = &mut *guard;
