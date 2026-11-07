@@ -93,7 +93,7 @@ fun BoxScope.ReferenceWindow(vm: CanvasViewModel) {
 }
 
 /** Touches here go no further: not to the picture under a bar. */
-private val Modifier.ownTouches get() = pointerInput(Unit) {
+private fun Modifier.ownTouches(): Modifier = pointerInput(Unit) {
     awaitEachGesture { awaitFirstDown(requireUnconsumed = false).consume() }
 }
 
@@ -189,7 +189,7 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                 )
             }.background(BarFill)
             val (topSlide, bottomSlide) = with(density) { -TopBarHeight.toPx() * (1f - barsShown) to (BottomBarHeight.toPx() + 1f) * (1f - barsShown) }
-            Box(Modifier.offset { IntOffset(0, topSlide.roundToInt()) }.fillMaxWidth().height(TopBarHeight).clipToBounds().overPicture(topSlide).ownTouches) {
+            Box(Modifier.offset { IntOffset(0, topSlide.roundToInt()) }.fillMaxWidth().height(TopBarHeight).clipToBounds().overPicture(topSlide).ownTouches()) {
                 Text("Reference", color = TitleInk, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.align(Alignment.TopStart).padding(start = 20.dp, top = 10.dp))
                 Row(Modifier.align(Alignment.CenterEnd).padding(end = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE && vm.referenceImage != null) {
@@ -206,7 +206,7 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
             }
             val bottomTop = with(density) { (tall - BottomBarHeight).toPx() } + bottomSlide
             Box(
-                Modifier.align(Alignment.BottomStart).offset { IntOffset(0, bottomSlide.roundToInt()) }.fillMaxWidth().height(BottomBarHeight).clipToBounds().overPicture(bottomTop).ownTouches,
+                Modifier.align(Alignment.BottomStart).offset { IntOffset(0, bottomSlide.roundToInt()) }.fillMaxWidth().height(BottomBarHeight).clipToBounds().overPicture(bottomTop).ownTouches(),
                 contentAlignment = Alignment.Center,
             ) {
                 Row(
