@@ -214,8 +214,11 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     // the pressure's bleed, a contrast on the shape and its grain: none of the faint parts, all
     // of the strong ones, and more of both the harder the pen presses
     if (i.grain_bleed > 0.0) {
+        // cut where it always was, as steep as it always was, and no less steep than keeps what
+        // is whole whole (a little bleed cut more than it lifted, so a full press never laid all)
         let b = 8.0 * i.grain_bleed;
-        a = clamp((1.0 + b) * a - b / sqrt(max(b * i.grain_press, 1e-4)), 0.0, 1.0);
+        let cut = min(b / sqrt(max(b * i.grain_press, 1e-4)) / (1.0 + b), 0.999);
+        a = clamp(max(1.0 + b, 1.0 / (1.0 - cut)) * (a - cut), 0.0, 1.0);
     }
     // a leaning pen shades it across its width, strongest at its leading edge
     if (i.look.w > 0.0) {

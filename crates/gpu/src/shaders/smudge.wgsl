@@ -343,7 +343,10 @@ fn wet_weight(p: vec2<f32>, t: vec2<f32>) -> f32 {
         through = grain_combine(through, grain_plain(p), st.grain_depth, st.grain_blend);
     }
     let b = 8.0 * st.grain_bleed;
-    let bled = (1.0 + b) * through - b / sqrt(max(b * st.grain_press, 1e-4));
+    // cut where it always was, as steep as it always was, and no less steep than keeps what is
+    // whole whole
+    let cut = min(b / sqrt(max(b * st.grain_press, 1e-4)) / (1.0 + b), 0.999);
+    let bled = max(1.0 + b, 1.0 / (1.0 - cut)) * (through - cut);
     return clamp(bled, 0.0, 1.0) * st.alpha;
 }
 
