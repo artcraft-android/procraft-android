@@ -9,6 +9,8 @@ import UIKit
 /// the system's own Apple Pencil settings for them.
 final class CanvasView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
+    /// No system editing gestures over the canvas (its controller says the same).
+    override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
 
     let session: CanvasSession
     /// What the touches asked of the app (undo, redo, fit, ...).
