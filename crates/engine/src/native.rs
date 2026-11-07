@@ -19,6 +19,7 @@ use crate::guide::{Guide, GuideKind, LengthUnit, SymmetryKind};
 use crate::keyed::{Archive, Builder, Object};
 use crate::plist::Value;
 use crate::profile::Profile;
+use crate::reference_window::{ReferenceKind, ReferenceWindow};
 use crate::zip::{Ready, ZipReader, ZipWriter};
 
 /// The file extension of the package.
@@ -76,7 +77,15 @@ pub struct Imported {
     pub author: String,
     pub strokes: u64,
     pub tracked_seconds: f64,
+    /// The Reference window as the artwork left it.
+    pub reference: ReferenceWindow,
+    /// Its imported picture (a PNG, as stored), and the turn it is shown at (one of the system's
+    /// eight image orientations; 0 is upright).
+    pub reference_picture: Option<(Vec<u8>, i64)>,
 }
+
+/// Where a package keeps the Reference window's picture (some writers put it at the top).
+const REFERENCE_PICTURE: &str = "ReferenceImage/ReferenceImage.png";
 
 /// Why a package couldn't be read.
 #[derive(Debug, PartialEq, Eq)]
@@ -169,9 +178,15 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
         document.animation = Some(a);
     }
     let document = document.repaired();
+    let reference_picture = zip
+        .read(REFERENCE_PICTURE)
+        .or_else(|| zip.read("ReferenceImage.png"))
+        .map(|png| (png, root.int("referenceOrientation").unwrap_or(0)));
     Ok(Imported {
         document,
         pixels,
+        reference: read_reference(&root),
+        reference_picture,
         name: root.string("name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Untitled Artwork".to_owned()),
         author: root.string("authorName").unwrap_or_default(),
         strokes: root.int("strokeCount").and_then(|s| u64::try_from(s).ok()).unwrap_or(0),
@@ -751,6 +766,49 @@ pub struct Export<'a> {
     pub seed: u64,
     /// The time-lapse, if the canvas has one.
     pub time_lapse: Option<&'a TimeLapse>,
+    /// The Reference window as the artwork left it (none: never used), and its imported picture
+    /// (a PNG, upright).
+    pub reference: Option<&'a ReferenceWindow>,
+    pub reference_picture: Option<&'a [u8]>,
+}
+
+/// The Reference window as a package keeps it. The format keeps the window's kind under
+/// `referenceAnchor` and the point it is shown at under `referenceKind`: the names are the other
+/// way round from what each holds, and are read and written as they are.
+fn read_reference(root: &Object<'_>) -> ReferenceWindow {
+    let mut w = ReferenceWindow {
+        shown: root.bool("referenceVisibility").unwrap_or(false),
+        kind: root.int("referenceAnchor").map_or(ReferenceKind::Canvas, ReferenceKind::of_package),
+        corner: root.int("referenceCorner").unwrap_or(0),
+        docked: root.bool("referenceDocked").unwrap_or(false),
+        three_d: root.bool("reference3D").unwrap_or(false),
+        face_background_hidden: root.bool("faceBackgroundHidden").unwrap_or(false),
+        ..ReferenceWindow::default()
+    };
+    let pair = |key: &str| root.string(key).and_then(|s| parse_point(&s));
+    w.set_from_package(pair("referenceSize"), pair("referenceKind"));
+    w
+}
+
+/// The Reference window's fields for a package (see [`read_reference`]).
+fn reference_fields(b: &mut Builder, w: &ReferenceWindow) -> Vec<(&'static str, Value)> {
+    let [sw, sh] = w.package_size();
+    let mut fields = vec![
+        ("faceBackgroundHidden", Value::Bool(w.face_background_hidden)),
+        ("reference3D", Value::Bool(w.three_d)),
+        ("referenceAnchor", Value::Int(w.kind.package())),
+        ("referenceCorner", Value::Int(w.corner)),
+        ("referenceDocked", Value::Bool(w.docked)),
+        // the picture is kept upright
+        ("referenceOrientation", Value::Int(0)),
+        ("referenceSize", b.string(&format!("{{{sw}, {sh}}}"))),
+        ("referenceVisibility", Value::Bool(w.shown)),
+    ];
+    // left out until the window has been placed, as a package that never showed it has it
+    if let Some([x, y]) = w.package_middle() {
+        fields.push(("referenceKind", b.string(&format!("{{{x}, {y}}}"))));
+    }
+    fields
 }
 
 /// Writes a package.
@@ -814,8 +872,7 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
     let name = b.string(e.name);
     let author = if e.author.is_empty() { Builder::null() } else { b.string(e.author) };
     let strokes = b.add(Value::Int(i64::try_from(e.strokes).unwrap_or(i64::MAX)));
-    let reference_kind = b.string("{0, 0}");
-    let reference_size = b.string("{350, 532}");
+    let reference = reference_fields(&mut b, e.reference.unwrap_or(&ReferenceWindow::default()));
     let video = write_time_lapse(&mut b, &mut zip, e.time_lapse);
     // the last text's look, as a run of a space
     let text_style = match &doc.text_style {
@@ -837,7 +894,6 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         ("colorProfile", profile),
         ("composite", composite),
         ("drawingguide", guide),
-        ("faceBackgroundHidden", Value::Bool(false)),
         ("featureSet", Value::Int(1)),
         ("flippedHorizontally", Value::Bool(false)),
         ("flippedVertically", Value::Bool(false)),
@@ -850,14 +906,6 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         ("name", name),
         ("orientation", Value::Int(1)),
         ("primaryItem", selected.clone()),
-        ("reference3D", Value::Bool(false)),
-        ("referenceAnchor", Value::Int(0)),
-        ("referenceCorner", Value::Int(0)),
-        ("referenceDocked", Value::Bool(false)),
-        ("referenceKind", reference_kind),
-        ("referenceOrientation", Value::Int(0)),
-        ("referenceSize", reference_size),
-        ("referenceVisibility", Value::Bool(false)),
         ("selectedLayer", selected),
         ("selectedSamplerLayer", sampled),
         ("size", size),
@@ -869,10 +917,14 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         ("version", Value::Int(2)),
     ];
     fields.extend(video);
+    fields.extend(reference);
     fields.sort_by(|a, b| a.0.cmp(b.0));
     b.fill(&doc_ref, &["SilicaDocument", "ValkyrieDocument", "NSObject"], fields);
     zip.add("Document.archive", &b.finish(doc_ref));
     zip.add("QuickLook/Thumbnail.png", e.thumbnail_png);
+    if let Some(png) = e.reference_picture {
+        zip.add(REFERENCE_PICTURE, png);
+    }
     zip.finish()
 }
 
@@ -1385,6 +1437,95 @@ mod tests {
         out
     }
 
+    /// A package of an empty 64 x 48 canvas with `reference` (and its picture).
+    fn with_reference(reference: Option<&ReferenceWindow>, picture: Option<&[u8]>) -> Vec<u8> {
+        let doc = Document::new(64, 48);
+        write(&Export {
+            document: &doc,
+            pixels: &HashMap::new(),
+            composite: &[255; 64 * 48 * 4],
+            thumbnail_png: &[],
+            name: "Reference",
+            author: "",
+            strokes: 0,
+            tracked_seconds: 0.0,
+            seed: 11,
+            time_lapse: None,
+            reference,
+            reference_picture: picture,
+        })
+    }
+
+    #[test]
+    fn the_reference_window_and_its_picture_come_back_from_a_package() {
+        let window = ReferenceWindow {
+            shown: true,
+            kind: ReferenceKind::Image,
+            size: Some([300.0, 200.0]),
+            at: Some([40.0, 60.0]),
+            corner: 2,
+            docked: true,
+            three_d: true,
+            face_background_hidden: true,
+            ..ReferenceWindow::default()
+        };
+        let back = read(&with_reference(Some(&window), Some(b"a picture"))).unwrap();
+        // what only the app's own store keeps (how each picture sits in the window) isn't in it
+        assert_eq!(
+            back.reference,
+            ReferenceWindow { canvas_view: [1.0, 0.0, 0.0], image_view: [1.0, 0.0, 0.0], ..window }
+        );
+        assert_eq!(back.reference_picture, Some((b"a picture".to_vec(), 0)));
+    }
+
+    #[test]
+    fn a_package_keeps_the_window_s_kind_and_place_under_each_other_s_names() {
+        let window = ReferenceWindow {
+            kind: ReferenceKind::Face,
+            size: Some([300.0, 200.0]),
+            at: Some([40.0, 60.0]),
+            ..ReferenceWindow::default()
+        };
+        let bytes = with_reference(Some(&window), Some(b"png"));
+        let zip = ZipReader::new(&bytes).unwrap();
+        assert_eq!(zip.read("ReferenceImage/ReferenceImage.png").as_deref(), Some(&b"png"[..]));
+        let archive = Archive::read(&zip.read("Document.archive").unwrap()).unwrap();
+        let root = archive.root().unwrap();
+        assert_eq!(root.int("referenceAnchor"), Some(2));
+        assert_eq!(root.string("referenceKind").as_deref(), Some("{190, 214.5}"));
+        assert_eq!(root.string("referenceSize").as_deref(), Some("{300, 309}"));
+        assert_eq!(root.int("referenceOrientation"), Some(0));
+    }
+
+    #[test]
+    fn a_package_whose_window_was_never_used_reads_as_none_and_writes_as_one_did() {
+        let bytes = with_reference(None, None);
+        let back = read(&bytes).unwrap();
+        assert!(back.reference.is_unused());
+        assert_eq!(back.reference_picture, None);
+        let zip = ZipReader::new(&bytes).unwrap();
+        let archive = Archive::read(&zip.read("Document.archive").unwrap()).unwrap();
+        let root = archive.root().unwrap();
+        // as a package from a tablet that never showed it: no place, no size, the canvas
+        assert_eq!(root.string("referenceKind"), None);
+        assert_eq!(root.string("referenceSize").as_deref(), Some("{0, 0}"));
+        assert_eq!((root.int("referenceAnchor"), root.bool("referenceVisibility")), (Some(0), Some(false)));
+        assert_eq!(zip.read("ReferenceImage/ReferenceImage.png"), None);
+    }
+
+    #[test]
+    fn a_reference_picture_at_the_top_and_its_turn_are_read() {
+        let bytes = with_reference(Some(&ReferenceWindow { shown: true, ..ReferenceWindow::default() }), None);
+        let zip = ZipReader::new(&bytes).unwrap();
+        let mut moved = ZipWriter::new();
+        for name in zip.names() {
+            moved.add(name, &zip.read(name).unwrap());
+        }
+        moved.add("ReferenceImage.png", b"at the top");
+        let back = read(&moved.finish()).unwrap();
+        assert_eq!(back.reference_picture.map(|(png, _)| png), Some(b"at the top".to_vec()));
+    }
+
     #[test]
     fn an_artwork_survives_a_round_trip() {
         let (w, h) = (300, 520);
@@ -1423,6 +1564,8 @@ mod tests {
             tracked_seconds: 12.5,
             seed: 42,
             time_lapse: None,
+            reference: None,
+            reference_picture: None,
         });
 
         let back = read(&bytes).unwrap();
@@ -1461,6 +1604,8 @@ mod tests {
                 tracked_seconds: 0.0,
                 seed: 1,
                 time_lapse: None,
+                reference: None,
+                reference_picture: None,
             }))
             .unwrap()
             .document
@@ -1529,6 +1674,8 @@ mod tests {
             tracked_seconds: 0.0,
             seed: 3,
             time_lapse: None,
+            reference: None,
+            reference_picture: None,
         });
         // the picture's 6 tiles, the mask's one, none for the clear layer
         let zip = ZipReader::new(&bytes).unwrap();
@@ -1572,6 +1719,8 @@ mod tests {
             tracked_seconds: 0.0,
             seed: 5,
             time_lapse: None,
+            reference: None,
+            reference_picture: None,
         });
         let zip = ZipReader::new(&bytes).unwrap();
         let mut older = ZipWriter::new();
@@ -1626,6 +1775,8 @@ mod tests {
             tracked_seconds: 0.0,
             seed: 1,
             time_lapse: None,
+            reference: None,
+            reference_picture: None,
         });
         let back = read(&bytes).unwrap();
         let d = &back.document;
@@ -1665,6 +1816,8 @@ mod tests {
             tracked_seconds: 0.0,
             seed: 1,
             time_lapse: None,
+            reference: None,
+            reference_picture: None,
         });
         let back = read(&bytes).unwrap();
         let kinds = |d: &Document| d.layers().iter().map(|l| l.kind).collect::<Vec<_>>();
@@ -1698,6 +1851,8 @@ mod tests {
             tracked_seconds: 0.0,
             seed: 1,
             time_lapse: None,
+            reference: None,
+            reference_picture: None,
         });
         let zip = ZipReader::new(&bytes).unwrap();
         let archive = Archive::read(&zip.read("Document.archive").unwrap()).unwrap();
@@ -1731,6 +1886,8 @@ mod tests {
                 tracked_seconds: 0.0,
                 seed: 1,
                 time_lapse: None,
+                reference: None,
+                reference_picture: None,
             })
         };
         if let Some(a) = doc.animation.as_mut() {
@@ -1849,6 +2006,8 @@ mod tests {
             tracked_seconds: 0.0,
             seed: 7,
             time_lapse: None,
+            reference: None,
+            reference_picture: None,
         };
         let back = read(&write(&export)).unwrap();
         let layer = back.document.layers().iter().find(|l| l.text.is_some()).unwrap();
@@ -1882,6 +2041,8 @@ mod tests {
                 tracked_seconds: 0.0,
                 seed: 3,
                 time_lapse: None,
+                reference: None,
+                reference_picture: None,
             }))
             .unwrap()
             .document
@@ -1950,6 +2111,8 @@ mod tests {
                 tracked_seconds: 0.0,
                 seed: 1,
                 time_lapse: t,
+                reference: None,
+                reference_picture: None,
             })
         };
         let t = TimeLapse {
@@ -2056,6 +2219,8 @@ mod tests {
                 tracked_seconds: back.tracked_seconds,
                 seed: 7,
                 time_lapse: None,
+                reference: None,
+                reference_picture: None,
             });
             std::fs::write(out, package).unwrap();
         }

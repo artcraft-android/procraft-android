@@ -876,6 +876,11 @@ impl<'a> Stage<'a> {
         self.field(path, name).and_then(|v| v.token().map(str::to_owned))
     }
 
+    /// Whether a prim of the stage is a point cloud.
+    fn has_points(&self) -> bool {
+        self.paths().into_iter().any(|p| self.type_name(p).as_deref() == Some("Points"))
+    }
+
     fn type_name(&self, path: &str) -> Option<String> {
         self.token(path, "typeName")
     }
@@ -1011,7 +1016,8 @@ impl<'a> Stage<'a> {
         let z_up = self.token("/", "upAxis").as_deref() == Some("Z");
         self.walk("/", IDENTITY, &mut |path, world| self.add_mesh(path, world, z_up, &mut out));
         let materials = out.material_paths.iter().map(|p| self.material_info(p)).collect();
-        out.into_gathered().into_mesh(materials, None)
+        let cloud = |e| if e == MeshError::NoFaces && self.has_points() { MeshError::PointCloud } else { e };
+        out.into_gathered().into_mesh(materials, None).map_err(cloud)
     }
 
     /// Adds the mesh at `path` (if it is one) to `out`, placed by `world`.

@@ -26,6 +26,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -38,11 +39,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import io.github.artcraftandroid.procraft.canvas.keptPlugins
 import io.github.artcraftandroid.procraft.ui.Switch
+import io.github.artcraftandroid.procraft.ui.fittedInterfaceSize
 
 /**
  * The app's own settings, apart from the canvas: what Android's page for the app links to as its
@@ -52,7 +57,14 @@ class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("interface", Context.MODE_PRIVATE)
-        setContent { SettingsScreen(prefs) { finish() } }
+        val plugins = keptPlugins(this, prefs)
+        setContent {
+            val size = fittedInterfaceSize(plugins)
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density * size, density.fontScale)) {
+                SettingsScreen(prefs) { finish() }
+            }
+        }
     }
 }
 

@@ -53,6 +53,20 @@ impl State {
         );
     }
 
+    /// How the selection looks, `started` being when drawing began.
+    fn selection_shown(&self, started: Instant, screen: Profile) -> SelectionLook {
+        let s = self.display_scale;
+        match self.selection_display {
+            SelectionDisplay::Stripes => {
+                let period = STRIPE_PERIOD_PT * s;
+                let drift = (started.elapsed().as_secs_f32() * STRIPE_SPEED_PT * s) % period;
+                SelectionLook::Stripes(Stripes { period, drift, coverage: STRIPE_COVERAGE * self.selection_visibility })
+            }
+            SelectionDisplay::Tint => SelectionLook::Tint(Profile::Srgb.convert(SELECTION_TINT, screen)),
+            SelectionDisplay::Fill => SelectionLook::Fill(Profile::Srgb.convert(SELECTION_FILL, screen)),
+        }
+    }
+
     /// Draws a frame into `view` (`format`, `size` window pixels, its colours shown in `screen`):
     /// the model open to paint on, the drawing pad as a sphere, or the canvas with its surround,
     /// grid, selection and frosted panels. `started` is when drawing began, for the bands' drift.
@@ -73,9 +87,17 @@ impl State {
         let to_screen = self.view.map(|v| v.to_screen());
         let grid = self.surround_grid(Vec2::ZERO);
         let surround = self.surround();
+        let selection_shown = self.selection_shown(started, screen);
         // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
         if self.scene_shown() {
             let convert = colours_to(self.doc.profile, screen);
+            let selected = self.selection.is_some();
+            let look = selected.then_some(selection_shown);
+            // the bands drift, so they keep drawing
+            if matches!(look, Some(SelectionLook::Stripes(_))) {
+                self.needs_frame = true;
+            }
+            self.scene_selection_look(look);
             self.render_scene(view, format, size, convert);
             self.frames += 1;
         } else if self.sphere.is_some() {
@@ -86,19 +108,8 @@ impl State {
         {
             let s = self.display_scale;
             // the bands over what is not selected drift, so they keep drawing
-            let look = canvas.has_selection().then(|| match self.selection_display {
-                SelectionDisplay::Stripes => {
-                    let period = STRIPE_PERIOD_PT * s;
-                    let drift = (started.elapsed().as_secs_f32() * STRIPE_SPEED_PT * s) % period;
-                    SelectionLook::Stripes(Stripes {
-                        period,
-                        drift,
-                        coverage: STRIPE_COVERAGE * self.selection_visibility,
-                    })
-                }
-                SelectionDisplay::Tint => SelectionLook::Tint(Profile::Srgb.convert(SELECTION_TINT, screen)),
-                SelectionDisplay::Fill => SelectionLook::Fill(Profile::Srgb.convert(SELECTION_FILL, screen)),
-            });
+            let shown = selection_shown;
+            let look = canvas.has_selection().then_some(shown);
             let animating = matches!(look, Some(SelectionLook::Stripes(_)));
             let convert = colours_to(self.doc.profile, screen);
             // a canvas with a profile of its own shows through a table, made when that changes
@@ -109,8 +120,11 @@ impl State {
                     .map(|(k, table)| (k, canvas.display_lut(gpu, &table)));
             }
             let lut = self.display_lut.as_ref().map(|(_, l)| l);
-            let backdrop = (!self.backdrops.is_empty())
-                .then(|| Backdrop { regions: &self.backdrops, sigma: BACKDROP_SIGMA_PT * s });
+            let backdrop = (!self.backdrops.is_empty() || !self.backdrop_windows.is_empty()).then(|| Backdrop {
+                regions: &self.backdrops,
+                windows: &self.backdrop_windows,
+                sigma: BACKDROP_SIGMA_PT * s,
+            });
             canvas.render(
                 gpu,
                 &mut self.doc,
@@ -139,6 +153,7 @@ impl State {
                 self.frames += 1;
             }
         }
+        self.heed_filter_run();
     }
 }
 

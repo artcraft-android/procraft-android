@@ -42,6 +42,7 @@ pub mod preview;
 pub mod profile;
 pub mod psd;
 pub mod quickshape;
+pub mod reference_window;
 pub mod selection;
 pub mod sqlite;
 mod stock_tones;

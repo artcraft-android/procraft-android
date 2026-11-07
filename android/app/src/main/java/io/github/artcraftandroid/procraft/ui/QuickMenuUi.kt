@@ -126,12 +126,8 @@ fun BoxScope.QuickMenu(vm: CanvasViewModel) {
             }
         },
     ) {
-        // kept on the screen
-        val c = with(density) {
-            val x = at.x.toDp().coerceIn(RingReachX + RingButtonWidth / 2, maxWidth - RingReachX - RingButtonWidth / 2)
-            val y = at.y.toDp().coerceIn(RingReachY + RingButtonHeight, maxHeight - RingReachY - RingButtonHeight)
-            x to y
-        }
+        // kept on the screen (in a window too small for the ring, in its middle)
+        val c = with(density) { ringCentre(at.x.toDp(), at.y.toDp(), maxWidth, maxHeight) }
         Box(
             Modifier.offset(x = c.first - RingButtonWidth / 2, y = c.second - RingButtonHeight / 2).size(RingButtonWidth, RingButtonHeight)
                 .graphicsLayer { alpha = shown.coerceIn(0f, 1f) }.clip(CircleShape).background(TitleFill)
@@ -531,11 +527,13 @@ fun BoxScope.LayerChoice(vm: CanvasViewModel) {
     val (at, ids) = vm.layerChoice ?: return
     val density = LocalDensity.current
     BoxWithConstraints(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { vm.layerChoice = null } }) {
-        val x = with(density) { at.x.toDp() }.coerceIn(8.dp, maxWidth - 208.dp)
-        val y = with(density) { at.y.toDp() + 24.dp }.coerceIn(8.dp, maxHeight - (ids.size * 44 + 16).dp)
+        // no taller than the window (more layers scroll), and on it
+        val tall = minOf((ids.size * 44 + 16).dp, maxHeight - 16.dp).coerceAtLeast(60.dp)
+        val x = with(density) { at.x.toDp() }.within(8.dp, maxWidth - 208.dp)
+        val y = with(density) { at.y.toDp() + 24.dp }.within(8.dp, maxHeight - tall - 8.dp)
         androidx.compose.foundation.layout.Column(
-            Modifier.offset(x = x, y = y).size(200.dp, (ids.size * 44 + 16).dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
-                .background(Pc.PopoverFill).padding(vertical = 8.dp),
+            Modifier.offset(x = x, y = y).size(200.dp, tall).clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                .background(Pc.PopoverFill).verticalScroll(rememberScrollState()).padding(vertical = 8.dp),
         ) {
             for (id in ids) {
                 val l = vm.layers.firstOrNull { it.id == id } ?: continue
@@ -552,3 +550,14 @@ fun BoxScope.LayerChoice(vm: CanvasViewModel) {
         }
     }
 }
+
+/**
+ * Where the ring's middle goes, opened at ([x], [y]) in a window [width] × [height]: where all of
+ * it shows, or the window's middle if the window is too small for it (a split screen's half).
+ */
+internal fun ringCentre(x: Dp, y: Dp, width: Dp, height: Dp): Pair<Dp, Dp> =
+    x.within(RingReachX + RingButtonWidth / 2, width - RingReachX - RingButtonWidth / 2) to
+        y.within(RingReachY + RingButtonHeight, height - RingReachY - RingButtonHeight)
+
+/** This kept between [low] and [high]; in a window too small for that, halfway between them. */
+internal fun Dp.within(low: Dp, high: Dp): Dp = if (low <= high) coerceIn(low, high) else (low + high) / 2

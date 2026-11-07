@@ -333,6 +333,29 @@ fn bilinear(pixels: &[u8], n: usize, u: f32, v: f32) -> f32 {
 
 impl CanvasSession {
     /// `brush`'s sample stroke (see [`CanvasSession::brush_preview`]).
+    /// `style` reads `brush`'s grain and shape from its file's images at their own size, as a
+    /// stroke does (they are read out first: nothing is drawn under the lock).
+    fn use_full_sources(
+        &self,
+        gpu: &procraft_gpu::Gpu,
+        canvas: &mut Canvas,
+        style: &mut StrokeStyle,
+        brush: &procraft_engine::brush::Brush,
+    ) {
+        if let Some(full) = brush.grain_file_now().and_then(|f| f.full.as_ref()) {
+            let pixels = self.shared.lock().grain_store.pixels(full);
+            if let Some(pixels) = pixels {
+                canvas.use_full_grain(gpu, style, full.id, full.side, &pixels);
+            }
+        }
+        if let Some(full) = brush.shape_file_now().map(|f| &f.full) {
+            let pixels = self.shared.lock().grain_store.pixels(full);
+            if let Some(pixels) = pixels {
+                canvas.use_full_shape(gpu, style, full.id, full.side, &pixels);
+            }
+        }
+    }
+
     fn drawn_preview(&self, brush: procraft_engine::brush::Brush, width: u32, height: u32) -> Option<ThumbnailImage> {
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
         let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
@@ -357,15 +380,22 @@ impl CanvasSession {
         let layer = doc.current();
         canvas.wipe_layer(layer);
         let mut style = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
+        // it mixes wet only where the brush's preview says to
+        if brush.setting("preview_wet_mix") < 0.5 {
+            style = style.dry();
+        }
         style.preview = true;
         canvas.use_sources(&gpu, &mut style, &brush);
+        self.use_full_sources(&gpu, &mut canvas, &mut style, &brush);
         // a dual brush's second, drawn along the same sample stroke at its size beside the first's
         let stamp_only = brush.setting("preview_stamp") >= 0.5;
         let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
+            let second = second.clone().as_second();
             let mut second_style =
-                StrokeStyle::for_brush(second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false).as_second();
+                StrokeStyle::for_brush(&second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false).as_second();
             second_style.preview = true;
-            canvas.use_sources(&gpu, &mut second_style, second);
+            canvas.use_sources(&gpu, &mut second_style, &second);
+            self.use_full_sources(&gpu, &mut canvas, &mut second_style, &second);
             let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
             let mode = brush.setting("dual_blend").round().max(0.0) as u32;
             (!second_style.in_place()).then(|| {
@@ -384,7 +414,7 @@ impl CanvasSession {
         } else {
             let samples = preview::samples(&brush);
             if let Some((second, _, diameter)) = second {
-                let mut stroke = StrokeBuilder::new(second.clone(), diameter, Pointer::Stylus).steady();
+                let mut stroke = StrokeBuilder::new(second, diameter, Pointer::Stylus).steady();
                 canvas.add_second_stamps(&stroke.add(&samples));
                 canvas.replace_second_stamps(&stroke.finish());
             }

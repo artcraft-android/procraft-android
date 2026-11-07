@@ -173,6 +173,27 @@ impl Transform {
         moved
     }
 
+    /// Two fingers held the content from `from` and have reached `to` (canvas points, each pair
+    /// the same two fingers): it goes with them, moved, turned and scaled as a whole from where
+    /// [`Transform::grab`] took it, the box with it (a box stays the shape it is, whatever the
+    /// mode). Returns whether anything moved.
+    pub fn pinch(&mut self, from: [Vec2; 2], to: [Vec2; 2]) -> bool {
+        let Some((_, _, start)) = self.drag else { return false };
+        let (was, now) = (from[1] - from[0], to[1] - to[0]);
+        if !(from.iter().chain(&to).all(|p| p.is_finite()) && was.length() > 1e-3 && now.length() > 1e-3) {
+            return false;
+        }
+        let (middle_was, middle) = (from[0].lerp(from[1], 0.5), to[0].lerp(to[1], 0.5));
+        let m = Affine::translate(Vec2::ZERO - middle_was)
+            .then(Affine::scale((now.length() / was.length()).max(MIN_SCALE)))
+            .then(Affine::rotate(angle(now) - angle(was)))
+            .then(Affine::translate(middle));
+        let next = map_placement(&start, m);
+        let moved = next != self.now;
+        self.now = next;
+        moved
+    }
+
     /// The lines (x across, y down, canvas pixels) the box held in a move has snapped onto: shown
     /// as guides until it is let go.
     pub fn snapped(&self) -> [Option<f32>; 2] {
@@ -731,6 +752,45 @@ mod tests {
         t.cancel_drag();
         assert!(quad_close(t.content(), rect(100.0, 100.0, 100.0, 200.0)));
         assert!(!t.can_undo());
+    }
+
+    #[test]
+    fn two_fingers_move_turn_and_scale_the_content_about_them_as_one_step() {
+        let mut t = box_100x200();
+        let (a, b) = (Vec2::new(100.0, 100.0), Vec2::new(200.0, 100.0));
+        t.grab(Handle::Move, a);
+        // spread to twice as far apart, a quarter turn clockwise, about the first finger
+        assert!(t.pinch([a, b], [a, Vec2::new(100.0, 300.0)]));
+        // the box's top left corner was under the first finger, and stays there
+        let [tl, tr, ..] = t.frame();
+        assert!(close(tl, a) && close(tr, Vec2::new(100.0, 300.0)), "{tl:?} {tr:?}");
+        assert!(quad_close(t.content(), t.frame()));
+        // measured from where they took it, not step by step
+        assert!(t.pinch([a, b], [a, b]));
+        assert!(quad_close(t.frame(), rect(100.0, 100.0, 100.0, 200.0)));
+        assert!(t.pinch([a, b], [a + Vec2::new(10.0, 0.0), b + Vec2::new(10.0, 0.0)]));
+        t.release();
+        assert!(t.can_undo());
+        t.undo();
+        assert!(!t.can_undo());
+        assert!(quad_close(t.frame(), rect(100.0, 100.0, 100.0, 200.0)));
+    }
+
+    #[test]
+    fn a_pinch_needs_the_content_taken_and_two_fingers_apart() {
+        let mut t = box_100x200();
+        let (a, b) = (Vec2::new(100.0, 100.0), Vec2::new(200.0, 100.0));
+        assert!(!t.pinch([a, b], [a, a + Vec2::new(0.0, 50.0)]));
+        t.grab(Handle::Move, a);
+        assert!(!t.pinch([a, a], [a, b]));
+        assert!(!t.pinch([a, b], [a, a]));
+        assert!(!t.pinch([a, b], [a, Vec2::new(f32::NAN, 0.0)]));
+        // fingers brought together leave the box small, never turned inside out
+        assert!(t.pinch([a, b], [a, a + Vec2::new(0.01, 0.0)]));
+        let [tl, tr, ..] = t.frame();
+        assert!(tr.x > tl.x);
+        t.cancel_drag();
+        assert!(quad_close(t.frame(), rect(100.0, 100.0, 100.0, 200.0)));
     }
 
     #[test]

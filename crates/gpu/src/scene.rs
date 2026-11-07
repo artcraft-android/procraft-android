@@ -6,13 +6,17 @@ use procraft_engine::mesh::Mesh;
 use wgpu::util::DeviceExt;
 
 use crate::lighting::{CUBE_LEVELS, Lighting};
-use crate::{Gpu, GpuError, SurroundGrid, read_texture};
+use crate::{Gpu, GpuError, SelectionLook, SurroundGrid, read_texture};
 use procraft_engine::environment::Equirect;
 
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const ALBEDO: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// A projected stroke's pixels, as a canvas keeps a stroke.
 const STROKE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// What a layer is drawn into as the camera sees it: as a layer is held.
+const SEEN: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// What coverage carried onto a texture is read back from.
+const COVERAGE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Each screen pixel's distance to the nearest surface.
 const DISTANCE: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 /// Where a part's triangles lie in its texture.
@@ -150,6 +154,20 @@ struct ProjectUniform {
     view_proj: [[f32; 4]; 4],
     screen: [f32; 4],
     eye: [f32; 4],
+    picture: [[f32; 4]; 2],
+}
+
+/// What is carried onto a part.
+#[derive(Clone, Copy)]
+enum Carried<'a> {
+    /// A stroke as drawn on the screen.
+    Stroke,
+    /// Screen coverage, read back as bytes.
+    Coverage,
+    /// A picture: its pixels from the window's, x then y (a·x + b·y + c).
+    Picture([[f32; 3]; 2]),
+    /// The layer as seen on the screen, changed there: this was how it looked.
+    Laid(&'a wgpu::TextureView),
 }
 
 #[repr(C)]
@@ -243,6 +261,17 @@ impl Orbit {
         if aspect >= 1.0 { self.fov } else { 2.0 * ((self.fov / 2.0).tan() / aspect.max(1e-3)).atan() }
     }
 
+    /// The line of sight through window point (`x`, `y`) of a `width` × `height` view: from the
+    /// camera, along a unit direction.
+    pub fn sight(&self, x: f32, y: f32, width: u32, height: u32) -> ([f32; 3], [f32; 3]) {
+        let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+        let aspect = w / h;
+        let reach = (self.fov_y(aspect) / 2.0).tan();
+        let (across, up) = ((x / w * 2.0 - 1.0) * reach * aspect, (1.0 - y / h * 2.0) * reach);
+        let along = rotate_by(self.rotation, [across, up, -1.0]);
+        (self.eye(), normalize(along))
+    }
+
     /// The camera's place.
     pub fn eye(&self) -> [f32; 3] {
         let back = rotate_by(self.rotation, [0.0, 0.0, self.distance]);
@@ -322,6 +351,8 @@ pub struct MeshView {
     /// Each submesh's part and its run of indices, and whether it is hidden.
     submeshes: Vec<(usize, u32, u32)>,
     hidden: Vec<bool>,
+    /// The submeshes that take no strokes (see [`MeshView::set_painted`]).
+    unpainted: Vec<bool>,
     /// The framing's unit (the model's largest side over 4): the lights stand that far apart.
     unit: f32,
     /// What it draws into.
@@ -331,6 +362,11 @@ pub struct MeshView {
     pub orbit: Orbit,
     /// Strokes reach every surface under them, not only the nearest.
     pub paint_through: bool,
+    /// Strokes reach only this (the selection, in the texture's space) if given.
+    pub within: Option<wgpu::TextureView>,
+    /// The selection shown on the model, if there is one.
+    pub selection: Option<ShownSelection>,
+    selection_draw: Option<SelectionDraw>,
 }
 
 /// The surround grid's pipeline and its uniform.
@@ -505,8 +541,15 @@ impl StudioDraw {
 struct Projector {
     distance_pipeline: wgpu::RenderPipeline,
     project_pipeline: wgpu::RenderPipeline,
+    picture_pipeline: wgpu::RenderPipeline,
+    laid_pipeline: wgpu::RenderPipeline,
+    seen_pipeline: wgpu::RenderPipeline,
+    seen_hiding_pipeline: wgpu::RenderPipeline,
     islands_pipeline: wgpu::RenderPipeline,
     dilate_pipeline: wgpu::RenderPipeline,
+    coverage_pipeline: wgpu::RenderPipeline,
+    /// What may be reached when there is no selection: everywhere.
+    everywhere: wgpu::TextureView,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
     /// What carries a stroke's coverage into a roughness or metalness: its pipeline, the layout
@@ -774,11 +817,15 @@ impl MeshView {
             blank,
             submeshes: mesh.submeshes.iter().map(|m| (m.part, (m.first * 3) as u32, (m.count * 3) as u32)).collect(),
             hidden: vec![false; mesh.submeshes.len()],
+            unpainted: Vec::new(),
             unit: Orbit::unit(mesh),
             format,
             convert: None,
             orbit: Orbit::framing(mesh),
             paint_through: false,
+            within: None,
+            selection: None,
+            selection_draw: None,
         }
     }
 
@@ -1152,6 +1199,26 @@ impl MeshView {
         }
     }
 
+    /// Whether submesh `index` takes strokes (shown or not, it still hides what is behind it).
+    pub fn set_painted(&mut self, index: usize, painted: bool) {
+        self.unpainted.resize(self.submeshes.len(), false);
+        if let Some(u) = self.unpainted.get_mut(index) {
+            *u = !painted;
+        }
+    }
+
+    /// The runs of indices of part `part` that take strokes: what's shown of it, less the
+    /// submeshes set not to.
+    fn painted_ranges(&self, part: usize) -> Vec<std::ops::Range<u32>> {
+        if !self.unpainted.iter().any(|u| *u) {
+            return self.shown_ranges(part);
+        }
+        let shown = |k: usize| !self.hidden.get(k).copied().unwrap_or(false);
+        let takes = |k: usize| !self.unpainted.get(k).copied().unwrap_or(false);
+        let mine = self.submeshes.iter().enumerate().filter(|(_, (at, _, _))| *at == part);
+        mine.filter(|(k, _)| shown(*k) && takes(*k)).map(|(_, (_, first, count))| *first..*first + *count).collect()
+    }
+
     /// The runs of indices of part `part` that are shown: all of it, unless a submesh in it is
     /// hidden.
     fn shown_ranges(&self, part: usize) -> Vec<std::ops::Range<u32>> {
@@ -1372,6 +1439,16 @@ impl MeshView {
             }
             None => None,
         };
+        // the selection over its part, not in the studio
+        let selection_draw = match self.selection.as_ref().filter(|_| studio.is_none()) {
+            Some(shown) => {
+                let format = self.format;
+                let draw = self.selection_draw.get_or_insert_with(|| SelectionDraw::new(gpu, format));
+                let bind = draw.bind(gpu, shown, orbit.view_proj(aspect));
+                Some((&*draw, bind, shown.part))
+            }
+            None => None,
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mesh"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1411,6 +1488,13 @@ impl MeshView {
                 pass.draw_indexed(range.clone(), 0, 0..1);
             }
         }
+        if let Some((draw, bind, part)) = &selection_draw {
+            pass.set_pipeline(&draw.pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            for range in shown_by_part.get(*part).into_iter().flatten() {
+                pass.draw_indexed(range.clone(), 0, 0..1);
+            }
+        }
         if let Some(draw) = studio_draw {
             pass.set_bind_group(0, &draw.bind, &[]);
             pass.set_pipeline(&draw.floor);
@@ -1418,6 +1502,167 @@ impl MeshView {
             pass.set_pipeline(&draw.cubes);
             pass.draw(0..36, 0..shown as u32);
         }
+    }
+}
+
+/// The parts of run `range` outside all of `runs` (runs that lie inside it or apart from it).
+fn without(range: std::ops::Range<u32>, runs: &[std::ops::Range<u32>]) -> Vec<std::ops::Range<u32>> {
+    let mut sorted: Vec<&std::ops::Range<u32>> =
+        runs.iter().filter(|r| r.start < range.end && r.end > range.start).collect();
+    sorted.sort_by_key(|r| r.start);
+    let (mut out, mut at) = (Vec::new(), range.start);
+    for r in sorted {
+        if r.start > at {
+            out.push(at..r.start);
+        }
+        at = at.max(r.end);
+    }
+    if at < range.end {
+        out.push(at..range.end);
+    }
+    out
+}
+
+/// The selection as it shows on a model: its coverage in part `part`'s texture, a byte a texel,
+/// and how it looks.
+#[derive(Clone, Debug)]
+pub struct ShownSelection {
+    pub mask: wgpu::TextureView,
+    pub part: usize,
+    pub look: SelectionLook,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SelectionUniform {
+    view_proj: [[f32; 4]; 4],
+    /// The bands' period and drift in pixels, their coverage, and 0 for bands or 1 for a colour.
+    look: [f32; 4],
+    /// The colour (sRGB), how much of it covers what's selected, 1 when the target encodes sRGB.
+    colour: [f32; 4],
+}
+
+/// What draws the selection over its part of the model.
+struct SelectionDraw {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    buffer: wgpu::Buffer,
+    sampler: wgpu::Sampler,
+    srgb: f32,
+}
+
+impl SelectionDraw {
+    fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> SelectionDraw {
+        let device = &gpu.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("selection on the model"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mesh_selection.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("selection on the model"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("selection on the model"),
+            size: std::mem::size_of::<SelectionUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("selection on the model"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("selection on the model"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_over"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<VertexGpu>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_over"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let srgb = if format.is_srgb() { 1.0 } else { 0.0 };
+        SelectionDraw { pipeline, layout, buffer, sampler, srgb }
+    }
+
+    /// `shown`'s bindings, seen through `view_proj`.
+    fn bind(&self, gpu: &Gpu, shown: &ShownSelection, view_proj: [[f32; 4]; 4]) -> wgpu::BindGroup {
+        // a tint can't multiply over the model here: a half cover stands in for it
+        let (look, colour) = match shown.look {
+            SelectionLook::Stripes(s) => ([s.period, s.drift, s.coverage, 0.0], [0.0; 3]),
+            SelectionLook::Tint(c) => ([1.0, 0.0, 0.5, 1.0], c),
+            SelectionLook::Fill(c) => ([1.0, 0.0, 1.0, 1.0], c),
+        };
+        let u = SelectionUniform { view_proj, look, colour: [colour[0], colour[1], colour[2], self.srgb] };
+        gpu.queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&u));
+        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("selection on the model"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shown.mask) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        })
     }
 }
 
@@ -1491,6 +1736,196 @@ impl MeshView {
         height: u32,
         target: &wgpu::TextureView,
     ) -> IRect {
+        self.project_into(gpu, encoder, part, stroke, bounds, (width, height), target, Carried::Stroke)
+    }
+
+    /// Draws a layer of part `part` (`layer`: its texture, premultiplied) as the camera sees it into
+    /// `target` (a `width` × `height` RGBA8 texture), clear where it doesn't show: where a stroke
+    /// changing what's under it is drawn, to be carried back with [`MeshView::project_laid`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_seen(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        part: usize,
+        layer: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
+        let (width, height) = (width.max(1), height.max(1));
+        let view_proj = self.orbit.view_proj(width as f32 / height as f32);
+        let painted = self.painted_ranges(part);
+        // what hides it: every shown surface that isn't it
+        let mut hiding: Vec<std::ops::Range<u32>> = Vec::new();
+        for i in 0..self.parts.len() {
+            hiding.extend(self.shown_ranges(i).into_iter().flat_map(|r| without(r, &painted)));
+        }
+        let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("seen depth"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let projector = self.projector.get_or_insert_with(|| Projector::new(gpu));
+        gpu.queue.write_buffer(
+            &projector.uniform,
+            0,
+            bytemuck::bytes_of(&ProjectUniform {
+                view_proj,
+                screen: [width as f32, height as f32, 0.0, 0.0],
+                eye: [0.0; 4],
+                picture: [[0.0; 4]; 2],
+            }),
+        );
+        let bind = projector.bind(gpu, layer, None);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("seen layer"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &depth_view,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_bind_group(0, &bind, &[]);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_pipeline(&projector.seen_hiding_pipeline);
+        for range in hiding {
+            pass.draw_indexed(range, 0, 0..1);
+        }
+        pass.set_pipeline(&projector.seen_pipeline);
+        for range in painted {
+            pass.draw_indexed(range, 0, 0..1);
+        }
+    }
+
+    /// Carries a layer as seen on the screen (`now`, drawn there as `was` by
+    /// [`MeshView::draw_seen`] and changed since) back onto part `part`, into `target` (the part's
+    /// stroke texture): the texels where it changed, marked to take the layer's place. Returns the
+    /// texels it can have reached.
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_laid(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        part: usize,
+        now: &wgpu::TextureView,
+        was: &wgpu::TextureView,
+        bounds: IRect,
+        width: u32,
+        height: u32,
+        target: &wgpu::TextureView,
+    ) -> IRect {
+        self.project_into(gpu, encoder, part, now, bounds, (width, height), target, Carried::Laid(was))
+    }
+
+    /// Carries `picture` (premultiplied), placed on a `width` × `height` screen by `to_picture`
+    /// (its pixels from the window's: x then y, a·x + b·y + c), onto part `part` as
+    /// [`MeshView::project_stroke`] carries a stroke. Returns the texels it can have reached.
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_picture(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        part: usize,
+        picture: &wgpu::TextureView,
+        to_picture: [[f32; 3]; 2],
+        width: u32,
+        height: u32,
+        target: &wgpu::TextureView,
+    ) -> IRect {
+        let bounds = IRect::from_size(width, height);
+        self.project_into(gpu, encoder, part, picture, bounds, (width, height), target, Carried::Picture(to_picture))
+    }
+
+    /// Carries `coverage` (a byte a pixel of a `width` × `height` screen, rows top to bottom) onto
+    /// part `part` as [`MeshView::project_stroke`] carries a stroke, surfaces turned away taking as
+    /// much as any: a byte for each texel of its texture, its size square. Waits for the GPU.
+    pub fn project_coverage(
+        &mut self,
+        gpu: &Gpu,
+        part: usize,
+        coverage: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, GpuError> {
+        let (width, height) = (width.max(1), height.max(1));
+        let side = self.texture_size;
+        let make = |label, format, usage, w, h| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+        let source = make("screen coverage", wgpu::TextureFormat::R8Unorm, usage, width, height);
+        gpu.queue.write_texture(
+            source.as_image_copy(),
+            coverage,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width), rows_per_image: None },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        let target = make("projected coverage", COVERAGE, usage, side, side);
+        let (source_view, target_view) =
+            (source.create_view(&Default::default()), target.create_view(&Default::default()));
+        let mut encoder =
+            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("project coverage") });
+        let bounds = IRect::from_size(width, height);
+        self.project_into(
+            gpu,
+            &mut encoder,
+            part,
+            &source_view,
+            bounds,
+            (width, height),
+            &target_view,
+            Carried::Coverage,
+        );
+        gpu.queue.submit([encoder.finish()]);
+        let rgba = read_texture(gpu, &target, side, side)?;
+        Ok(rgba.as_chunks::<4>().0.iter().map(|px| px[0]).collect())
+    }
+
+    /// Carries `stroke` onto part `part` into `target`: a stroke's texture, or for
+    /// [`Carried::Coverage`] a texture of the [`COVERAGE`] format.
+    #[allow(clippy::too_many_arguments)]
+    fn project_into(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        part: usize,
+        stroke: &wgpu::TextureView,
+        bounds: IRect,
+        (width, height): (u32, u32),
+        target: &wgpu::TextureView,
+        carried: Carried<'_>,
+    ) -> IRect {
+        let coverage = matches!(carried, Carried::Coverage);
         let (width, height) = (width.max(1), height.max(1));
         if self.parts.get(part).is_none() {
             return IRect::EMPTY;
@@ -1500,6 +1935,7 @@ impl MeshView {
         let shown_by_part: Vec<Vec<std::ops::Range<u32>>> =
             (0..self.parts.len()).map(|i| self.shown_ranges(i)).collect();
         let shown = |i: usize| shown_by_part.get(i).cloned().unwrap_or_default();
+        let painted = self.painted_ranges(part);
         let projector = self.projector.get_or_insert_with(|| Projector::new(gpu));
         let stale = projector.screen.as_ref().is_none_or(|(t, _, _)| t.width() != width || t.height() != height);
         if stale {
@@ -1539,10 +1975,23 @@ impl MeshView {
             0,
             bytemuck::bytes_of(&ProjectUniform {
                 view_proj,
-                screen: [width as f32, height as f32, if self.paint_through { 1.0 } else { 0.0 }, 0.0],
+                screen: [
+                    width as f32,
+                    height as f32,
+                    if self.paint_through { 1.0 } else { 0.0 },
+                    match carried {
+                        Carried::Coverage => 1.0,
+                        Carried::Laid(_) => 2.0,
+                        _ => 0.0,
+                    },
+                ],
                 eye: {
                     let e = self.orbit.eye();
                     [e[0], e[1], e[2], 1.0]
+                },
+                picture: match carried {
+                    Carried::Picture([x, y]) => [[x[0], x[1], x[2], 0.0], [y[0], y[1], y[2], 0.0]],
+                    _ => [[0.0; 4]; 2],
                 },
             }),
         );
@@ -1579,7 +2028,8 @@ impl MeshView {
         }
         // the part in its texture's space, taking the stroke where it is the nearest surface
         {
-            let bind = projector.bind(gpu, stroke, Some(distance_view));
+            let was = if let Carried::Laid(was) = carried { Some(was) } else { None };
+            let bind = projector.bind_within(gpu, stroke, Some(distance_view), was);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("project stroke"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1596,17 +2046,23 @@ impl MeshView {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&projector.project_pipeline);
+            let carry = match carried {
+                Carried::Picture(_) => &projector.picture_pipeline,
+                Carried::Laid(_) => &projector.laid_pipeline,
+                _ => &projector.project_pipeline,
+            };
+            pass.set_pipeline(carry);
             pass.set_bind_group(0, &bind, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-            for range in shown(part) {
+            for range in painted {
                 pass.draw_indexed(range, 0, 0..1);
             }
         }
-        // grown past the islands' edges into the target
+        // grown past the islands' edges into the target, inside what may be reached
         {
-            let bind = projector.bind(gpu, scratch, Some(islands));
+            let within = if coverage { None } else { self.within.as_ref() };
+            let bind = projector.bind_within(gpu, scratch, Some(islands), within);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("dilate stroke"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1623,7 +2079,7 @@ impl MeshView {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&projector.dilate_pipeline);
+            pass.set_pipeline(if coverage { &projector.coverage_pipeline } else { &projector.dilate_pipeline });
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -2282,8 +2738,25 @@ impl Projector {
                 },
                 texture_entry(1),
                 texture_entry(2),
+                texture_entry(3),
             ],
         });
+        let everywhere = device.create_texture_with_data(
+            &gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("reach everywhere"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255],
+        );
+        let everywhere = everywhere.create_view(&wgpu::TextureViewDescriptor::default());
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("project"),
             size: std::mem::size_of::<ProjectUniform>() as u64,
@@ -2351,6 +2824,32 @@ impl Projector {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: STROKE,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        // the same into bytes, to be read back
+        let coverage_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("dilate coverage"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_full"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_dilate"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COVERAGE,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -2499,8 +2998,14 @@ impl Projector {
         Projector {
             distance_pipeline: pipeline("screen distance", "vs_distance", "fs_distance", DISTANCE, true, None),
             project_pipeline: pipeline("project stroke", "vs_project", "fs_project", STROKE, false, Some(MAX)),
+            picture_pipeline: pipeline("project picture", "vs_project", "fs_project_picture", STROKE, false, Some(MAX)),
+            laid_pipeline: pipeline("project laid", "vs_project", "fs_project_laid", STROKE, false, Some(MAX)),
+            seen_pipeline: pipeline("seen layer", "vs_seen", "fs_seen", SEEN, true, None),
+            seen_hiding_pipeline: pipeline("seen hiding", "vs_seen", "fs_seen_hiding", SEEN, true, None),
             islands_pipeline: pipeline("islands", "vs_islands", "fs_islands", ISLANDS, false, None),
             dilate_pipeline,
+            coverage_pipeline,
+            everywhere,
             layout,
             uniform,
             material_pipeline,
@@ -2521,6 +3026,17 @@ impl Projector {
     /// Its bindings: the uniform, the stroke and the screen's distances (the stroke standing in
     /// while the distances are being drawn).
     fn bind(&self, gpu: &Gpu, stroke: &wgpu::TextureView, distance: Option<&wgpu::TextureView>) -> wgpu::BindGroup {
+        self.bind_within(gpu, stroke, distance, None)
+    }
+
+    /// The same, reaching only `within` (the selection) if given.
+    fn bind_within(
+        &self,
+        gpu: &Gpu,
+        stroke: &wgpu::TextureView,
+        distance: Option<&wgpu::TextureView>,
+        within: Option<&wgpu::TextureView>,
+    ) -> wgpu::BindGroup {
         gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("project"),
             layout: &self.layout,
@@ -2530,6 +3046,10 @@ impl Projector {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(distance.unwrap_or(stroke)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(within.unwrap_or(&self.everywhere)),
                 },
             ],
         })
@@ -2687,6 +3207,35 @@ mod tests {
         let mut o = at(UNTURNED);
         o.turn(0.0, 0.0, 1.0);
         assert_eq!(o.rotation, UNTURNED);
+    }
+
+    #[test]
+    fn runs_are_left_out_of_a_run() {
+        let ends = |r: Vec<std::ops::Range<u32>>| r.into_iter().map(|r| (r.start, r.end)).collect::<Vec<_>>();
+        let (whole, apart) = (0..10, 20..30);
+        assert_eq!(ends(without(0..10, &[])), [(0, 10)]);
+        assert_eq!(ends(without(0..10, std::slice::from_ref(&whole))), []);
+        assert_eq!(ends(without(0..10, &[6..8, 2..4])), [(0, 2), (4, 6), (8, 10)]);
+        assert_eq!(ends(without(0..10, std::slice::from_ref(&apart))), [(0, 10)]);
+    }
+
+    #[test]
+    fn a_line_of_sight_lands_where_a_point_projects() {
+        let orbit = Orbit {
+            target: [0.5, -0.25, 1.0],
+            rotation: Orbit::rotation_of(0.7, 0.3),
+            distance: 6.0,
+            fov: FIELD_OF_VIEW,
+        };
+        for (w, h) in [(1200u32, 800u32), (800, 1200)] {
+            let m = orbit.view_proj(w as f32 / h as f32);
+            let point = [1.0, 0.5, 0.25];
+            let c = transform(m, point);
+            let (x, y) = ((c[0] / c[3] * 0.5 + 0.5) * w as f32, (0.5 - c[1] / c[3] * 0.5) * h as f32);
+            let (eye, along) = orbit.sight(x, y, w, h);
+            let to = normalize(sub(point, eye));
+            assert!(dot(to, along) > 0.99999, "{to:?} {along:?}");
+        }
     }
 
     #[test]

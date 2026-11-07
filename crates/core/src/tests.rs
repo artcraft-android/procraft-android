@@ -504,8 +504,8 @@ fn much_of_the_work_in_one_session_gives_the_gpu_no_errors() {
             match adjustment {
                 Adjustment::Hsb => s.adjustment_hsb(0.7, 0.6, 0.4),
                 Adjustment::Liquify => {
-                    let points = (0..60).flat_map(|i| [40.0 + i as f32 * 3.0, 150.0, 1.0]).collect();
-                    s.adjustment_liquify_stroke(points, true);
+                    let points = (0..60).flat_map(|i| [40.0 + i as f32 * 3.0, 150.0, 1.0, 8.0]).collect();
+                    s.adjustment_liquify_stroke(points, true, false);
                 }
                 Adjustment::Clone => {
                     s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 60.0, 0.0)]);
@@ -562,12 +562,12 @@ fn a_long_liquify_drag_between_frames_renders_without_errors() {
         .flat_map(|leg| {
             (0..=46).map(move |i| {
                 let x = if leg % 2 == 0 { 10.0 + i as f32 * 5.0 } else { 240.0 - i as f32 * 5.0 };
-                [x, 20.0 + leg as f32 * 10.0, 1.0]
+                [x, 20.0 + leg as f32 * 10.0, 1.0, 8.0]
             })
         })
         .flatten()
         .collect();
-    s.adjustment_liquify_stroke(points, true);
+    s.adjustment_liquify_stroke(points, true, false);
     // `pixel` renders and asserts the GPU took every command
     pixel(&s, 128, 128);
     assert!(s.adjustment_end(true));
@@ -606,8 +606,9 @@ fn a_save_leaves_liquify_working_and_the_next_keeps_how_it_ended() {
         contents(&opened)
     };
     // a small brush pushed down across the line
-    let push =
-        |x: f32| s.adjustment_liquify_stroke((0..12).flat_map(|i| [x, 24.0 + i as f32 * 8.0, 1.0]).collect(), true);
+    let push = |x: f32| {
+        s.adjustment_liquify_stroke((0..12).flat_map(|i| [x, 24.0 + i as f32 * 8.0, 1.0, 8.0]).collect(), true, false)
+    };
     assert!(s.adjustment_start(Adjustment::Liquify));
     s.adjustment_liquify_value(0, 0.1);
     push(32.0);
@@ -818,6 +819,31 @@ fn every_brush_draws_a_preview() {
     }
     // the preview canvas leaves the artwork alone
     assert!(!s.info().can_undo);
+}
+
+#[test]
+fn a_preview_mixes_wet_only_where_the_brush_says_it_does() {
+    let Some(s) = session(100, 100) else { return };
+    let (set, index) = {
+        let st = s.shared.lock();
+        let found = st.library.iter().enumerate().find_map(|(set, l)| {
+            l.brushes.iter().position(procraft_engine::brush::Brush::mixes_wet).map(|index| (set, index))
+        });
+        found.unwrap()
+    };
+    let change = |key: &str, value: f32| {
+        let mut st = s.shared.lock();
+        st.library.get_mut(set).and_then(|l| l.brushes.get_mut(index)).unwrap().set_setting(key, value);
+    };
+    let preview = || s.brush_preview(set as u32, index as u32, 240, 60).unwrap().rgba;
+    // ours that mix wet say so, and show it
+    let wet = preview();
+    change("preview_wet_mix", 0.0);
+    let dry = preview();
+    assert_ne!(wet, dry);
+    // switched off, it is drawn as the brush would be with no wet mix at all
+    change("wet_dilution", 0.0);
+    assert_eq!(dry, preview());
 }
 
 #[test]
@@ -1103,6 +1129,23 @@ fn nothing_is_saved_from_a_lost_graphics_device() {
     assert!(s.save(dir.to_string_lossy().into_owned()).is_err());
     assert_eq!(std::fs::read(dir.join("thumbnail.png")).unwrap(), kept);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stroke_on_a_canvas_whose_graphics_stopped_tells_so_again() {
+    let Some(s) = session(64, 64) else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    gpu.device.destroy();
+    let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
+    assert!(gpu.is_lost());
+    let told = s.take_failure();
+    assert!(told.is_some());
+    assert_eq!(s.take_failure(), None, "told once");
+    // the notice gone (the app away meanwhile), a stroke that can't show says why again
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!(s.take_failure(), told);
+    assert_eq!(s.take_failure(), None);
 }
 
 #[test]
@@ -1913,19 +1956,21 @@ fn liquify_moves_paint_as_one_undo_step() {
     s.stroke_end(vec![]);
     assert!(s.liquify_begin());
     let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.15, pressure: 1.0, distortion: 0.0 };
-    let path: Vec<f32> = (0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0]).collect();
-    s.liquify_stroke(path, true, brush);
+    let path: Vec<f32> = (0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0, 8.0]).collect();
+    s.liquify_stroke(path, true, false, brush);
     assert!(pixel(&s, 45, 50)[0] < 128, "{:?}", pixel(&s, 45, 50));
     s.liquify_amount(0.5);
     s.liquify_reset();
     assert_eq!(pixel(&s, 45, 50), [255, 255, 255, 255]);
-    s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0]).collect(), true, brush);
-    // lifted while moving, it carries on further right
+    s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0, 8.0]).collect(), true, false, brush);
+    // lifted while moving, it carries on further right as time passes
     let row = |s: &CanvasSession| (40..90).map(|x| pixel(s, x, 50)).collect::<Vec<_>>();
     let before = row(&s);
-    s.liquify_coast(0.1, 0.0, 1.0, brush);
+    assert!(s.liquify_lift(1.0, brush));
+    assert_eq!(row(&s), before, "it goes on over time, not at once");
+    assert!(s.liquify_tick(0.1, brush));
     assert_ne!(row(&s), before);
-    s.liquify_coast(f32::NAN, 0.0, 1.0, brush);
+    assert!(!s.liquify_lift(f32::NAN, brush) || s.liquify_tick(0.1, brush));
     s.adjust_end(true);
     s.undo();
     assert_eq!(pixel(&s, 30, 50), [0, 0, 0, 255]);
@@ -1947,12 +1992,15 @@ fn liquify_pushes_a_layer_s_mask_along() {
     assert!(s.select_layer(layer));
     assert!(s.liquify_begin());
     let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.15, pressure: 1.0, distortion: 0.0 };
-    s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0]).collect(), true, brush);
+    s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0, 8.0]).collect(), true, false, brush);
     // pushed right, the dot still hidden where it went
     assert_eq!(pixel(&s, 45, 50), [255, 255, 255, 255]);
     s.adjust_end(true);
     assert_eq!(pixel(&s, 45, 50), [255, 255, 255, 255]);
-    assert_eq!(pixel(&s, 30, 50), [255, 255, 255, 255]);
+    // only the two dots' soft edges, each moved as the other was, show at all
+    for x in 15..60 {
+        assert!(pixel(&s, x, 50)[0] > 180, "{x}: {:?}", pixel(&s, x, 50));
+    }
 }
 
 #[test]
@@ -1967,7 +2015,7 @@ fn liquify_moves_a_small_canvas_shown_large() {
     let before = row(&s);
     assert!(s.liquify_begin());
     let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.5, pressure: 1.0, distortion: 0.0 };
-    s.liquify_stroke((0..=30).flat_map(|i| [300.0 + i as f32 * 10.0, 400.0, 1.0]).collect(), true, brush);
+    s.liquify_stroke((0..=30).flat_map(|i| [300.0 + i as f32 * 10.0, 400.0, 1.0, 8.0]).collect(), true, false, brush);
     assert_ne!(row(&s), before, "the push moved nothing");
     s.adjust_end(false);
 }
@@ -2390,6 +2438,164 @@ fn a_shape_still_held_follows_the_pen_and_a_finger_snaps_it() {
     s.stroke_end(vec![]);
     assert_eq!(s.quickshape_info().unwrap().kind, QuickShapeKind::Circle);
     s.quickshape_done();
+}
+
+#[test]
+fn undo_goes_back_through_a_shapes_drags_to_the_stroke_it_was_made_of() {
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.02);
+    // a wavering line, a line once it snaps
+    let pts: Vec<PenSample> = (0..=40)
+        .map(|i| {
+            let t = i as f32 / 40.0;
+            sample(20.0 + 160.0 * t, 100.0 + 5.0 * (t * 18.0).sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    let draw = || {
+        s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+        s.stroke_add(pts[1..].to_vec());
+    };
+    // (as drawn, an open shape staying open)
+    let seen = || {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        canvas.read_composite(gpu).unwrap()
+    };
+    let blank = seen();
+    draw();
+    s.stroke_end(vec![]);
+    let stroke = seen();
+    s.undo();
+    assert_eq!(seen(), blank);
+    draw();
+    let info = s.quickshape_hold().expect("a shape");
+    assert_eq!(info.kind, QuickShapeKind::Line);
+    s.stroke_end(vec![]);
+    let snapped = seen();
+    assert_ne!(snapped, stroke);
+    // a drag is a step of its own, back and forward, the shape staying open
+    s.quickshape_step();
+    let moved = s.quickshape_move_handle(1, 180.0, 60.0).unwrap();
+    assert!(!s.info().can_redo);
+    s.undo();
+    assert_eq!(s.quickshape_info().unwrap().handles, info.handles);
+    assert_eq!(seen(), snapped);
+    assert!(s.info().can_redo);
+    s.redo();
+    assert_eq!(s.quickshape_info().unwrap().handles, moved.handles);
+    assert!(!s.info().can_redo);
+    s.undo();
+    // past the drags the shape goes, its stroke back as drawn
+    s.undo();
+    assert!(s.quickshape_info().is_none());
+    assert_eq!(seen(), stroke);
+    assert!(s.info().can_undo && s.info().can_redo);
+    // redone, it is the shape as it snapped, kept, its drags gone
+    s.redo();
+    assert!(s.quickshape_info().is_none());
+    assert_eq!(seen(), snapped);
+    assert!(!s.info().can_redo);
+    // and so on either way, a kept shape as one being edited
+    s.undo();
+    assert_eq!(seen(), stroke);
+    s.undo();
+    assert_eq!(seen(), blank);
+    s.redo();
+    assert_eq!(seen(), stroke);
+    s.redo();
+    assert_eq!(seen(), snapped);
+    // with something done since, undo takes that, and the shape is a step like any other
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 900.0)]);
+    s.stroke_end(vec![]);
+    s.undo();
+    assert_eq!(seen(), snapped);
+    s.undo();
+    assert_eq!(seen(), blank);
+}
+
+#[test]
+fn a_nodes_drag_by_touch_is_one_step_of_undo_and_a_tap_on_it_none() {
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.02);
+    let pts: Vec<PenSample> = (0..=40).map(|i| sample(20.0 + 4.0 * i as f32, 100.0, f64::from(i) * 8.0)).collect();
+    s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+    s.stroke_add(pts[1..].to_vec());
+    let info = s.quickshape_hold().expect("a shape");
+    s.stroke_end(vec![]);
+    s.set_shape_editing(true);
+    let (x, y) = (info.handles[2], info.handles[3]);
+    let drag = |by: f32, from: f64| {
+        s.touch_down(7, PointerKind::Finger, vec![sample(x, y, from)]);
+        for i in 1..=5 {
+            let (i, t) = (i as f32, f64::from(i) * 16.0);
+            s.touch_move(7, vec![sample(x, y + by * i / 5.0, from + t)]);
+        }
+        s.touch_up(7, vec![]);
+    };
+    s.touch_down(7, PointerKind::Finger, vec![sample(x, y, 1900.0)]);
+    s.touch_up(7, vec![]);
+    drag(40.0, 2000.0);
+    let moved = s.quickshape_info().unwrap();
+    // it stayed for the first ten points of the way (two pixels each here), then went as the
+    // finger did, behind it
+    let lag = 40.0 - (moved.handles[3] - info.handles[3]);
+    assert!((20.0..=28.0).contains(&lag), "{lag}");
+    assert!((moved.handles[2] - info.handles[2]).abs() < 1.0, "{:?}", moved.handles);
+    // five moves, one step: one undo has it all back, the shape still open
+    s.undo();
+    assert_eq!(s.quickshape_info().unwrap().handles, info.handles);
+    s.redo();
+    assert_eq!(s.quickshape_info().unwrap().handles, moved.handles);
+    s.undo();
+    // past it the shape goes: the tap made no step of its own
+    s.undo();
+    assert!(s.quickshape_info().is_none());
+}
+
+#[test]
+fn a_mask_takes_what_is_pasted_by_its_brightness_only_when_asked() {
+    let Some(s) = session(64, 64) else { return };
+    s.set_color(1.0, 0.0, 0.0);
+    let layer = s.layers().iter().find(|l| l.current).unwrap().id;
+    assert!(s.fill_layer(layer));
+    let mask = s.add_mask(layer).unwrap();
+    s.select_layer(mask);
+    // white on the left, clear on the right: a sketch on a layer of its own
+    let rgba: Vec<u8> = (0..64 * 64).flat_map(|i| if i % 64 < 32 { [255; 4] } else { [0; 4] }).collect();
+    let picture = crate::layers::ThumbnailImage { width: 64, height: 64, rgba };
+    // as anything pasted, a new layer
+    let layers = s.layers().len();
+    let pasted = s.paste(picture.clone()).unwrap();
+    assert_eq!(s.layers().len(), layers + 1);
+    assert_ne!(pasted, mask);
+    s.undo();
+    assert_eq!(s.layers().len(), layers);
+    s.select_layer(mask);
+    // asked to, the mask holds it: the layer shows where it was bright, nowhere else
+    let (_plugins, plugin_files) = crate::hooks::tests::paste_into_masks(&s, "mask-takes-paste");
+    assert_eq!(s.paste(picture.clone()), Some(mask));
+    assert_eq!(s.layers().len(), layers);
+    assert_eq!(pixel(&s, 10, 32), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 50, 32), [255, 255, 255, 255]);
+    // one step back to the mask as it was
+    s.undo();
+    assert_eq!(pixel(&s, 50, 32), [255, 0, 0, 255]);
+    // from another app too: smaller than the canvas, in the middle of it, the rest hidden
+    let square = crate::layers::ThumbnailImage { width: 16, height: 16, rgba: vec![255; 16 * 16 * 4] };
+    assert!(s.paste_picture_into_mask(square.clone()));
+    assert_eq!(s.layers().len(), layers);
+    assert_eq!(pixel(&s, 32, 32), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 4, 4), [255, 255, 255, 255]);
+    s.undo();
+    // on any other layer it is a new layer still
+    s.select_layer(layer);
+    assert!(!s.paste_picture_into_mask(square));
+    assert_ne!(s.paste(picture), Some(layer));
+    assert_eq!(s.layers().len(), layers + 1);
+    let _ = std::fs::remove_dir_all(plugin_files);
 }
 
 #[test]
@@ -3486,7 +3692,9 @@ fn the_last_stroke_snaps_to_a_shape_until_something_else_is_done() {
     assert_eq!(pixel(&s, 40, 64), [255, 255, 255, 255]);
     assert_eq!(pixel(&s, 76, 54), [255, 255, 255, 255]);
     assert!((50..70).any(|y| pixel(&s, 100, y)[0] < 128));
-    // one step: undone, nothing is left
+    // undone, the stroke is back as drawn; undone again, nothing is left
+    s.undo();
+    assert!(near(40, 64) && near(76, 54));
     s.undo();
     assert!((50..70).all(|y| pixel(&s, 100, y) == [255, 255, 255, 255]));
     // once something else is done (an undo here), there is no last stroke to snap
@@ -4085,6 +4293,12 @@ fn frosted_panels_come_six_numbers_each() {
     assert_eq!(s.shared.lock().backdrops, vec![[10.0, 20.0, 60.0, 80.0, 12.0, 0.5]]);
     s.set_backdrops(Vec::new());
     assert!(s.shared.lock().backdrops.is_empty());
+    // the thin glass goes with them, and with them being cleared
+    s.set_glass(vec![1.0, 2.0, 3.0, 4.0, 5.0, 1.0], vec![6.0, 7.0, 8.0, 9.0, 2.0, 0.5, 1.0]);
+    assert_eq!(s.shared.lock().backdrops, vec![[1.0, 2.0, 3.0, 4.0, 5.0, 1.0]]);
+    assert_eq!(s.shared.lock().backdrop_windows, vec![[6.0, 7.0, 8.0, 9.0, 2.0, 0.5]]);
+    s.set_backdrops(Vec::new());
+    assert!(s.shared.lock().backdrop_windows.is_empty());
 }
 
 #[test]
@@ -5227,7 +5441,7 @@ fn a_dragged_threshold_leaves_the_layer_as_a_pour_made_at_it() {
 }
 
 #[test]
-fn color_fill_set_to_close_gaps_stays_on_its_side_of_a_wall_with_a_gap() {
+fn a_fill_runs_through_a_gap_in_a_wall() {
     let Some(s) = session(120, 120) else { return };
     s.set_brush_size(0.1);
     // a wall down the middle, open for a short way half down
@@ -5240,17 +5454,11 @@ fn color_fill_set_to_close_gaps_stays_on_its_side_of_a_wall_with_a_gap() {
         let p = pixel(s, x, y);
         p[0] > 200 && p[1] < 100
     };
-    // through the gap as it ships; kept to its side with gap closing
     assert!(s.pour_begin(30.0, 60.0, 0.9, 0.2, 0.1, 0.3));
     s.pour_end(true, None);
     assert!(red(&s, 30, 20) && red(&s, 100, 60) && red(&s, 100, 20));
     s.undo();
     assert!(!red(&s, 30, 20));
-    s.set_fill_gap(32);
-    assert!(s.pour_begin(30.0, 60.0, 0.9, 0.2, 0.1, 0.3));
-    s.pour_end(true, None);
-    assert!(red(&s, 30, 20) && red(&s, 50, 100) && red(&s, 5, 115));
-    assert!(!red(&s, 100, 60) && !red(&s, 100, 20) && !red(&s, 115, 115));
 }
 
 #[test]
@@ -5441,6 +5649,232 @@ fn a_layer_shown_alone_hides_the_others_until_solo_ends() {
     s.undo();
     assert_eq!(s.solo(), None);
     assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
+}
+
+#[test]
+fn a_group_shown_alone_shows_its_layers_and_opens_whole_once_hidden() {
+    let Some(s) = session(100, 100) else { return };
+    s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+    s.set_brush_size(0.4);
+    let dot = |x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    let black = [0, 0, 0, 255];
+    let white = [255, 255, 255, 255];
+    dot(10.0);
+    let a = s.add_layer();
+    dot(40.0);
+    s.add_layer();
+    dot(70.0);
+    // the top two grouped, then the group shown alone
+    assert!(s.pick_layer(a));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.set_solo(Some(group)));
+    assert_eq!([pixel(&s, 10, 50), pixel(&s, 40, 50), pixel(&s, 70, 50)], [white, black, black]);
+    // hidden as well, it leaves only the background; saved so, it opens with every layer shown
+    // but the group's
+    assert!(s.set_layer_visible(group, false));
+    assert_eq!([pixel(&s, 10, 50), pixel(&s, 40, 50), pixel(&s, 70, 50)], [white, white, white]);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let dir = std::env::temp_dir().join(format!("procraft-solo-group-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    opened.use_gpu(gpu);
+    {
+        let mut st = opened.shared.lock();
+        st.window_size = (100, 100);
+        st.view = Some(View::fit((100, 100), (100, 100)));
+        st.ensure_canvas();
+        st.canvas.as_mut().unwrap().set_cache_composites(true);
+    }
+    assert_eq!(opened.solo(), None);
+    assert_eq!(opened.layers().len(), s.layers().len());
+    assert_eq!([pixel(&opened, 10, 50), pixel(&opened, 40, 50), pixel(&opened, 70, 50)], [black, white, white]);
+    // and a new layer shows
+    let bottom = opened.layers().last().unwrap().id;
+    assert!(opened.select_layer(bottom));
+    opened.set_brush_size(0.4);
+    assert_ne!(opened.add_layer(), 0);
+    opened.stroke_begin(PointerKind::Finger, vec![sample(90.0, 50.0, 0.0)]);
+    opened.stroke_end(vec![]);
+    assert_eq!(pixel(&opened, 90, 50), black);
+}
+
+/// The artwork saved and opened again in a new session, as after a restart (same GPU and window).
+fn reopened(s: &CanvasSession, name: &str) -> std::sync::Arc<CanvasSession> {
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let side = s.shared.lock().window_size;
+    let dir = std::env::temp_dir().join(format!("procraft-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    opened.use_gpu(gpu);
+    {
+        let mut st = opened.shared.lock();
+        let canvas = (st.doc.width(), st.doc.height());
+        st.window_size = side;
+        st.view = Some(View::fit(canvas, side));
+        st.ensure_canvas();
+    }
+    opened
+}
+
+#[test]
+fn a_layer_that_doesnt_show_takes_no_paint_and_says_why_until_shown() {
+    use crate::layers::Blocked;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    let dot = |s: &CanvasSession, x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    let black = [0, 0, 0, 255];
+    let white = [255, 255, 255, 255];
+    dot(&s, 20.0);
+    let first = s.layers()[0].id;
+    // the painted layer shown alone, then a new layer: it is left out of the picture
+    assert!(s.set_solo(Some(first)));
+    let top = s.add_layer();
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    // still so once saved and opened again, as after a restart: strokes on it say why rather
+    // than going in unseen
+    let s = reopened(&s, "soloed-out");
+    s.set_brush_size(0.4);
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    dot(&s, 80.0);
+    // Show ticks its own box only (ticked already: nothing), so solo stays and so does the alert
+    assert_eq!(s.show_layer(top), None);
+    assert_eq!((s.solo(), s.why_blocked()), (Some(first), Some(Blocked::Hidden)));
+    // its box tapped ends solo (as in the panel); the stroke left nothing behind, the next paints
+    assert!(s.tap_visibility(top).is_some());
+    assert_eq!((s.solo(), s.why_blocked()), (None, None));
+    assert_eq!([pixel(&s, 20, 50), pixel(&s, 80, 50)], [black, white]);
+    dot(&s, 80.0);
+    assert_eq!(pixel(&s, 80, 50), black);
+    // hidden by its own box, Show ticks it: one step, told as a tap is
+    assert!(s.set_layer_visible(top, false));
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    assert_eq!(s.show_layer(top).as_deref(), Some("Show layer"));
+    assert_eq!(s.why_blocked(), None);
+    s.undo();
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    s.redo();
+
+    // in a hidden group: visible itself, but not seen
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.set_layer_visible(group, false));
+    assert!(s.layers().iter().any(|l| l.id == top && l.current && l.visible));
+    let s = reopened(&s, "hidden-group");
+    s.set_brush_size(0.4);
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    dot(&s, 50.0);
+    // Show leaves the group hidden: the alert stays until the group's box is ticked
+    assert_eq!(s.show_layer(top), None);
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    assert!(s.set_layer_visible(group, true));
+    assert_eq!(s.why_blocked(), None);
+    assert_eq!(pixel(&s, 50, 50), white);
+    dot(&s, 50.0);
+    assert_eq!(pixel(&s, 50, 50), black);
+    s.undo();
+    s.undo();
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden), "the stroke and the group's box undone");
+    // the group itself current: its own alert, whatever hides it
+    assert!(s.select_layer(group));
+    assert_eq!(s.why_blocked(), Some(Blocked::GroupHidden));
+    assert!(s.set_layer_visible(group, true));
+    assert!(s.set_solo(Some(first)));
+    assert_eq!(s.why_blocked(), Some(Blocked::GroupHidden));
+    assert_eq!(s.show_layer(group), None, "its box was ticked: solo stays");
+    assert!(s.set_solo(None));
+    assert_eq!(s.why_blocked(), None);
+    assert!(s.set_layer_visible(group, false));
+    assert!(s.select_layer(top));
+
+    // a mask shown alone shows its layer with it, which takes paint
+    let s = reopened(&s, "mask-alone");
+    s.set_brush_size(0.4);
+    assert!(s.set_layer_visible(group, true));
+    let mask = s.add_mask(top).unwrap();
+    assert!(s.set_solo(Some(mask)));
+    assert!(s.select_layer(top));
+    assert_eq!(s.why_blocked(), None);
+    assert_eq!([pixel(&s, 20, 50), pixel(&s, 80, 50)], [white, black]);
+    dot(&s, 35.0);
+    assert_eq!(pixel(&s, 35, 50), black);
+}
+
+#[test]
+fn a_stroke_or_a_fill_with_a_group_current_says_so() {
+    use crate::layers::Blocked;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    let dot = |s: &CanvasSession, x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    let black = [0, 0, 0, 255];
+    let white = [255, 255, 255, 255];
+    dot(&s, 20.0);
+    let layer = s.layers()[0].id;
+    // another layer beside the group, so that the one in it can go
+    assert_ne!(s.add_layer(), 0);
+    assert!(s.select_layer(layer));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.select_layer(group));
+    // still current once saved and opened again, as after a restart
+    let s = reopened(&s, "group-current");
+    s.set_brush_size(0.4);
+    assert_eq!(s.why_blocked(), None, "a group still takes other changes (it transforms whole)");
+    assert_eq!(s.why_unpainted(), Some(Blocked::Group));
+    dot(&s, 80.0);
+    assert_eq!(pixel(&s, 80, 50), white, "no paint went anywhere");
+    assert!(s.layers().iter().any(|l| l.id == group && l.current));
+    // a layer in it takes paint
+    assert!(s.select_layer(layer));
+    assert_eq!(s.why_unpainted(), None);
+    dot(&s, 80.0);
+    assert_eq!(pixel(&s, 80, 50), black);
+    // locked or hidden, those say so first; empty, a stroke still asks for a layer
+    assert!(s.select_layer(group));
+    assert!(s.set_layer_visible(group, false));
+    assert_eq!(s.why_unpainted(), Some(Blocked::GroupHidden));
+    assert!(s.set_layer_visible(group, true));
+    assert!(s.delete_layer(layer));
+    assert!(s.select_layer(group));
+    assert_eq!(s.why_blocked(), Some(Blocked::EmptyGroup));
+    assert_eq!(s.why_unpainted(), Some(Blocked::Group));
+}
+
+#[test]
+fn a_group_with_a_hidden_layer_in_it_takes_no_change_and_says_so() {
+    use crate::layers::{Blocked, HiddenBy};
+    let Some(s) = session(64, 64) else { return };
+    let lower = s.layers()[0].id;
+    let upper = s.add_layer();
+    assert!(s.pick_layer(lower));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.set_layer_visible(lower, false));
+    assert!(s.select_layer(group));
+    // the group's own box ticked: still hidden for a change, as a group, a stroke too
+    assert_eq!(s.why_blocked(), Some(Blocked::GroupHidden));
+    assert_eq!(s.why_unpainted(), Some(Blocked::GroupHidden));
+    assert_eq!(s.hidden_by(), Some(HiddenBy::Inside));
+    // the visible layer in it takes them
+    assert!(s.select_layer(upper));
+    assert_eq!((s.why_blocked(), s.hidden_by()), (None, None));
+    assert!(s.set_layer_visible(lower, true));
+    assert!(s.select_layer(group));
+    assert_eq!(s.why_blocked(), None);
+    assert_eq!(s.why_unpainted(), Some(Blocked::Group));
 }
 
 #[test]
@@ -7228,8 +7662,8 @@ fn adjustments_among_other_work_undo_and_redo_whole() {
                                 next(100) as f32 / 100.0,
                             ),
                             Adjustment::Liquify => {
-                                let points = (0..20).flat_map(|i| [x + i as f32 * 2.0, y, 1.0]).collect();
-                                s.adjustment_liquify_stroke(points, true);
+                                let points = (0..20).flat_map(|i| [x + i as f32 * 2.0, y, 1.0, 8.0]).collect();
+                                s.adjustment_liquify_stroke(points, true, false);
                             }
                             Adjustment::Clone => {
                                 s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
@@ -7962,7 +8396,12 @@ fn painting_in_every_mode_undoes_redoes_and_saves_whole() {
                         ];
                         let brush =
                             LiquifyBrush { kind: kinds[next(5) as usize], size: 0.2, pressure: 1.0, distortion: 0.3 };
-                        s.liquify_stroke((0..=10).flat_map(|k| [x + k as f32, y, 1.0]).collect(), true, brush);
+                        s.liquify_stroke(
+                            (0..=10).flat_map(|k| [x + k as f32, y, 1.0, 8.0]).collect(),
+                            true,
+                            false,
+                            brush,
+                        );
                         s.adjust_end(next(4) != 0);
                     }
                 }
@@ -8874,13 +9313,13 @@ fn leaving_with_liquify_or_crop_open_keeps_the_work() {
     // liquified, then off to the gallery with Liquify still open: saved as shown
     assert!(s.liquify_begin());
     let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.2, pressure: 1.0, distortion: 0.0 };
-    s.liquify_stroke((0..=20).flat_map(|i| [40.0, 30.0 + i as f32 * 2.0, 1.0]).collect(), true, brush);
+    s.liquify_stroke((0..=20).flat_map(|i| [40.0, 30.0 + i as f32 * 2.0, 1.0, 8.0]).collect(), true, false, brush);
     let liquified = composite(&s);
     s.save(dir.join("a").to_string_lossy().into_owned()).unwrap();
     assert!(reopened(&dir.join("a")) == liquified, "Liquify's work lost on leaving");
     // undone inside Liquify, it still liquifies
     s.undo();
-    s.liquify_stroke((0..=20).flat_map(|i| [60.0, 30.0 + i as f32 * 2.0, 1.0]).collect(), true, brush);
+    s.liquify_stroke((0..=20).flat_map(|i| [60.0, 30.0 + i as f32 * 2.0, 1.0, 8.0]).collect(), true, false, brush);
     assert!(composite(&s) != liquified, "Liquify stopped after an undo");
     s.adjust_end(true);
     // Crop and Resize open, a smaller frame not applied, off to the gallery: the canvas as it was
@@ -9246,6 +9685,44 @@ fn a_touch_with_a_panel_open_paints_only_as_a_drag() {
     assert!(s.info().can_undo);
 }
 
+/// Lifted moving with momentum, liquify goes on by the touch timer until it runs out, and then
+/// the timer stops; without momentum it stops as it lifts.
+#[test]
+fn liquify_lifted_moving_goes_on_by_the_touch_timer() {
+    use crate::Adjustment;
+    let drag = |momentum: f32| -> Option<std::sync::Arc<CanvasSession>> {
+        let s = session(256, 256)?;
+        s.set_brush_size(0.1);
+        s.stroke_begin(PointerKind::Finger, vec![sample(128.0, 10.0, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(128.0, 10.0 + i as f32 * 8.0, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+        assert!(s.adjustment_start(Adjustment::Liquify));
+        s.adjustment_liquify_value(0, 0.2);
+        s.adjustment_liquify_value(3, momentum);
+        s.touch_down(1, PointerKind::Finger, vec![sample(60.0, 128.0, 1000.0)]);
+        for i in 1..=10 {
+            s.touch_move(1, vec![sample(60.0 + i as f32 * 6.0, 128.0, 1000.0 + f64::from(i) * 8.0)]);
+        }
+        s.touch_up(1, vec![sample(120.0, 128.0, 1088.0)]);
+        Some(s)
+    };
+    let Some(still) = drag(0.0) else { return };
+    assert_eq!(still.touch_deadline(), None);
+    let Some(s) = drag(1.0) else { return };
+    let row = |s: &CanvasSession| (100..220).map(|x| pixel(s, x, 128)).collect::<Vec<_>>();
+    let lifted = row(&s);
+    let mut now = 1088.0f64;
+    let mut ticks = 0;
+    while let Some(due) = s.touch_deadline() {
+        now = now.max(due);
+        s.touch_tick(now);
+        ticks += 1;
+        assert!(ticks < 200, "it never stopped");
+    }
+    assert!(ticks > 30, "{ticks} ticks");
+    assert_ne!(row(&s), lifted, "it went on after the lift");
+}
+
 /// Liquify held still works on as the time passes, a stamp at a time adding up to the whole of it.
 #[test]
 fn liquify_held_still_works_on() {
@@ -9269,7 +9746,7 @@ fn liquify_held_still_works_on() {
         s.adjustment_liquify_value(0, 0.28);
         s.adjustment_liquify_kind(kind);
         s.touch_down(1, PointerKind::Finger, vec![sample(128.0, 128.0, 1000.0)]);
-        assert_eq!(s.touch_deadline(), Some(1110.0));
+        assert_eq!(s.touch_deadline(), Some(1016.0));
         for ms in (1016..=1500).step_by(16) {
             s.touch_tick(f64::from(ms));
         }
@@ -9284,20 +9761,270 @@ fn liquify_held_still_works_on() {
         p[0] > 150 && p[1] < 150
     };
     let Some(right) = held(LiquifyKind::TwirlRight, false) else { return };
-    // 0.39 s at 4 a second, 50 from the middle of a brush of 101: turned 51 degrees, clockwise
-    assert!(ink(&right, 159, 167) && !ink(&right, 159, 89), "turned clockwise on the screen");
+    // 0.39 s at 4 a second, 50 from the middle of a brush of 101: turned 44 degrees, clockwise
+    assert!(ink(&right, 164, 163) && !ink(&right, 164, 93), "turned clockwise on the screen");
     assert!(!ink(&right, 178, 128), "turned away from where it was");
     let Some(left) = held(LiquifyKind::TwirlLeft, false) else { return };
-    assert!(ink(&left, 159, 89) && !ink(&left, 159, 167), "turned anticlockwise on the screen");
+    assert!(ink(&left, 164, 93) && !ink(&left, 164, 163), "turned anticlockwise on the screen");
     let Some(pinch) = held(LiquifyKind::Pinch, true) else { return };
     assert!(ink(&pinch, 152, 128) && !ink(&pinch, 168, 128), "drawn in");
     let Some(expand) = held(LiquifyKind::Expand, true) else { return };
-    assert!(ink(&expand, 186, 128) && !ink(&expand, 168, 128), "pushed out");
-    // a push held still does nothing more: nothing to wait for
+    assert!(ink(&expand, 183, 128) && !ink(&expand, 168, 128), "pushed out");
+    // a push held still does nothing more
     let Some(s) = session(256, 256) else { return };
     assert!(s.adjustment_start(Adjustment::Liquify));
     s.touch_down(1, PointerKind::Finger, vec![sample(128.0, 128.0, 0.0)]);
-    s.touch_tick(200.0);
-    assert_eq!(s.touch_deadline(), None);
+    assert!(s.touch_tick(200.0).is_empty());
     s.touch_up(1, vec![sample(128.0, 128.0, 210.0)]);
+    assert_eq!(s.touch_deadline(), None);
+}
+
+/// Whether each of `spots` shows a dot in the composite (the background is white).
+fn dots_shown(s: &CanvasSession, spots: &[(u32, u32)]) -> Vec<bool> {
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+    canvas.render_finished(gpu, &mut st.doc);
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+    let px = canvas.read_composite(gpu).unwrap();
+    let w = st.doc.width();
+    spots
+        .iter()
+        .map(|&(x, y)| {
+            let i = ((y * w + x) * 4) as usize;
+            px[i..i + 3].iter().any(|c| *c < 200)
+        })
+        .collect()
+}
+
+/// Whether each of `spots` should show a dot by the layers panel: some paint layer holding it (as
+/// its pixels say) has its box ticked, and so does every group it is in. Checks the boxes too: while
+/// a layer or group is shown alone, only it and what is in it may show ticked.
+fn dots_listed(s: &CanvasSession, spots: &[(u32, u32)]) -> Vec<bool> {
+    use crate::layers::{LayerInfo, LayerType};
+    let layers = s.layers();
+    let solo = s.solo();
+    let by_id = |id: u64| layers.iter().find(|l| l.id == id);
+    let ancestors = |l: &LayerInfo| {
+        let mut out = Vec::new();
+        let mut at = l.parent;
+        while let Some(g) = at.and_then(by_id) {
+            if out.len() > layers.len() {
+                break;
+            }
+            out.push(g);
+            at = g.parent;
+        }
+        out
+    };
+    let ticked = |l: &LayerInfo| l.visible && !l.soloed_out;
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+    canvas.render_finished(gpu, &mut st.doc);
+    let w = st.doc.width();
+    let mut out = vec![false; spots.len()];
+    for l in layers.iter().filter(|l| l.kind == LayerType::Paint) {
+        let up = ancestors(l);
+        let alone = solo.is_none_or(|g| l.id == g || up.iter().any(|a| a.id == g));
+        assert_eq!(l.soloed_out, !alone, "{} #{} shown alone or not", l.name, l.id);
+        let shows = ticked(l) && up.iter().all(|g| ticked(g));
+        let px = canvas.read_layer(gpu, procraft_engine::document::LayerId(l.id)).unwrap();
+        for (k, &(x, y)) in spots.iter().enumerate() {
+            if shows && px[((y * w + x) * 4 + 3) as usize] > 200 {
+                out[k] = true;
+            }
+        }
+    }
+    out
+}
+
+/// Each row as the panel lists it, for a failure's message.
+fn rows(s: &CanvasSession) -> String {
+    let rows: Vec<String> = s
+        .layers()
+        .iter()
+        .map(|l| {
+            let indent = "  ".repeat(l.depth as usize);
+            let flags = [
+                (!l.visible, " hidden"),
+                (l.soloed_out, " soloed out"),
+                (l.current, " current"),
+                (l.picked, " picked"),
+            ];
+            let flags: String = flags.iter().filter(|(on, _)| *on).map(|(_, f)| *f).collect();
+            format!("{indent}{} #{} {:?}{flags}", l.name, l.id, l.kind)
+        })
+        .collect();
+    rows.join("\n")
+}
+
+/// Layers made, painted, picked, grouped (by Group, Combine Down and into groups below), moved,
+/// duplicated, deleted, hidden and shown alone, with undo and redo, then saved and opened again:
+/// after every step the picture shows a layer's dot exactly when the panel shows it ticked in
+/// ticked groups. A `side` canvas, its layers' textures held to `resident` layers (0: all).
+fn picture_follows_the_panel(seed: u32, side: u32, resident: u64, steps: usize) {
+    use crate::layers::LayerType;
+    let Some(s) = session(side, side) else { return };
+    {
+        let mut st = s.shared.lock();
+        let canvas = st.canvas.as_mut().unwrap();
+        canvas.set_cache_composites(true);
+        if resident > 0 {
+            canvas.set_resident_budget(resident * u64::from(side) * u64::from(side) * 4);
+        }
+    }
+    s.set_brush_size(0.2);
+    let mut state = seed;
+    let mut next = |n: u32| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) % n.max(1)
+    };
+    // one dot per new layer, apart (copies share theirs)
+    let cell = side / 10;
+    let spots: Vec<(u32, u32)> = (0..81).map(|k| ((k % 9 + 1) * cell, (k / 9 + 1) * cell)).collect();
+    let dot = |s: &CanvasSession, k: usize| {
+        let (x, y) = spots[k];
+        let c = (k as f32 * 0.37) % 1.0;
+        s.set_color(c * 0.6, 0.2, 0.8 - c * 0.5);
+        s.stroke_begin(PointerKind::Finger, vec![sample(x as f32, y as f32, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    dot(&s, 0);
+    let mut used = 1;
+    let mut done: Vec<String> = Vec::new();
+    for step in 0..steps {
+        let layers = s.layers();
+        let any = |k: u32| layers.get(k as usize % layers.len().max(1)).map_or(0, |l| l.id);
+        let groups: Vec<u64> = layers.iter().filter(|l| l.kind == LayerType::Group).map(|l| l.id).collect();
+        let group = |k: u32| groups.get(k as usize % groups.len().max(1)).copied();
+        let what = match next(18) {
+            0 | 1 => {
+                if used < spots.len() && s.add_layer() != 0 {
+                    dot(&s, used);
+                    used += 1;
+                }
+                "new layer, painted".to_owned()
+            }
+            2 => {
+                let id = any(next(64));
+                format!("select {id}: {}", s.select_layer(id))
+            }
+            3 | 4 => {
+                let id = any(next(64));
+                format!("pick {id}: {}", s.pick_layer(id))
+            }
+            5 | 6 => format!("group picked: {}", s.group_picked()),
+            7 => {
+                let id = any(next(64));
+                format!("combine down {id}: {:?}", s.combine_down(id))
+            }
+            8 => group(next(8)).map_or_else(String::new, |g| format!("ungroup {g}: {}", s.ungroup(g))),
+            9 => {
+                let (id, to) = (any(next(64)), next(layers.len() as u32 + 1));
+                format!("move {id} to {to}: {}", s.move_layer(id, to))
+            }
+            10 => {
+                let (id, by, above) = (any(next(64)), any(next(64)), next(2) == 0);
+                format!("move {id} next to {by} (above {above}): {}", s.move_next_to(id, by, above))
+            }
+            11 => {
+                let id = group(next(8)).filter(|_| next(2) == 0).unwrap_or_else(|| any(next(64)));
+                let visible = next(2) == 0;
+                format!("visible {id} {visible}: {}", s.set_layer_visible(id, visible))
+            }
+            12 => {
+                let id = any(next(64));
+                format!("duplicate {id}: {:?}", s.duplicate_layer(id))
+            }
+            13 => format!("duplicate picked: {}", s.duplicate_picked()),
+            14 => {
+                let id = any(next(64));
+                format!("delete {id}: {}", s.delete_layer(id))
+            }
+            15 => {
+                if next(2) == 0 {
+                    format!("undo: {:?}", s.undo())
+                } else {
+                    format!("redo: {:?}", s.redo())
+                }
+            }
+            16 => format!("pick all: {}", s.pick_all_layers()),
+            _ => {
+                let id = group(next(8)).filter(|_| next(2) == 0).unwrap_or_else(|| any(next(64)));
+                if next(3) == 0 {
+                    format!("box tapped {id}: {:?}", s.tap_visibility(id))
+                } else {
+                    format!("box held {id}: {:?}", s.hold_visibility(id))
+                }
+            }
+        };
+        done.push(format!("{step}: {what}"));
+        let (listed, shown) = (dots_listed(&s, &spots[..used]), dots_shown(&s, &spots[..used]));
+        let differ: Vec<usize> = (0..used).filter(|k| listed[*k] != shown[*k]).collect();
+        assert!(
+            differ.is_empty(),
+            "seed {seed}, side {side}: dots {differ:?} show otherwise than listed after\n{}\nrows:\n{}",
+            done.join("\n"),
+            rows(&s)
+        );
+    }
+    let before = dots_shown(&s, &spots[..used]);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let dir = std::env::temp_dir().join(format!("procraft-panel-{}-{seed}-{side}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    opened.use_gpu(gpu);
+    {
+        let mut st = opened.shared.lock();
+        st.window_size = (side, side);
+        st.view = Some(View::fit((side, side), (side, side)));
+        st.ensure_canvas();
+        st.canvas.as_mut().unwrap().set_cache_composites(true);
+    }
+    let after = dots_shown(&opened, &spots[..used]);
+    assert_eq!(after, dots_listed(&opened, &spots[..used]), "seed {seed}: opened again\n{}", done.join("\n"));
+    // the same picture, unless what was shown alone couldn't show (then every layer shows)
+    if opened.solo() == s.solo() {
+        assert_eq!(after, before, "seed {seed}: opened again\n{}", done.join("\n"));
+    }
+}
+
+#[test]
+fn the_picture_shows_what_the_layers_panel_shows_through_group_work() {
+    for seed in 1..=10 {
+        picture_follows_the_panel(seed, 100, 0, 60);
+    }
+    // layers past what the GPU holds kept compressed
+    for seed in 11..=13 {
+        picture_follows_the_panel(seed, 400, 3, 60);
+    }
+}
+
+#[test]
+fn while_a_layer_is_shown_alone_the_other_boxes_show_hidden_and_a_tap_ends_it() {
+    let Some(s) = session(100, 100) else { return };
+    let below = s.layers()[0].id;
+    let top = s.add_layer();
+    let ticked = |s: &CanvasSession| s.layers().iter().map(|l| l.visible && !l.soloed_out).collect::<Vec<_>>();
+    assert_eq!(ticked(&s), [true, true]);
+    assert_eq!(s.hold_visibility(top).as_deref(), Some("Solo visibility on"));
+    assert_eq!(s.solo(), Some(top));
+    // listed top first
+    assert_eq!(ticked(&s), [true, false]);
+    // a tap on any box shows every layer again, changing none
+    assert_eq!(s.tap_visibility(below).as_deref(), Some("Solo visibility off"));
+    assert_eq!((s.solo(), ticked(&s)), (None, vec![true, true]));
+    assert_eq!(s.hold_visibility(below).as_deref(), Some("Solo visibility on"));
+    assert_eq!(s.tap_visibility(below).as_deref(), Some("Solo visibility off"));
+    assert!(s.layers().iter().all(|l| l.visible));
+    // otherwise a tap shows or hides it, and holding again ends it
+    assert_eq!(s.tap_visibility(top).as_deref(), Some("Hide layer"));
+    assert_eq!(ticked(&s), [false, true]);
+    assert_eq!(s.tap_visibility(top).as_deref(), Some("Show layer"));
+    assert_eq!(s.hold_visibility(below).as_deref(), Some("Solo visibility on"));
+    assert_eq!(s.hold_visibility(below).as_deref(), Some("Solo visibility off"));
+    assert_eq!(s.tap_visibility(999), None);
 }

@@ -151,7 +151,9 @@ impl CanvasSession {
             return Some(LOST_SAID.to_owned());
         }
         let refused = st.canvas.as_mut().is_some_and(Canvas::take_smudge_refused);
-        st.crop_edit.failure.take().or_else(|| refused.then(|| SMUDGE_SAID.to_owned()))
+        let failed = st.crop_edit.failure.take().or_else(|| refused.then(|| SMUDGE_SAID.to_owned()));
+        let failed = failed.or_else(|| st.filters.take_said());
+        failed.or_else(|| st.hooks.as_ref().and_then(|hooks| hooks.take_said()))
     }
 
     /// The canvas's colour profile, by name.

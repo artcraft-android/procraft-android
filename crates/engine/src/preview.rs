@@ -40,8 +40,9 @@ pub fn samples(brush: &Brush) -> Vec<Sample> {
     let least = brush.setting("preview_pressure_min");
     // the control's full travel doubles the pressure
     let gain = PRESSURE_GAIN * 2.0 * brush.setting("preview_pressure_scale");
-    // the pen's direction turned by the preview's own offset (a quarter turn at 1)
-    let azimuth = brush.setting("preview_tilt_offset") * std::f32::consts::FRAC_PI_2;
+    // the pen held a quarter turn round from upright, then turned by the preview's own offset (a
+    // quarter turn at 1)
+    let azimuth = (brush.setting("preview_tilt_offset") - 1.0) * std::f32::consts::FRAC_PI_2;
     (0..SAMPLES)
         .map(|i| {
             let t = i as f32 / (SAMPLES - 1) as f32;
@@ -152,6 +153,15 @@ mod tests {
         assert!(s.get(SAMPLES / 4).unwrap().pressure < 0.6);
         assert_eq!(s.get(SAMPLES / 2).unwrap().pressure, 1.0);
         assert!((last.time_ms - 35.0 * STEP_MS).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_preview_s_pen_is_held_a_quarter_turn_round_then_turned_by_its_offset() {
+        use std::f32::consts::FRAC_PI_2;
+        let mut b = Brush::round_pen();
+        assert!(samples(&b).iter().all(|p| (p.azimuth + FRAC_PI_2).abs() < 1e-6));
+        b.set_setting("preview_tilt_offset", 1.0);
+        assert!(samples(&b).iter().all(|p| p.azimuth.abs() < 1e-6));
     }
 
     #[test]

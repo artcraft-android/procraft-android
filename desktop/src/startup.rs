@@ -128,7 +128,7 @@ pub fn gpu_start(count: usize) -> usize {
         return 0;
     }
     let saved = std::fs::read_to_string(files::app_dir().join(GPU_START)).unwrap_or_default();
-    let start = next_start(&saved, count);
+    let start = next_start(&saved, count, cfg!(windows));
     match read(&saved) {
         Some((index, Stage::Trying)) => log::warn!(
             "graphics backend {index} ({}) never finished its try (the app crashed or its pipelines failed): \
@@ -242,12 +242,15 @@ fn read(saved: &str) -> Option<(usize, Stage)> {
 }
 
 /// The backend to start from, of `count`, after the record `saved`: the next one if its try
-/// never finished or its run never ended, else the same one; the first without a record.
-fn next_start(saved: &str, count: usize) -> usize {
+/// never finished, else the same one; the first without a record. A run that never ended counts
+/// against its backend only where the system says when it is ending (`ends_told`): elsewhere a
+/// log-out or a kill looks just the same, and would move a backend that works for good.
+fn next_start(saved: &str, count: usize, ends_told: bool) -> usize {
     let count = count.max(1);
     match read(saved) {
-        Some((index, Stage::Trying | Stage::Running)) => (index % count + 1) % count,
-        Some((index, Stage::Ended)) if index < count => index,
+        Some((index, Stage::Trying)) => (index % count + 1) % count,
+        Some((index, Stage::Running)) if ends_told => (index % count + 1) % count,
+        Some((index, Stage::Running | Stage::Ended)) if index < count => index,
         _ => 0,
     }
 }
@@ -360,21 +363,26 @@ mod tests {
 
     #[test]
     fn a_start_or_run_that_never_ended_starts_the_next_from_the_next_backend() {
-        assert_eq!(next_start("", 3), 0);
-        assert_eq!(next_start("0 ended", 3), 0);
-        assert_eq!(next_start("2 ended", 3), 2);
+        assert_eq!(next_start("", 3, true), 0);
+        assert_eq!(next_start("0 ended", 3, true), 0);
+        assert_eq!(next_start("2 ended", 3, true), 2);
         // crashed while trying the first, before its first frame: the second; on the last: round
-        assert_eq!(next_start("0 trying", 3), 1);
-        assert_eq!(next_start("2 trying", 3), 0);
+        assert_eq!(next_start("0 trying", 3, true), 1);
+        assert_eq!(next_start("2 trying", 3, true), 0);
         // crashed while running on the first: the second
-        assert_eq!(next_start("0 running", 3), 1);
-        assert_eq!(next_start("1 running", 3), 2);
+        assert_eq!(next_start("0 running", 3, true), 1);
+        assert_eq!(next_start("1 running", 3, true), 2);
+        // where a log-out looks like a crash, a run that went on is no mark against its backend;
+        // one that never got started still is
+        assert_eq!(next_start("0 running", 2, false), 0);
+        assert_eq!(next_start("1 running", 2, false), 1);
+        assert_eq!(next_start("0 trying", 2, false), 1);
         // fewer backends now (one named by WGPU_BACKEND), or a record it can't read
-        assert_eq!(next_start("1 ended", 1), 0);
-        assert_eq!(next_start("1 trying", 1), 0);
-        assert_eq!(next_start("garbled", 3), 0);
-        assert_eq!(next_start("0 sideways", 3), 0);
-        assert_eq!(next_start(&format!("{} trying", usize::MAX), 3), 1);
+        assert_eq!(next_start("1 ended", 1, true), 0);
+        assert_eq!(next_start("1 trying", 1, true), 0);
+        assert_eq!(next_start("garbled", 3, true), 0);
+        assert_eq!(next_start("0 sideways", 3, true), 0);
+        assert_eq!(next_start(&format!("{} trying", usize::MAX), 3, true), 1);
         assert_eq!(read("1 running"), Some((1, super::Stage::Running)));
     }
 

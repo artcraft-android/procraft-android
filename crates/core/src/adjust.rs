@@ -4,12 +4,13 @@
 use procraft_engine::geom::Vec2;
 use procraft_engine::selection::feather_radius;
 use procraft_engine::tone;
-use procraft_gpu::{Filter, LiquifyMode, LiquifyStamp};
+use procraft_gpu::{Filter, LiquifyStamp};
 
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
 
-use crate::{CanvasSession, PenSample, PointerKind, State, ToolKind};
+use crate::liquify::{self, LiquifyRun, Point};
+use crate::{CanvasSession, PenSample, PointerKind, Shared, State, ToolKind};
 
 /// The adjustments whose one amount (0..1) is dragged across the canvas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -149,21 +150,6 @@ pub enum LiquifyKind {
     Reconstruct,
 }
 
-impl From<LiquifyKind> for LiquifyMode {
-    fn from(k: LiquifyKind) -> LiquifyMode {
-        match k {
-            LiquifyKind::Push => LiquifyMode::Push,
-            LiquifyKind::TwirlRight => LiquifyMode::TwirlRight,
-            LiquifyKind::TwirlLeft => LiquifyMode::TwirlLeft,
-            LiquifyKind::Pinch => LiquifyMode::Pinch,
-            LiquifyKind::Expand => LiquifyMode::Expand,
-            LiquifyKind::Crystals => LiquifyMode::Crystals,
-            LiquifyKind::Edge => LiquifyMode::Edge,
-            LiquifyKind::Reconstruct => LiquifyMode::Reconstruct,
-        }
-    }
-}
-
 /// The liquify brush: its way, and its size, pressure and distortion sliders (0..1).
 #[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
 pub struct LiquifyBrush {
@@ -181,41 +167,6 @@ const NOISE_TURBULENCE: f32 = 0.7;
 const BLOOM_SIZE: f32 = 0.3;
 const BLOOM_BURN: f32 = 0.35;
 const BLOOM_THRESHOLD: f32 = 0.5;
-/// How long (milliseconds) the liquify brush carries on at its lifting speed, at full momentum
-/// (it covers that distance while slowing to a stop), and the most stamps it adds doing so.
-const LIQUIFY_COAST_MS: f32 = 300.0;
-/// Liquify stamps fall a tenth of the brush apart, and at most this many window pixels: on a small
-/// canvas or zoomed in, a drag shorter than a tenth of the brush still moves the paint.
-const LIQUIFY_WINDOW_STEP: f32 = 6.0;
-
-/// The liquify brush's radius, canvas pixels, from its size slider (0..1).
-fn liquify_radius(size: f32) -> f32 {
-    4.0 + 1596.0 * size.clamp(0.0, 1.0).powf(2.2)
-}
-
-/// How far apart liquify stamps of `radius` (canvas pixels) fall, the view `zoom` (window pixels a
-/// canvas pixel).
-fn liquify_step(radius: f32, zoom: f32) -> f32 {
-    let most = if zoom.is_finite() && zoom > 0.0 { LIQUIFY_WINDOW_STEP / zoom } else { f32::INFINITY };
-    (radius * 0.1).min(most).max(0.01)
-}
-const LIQUIFY_COAST_STAMPS: usize = 400;
-/// How far a stamp of a moving twirl turns (radians at its centre) and of a pinch or expand draws.
-const LIQUIFY_TURN: f32 = 0.12;
-const LIQUIFY_DRAW: f32 = 0.08;
-/// Held still they work on this much a second, as measured (the first at 220 degrees a second).
-const LIQUIFY_HELD_TURN: f32 = 4.0;
-const LIQUIFY_HELD_DRAW: f32 = 1.55;
-
-/// What a moving stamp of `kind` gives as its move: `moved` for a push, for a twirl, pinch or
-/// expand how far it goes from nothing.
-fn stamp_move(kind: LiquifyKind, moved: Vec2) -> [f32; 2] {
-    match kind {
-        LiquifyKind::TwirlRight | LiquifyKind::TwirlLeft => [0.0, LIQUIFY_TURN],
-        LiquifyKind::Pinch | LiquifyKind::Expand => [0.0, LIQUIFY_DRAW],
-        _ => [moved.x, moved.y],
-    }
-}
 /// The (set, brush) cloning paints with: the soft airbrush.
 const CLONE_BRUSH: (usize, usize) = (3, 0);
 /// How far (points) a motion blur's drag goes for its whole amount, and the blur that is (canvas
@@ -307,6 +258,9 @@ impl State {
     /// Ends an open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
     pub(crate) fn end_adjustment(&mut self, commit: bool) {
         let within = if commit && self.adjusting { self.changed_since_begin() } else { None };
+        if self.heed_filter_run() {
+            return;
+        }
         self.pencil = false;
         self.cloning = false;
         self.clone_source = None;
@@ -323,7 +277,8 @@ impl State {
                 Some(Filter::Zoom { .. }) => None,
                 _ => Some("adjustment"),
             };
-            if let (true, Some(name)) = (commit, name) {
+            let filter = self.filters.close();
+            if let (true, Some(name)) = (commit, filter.as_deref().or(name)) {
                 canvas.name_next_step(name);
             }
             // only where it changed is kept
@@ -343,6 +298,24 @@ impl State {
         {
             self.last_filter = Some(filter);
             canvas.set_filter(filter);
+        }
+    }
+}
+
+impl Shared {
+    /// Steps of the liquify brush drawn into the field, and shown.
+    fn lay_liquify(&self, st: &mut State, steps: Vec<Vec<LiquifyStamp>>) {
+        if steps.is_empty() {
+            return;
+        }
+        if let Some(canvas) = st.canvas.as_mut() {
+            for step in &steps {
+                canvas.liquify_stamps(step);
+            }
+            if let Some(f) = st.last_filter {
+                canvas.set_filter(f);
+            }
+            self.frame(st);
         }
     }
 }
@@ -555,6 +528,7 @@ impl CanvasSession {
         }
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.liquify = LiquifyRun::default();
         if let Some(canvas) = st.canvas.as_mut() {
             // the layer's mask is pushed along with it
             if let Some(mask) = st.doc.mask_of(st.doc.current()) {
@@ -566,134 +540,67 @@ impl CanvasSession {
         true
     }
 
-    /// The liquify brush along window points `points` (x, y, pressure 0..1 each); `start` begins a
-    /// new stroke. Stamps fall a tenth of the brush apart, or a few window pixels if that is less.
-    pub fn liquify_stroke(&self, points: Vec<f32>, start: bool, brush: LiquifyBrush) {
+    /// The liquify brush along window points `points` (x, y, pressure 0..1, milliseconds since the
+    /// last, each), a pen's if `pen`; `start` begins a new stroke. What was turned down by the
+    /// amount stays as it is, and the stroke works at full strength on top of it.
+    pub fn liquify_stroke(&self, points: Vec<f32>, start: bool, pen: bool, brush: LiquifyBrush) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(view) = st.view else { return };
-        let radius = liquify_radius(brush.size);
-        let strength = 0.01 + 0.99 * brush.pressure.clamp(0.0, 1.0);
-        let step = liquify_step(radius, view.zoom());
         if start {
-            st.liquify_last = None;
+            st.liquify.begin();
+            if let (Some(Filter::Liquify { amount }), Some(canvas)) = (st.last_filter, st.canvas.as_mut())
+                && amount < 1.0
+            {
+                canvas.liquify_scale(amount);
+                st.adjust(Filter::Liquify { amount: 1.0 });
+            }
         }
-        let mut stamps = Vec::new();
-        for &[x, y, pen] in points.as_chunks::<3>().0 {
-            let Some(p) = view.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.is_finite()) else { continue };
-            let pressure = strength * if pen.is_finite() && pen > 0.0 { pen.min(1.0) } else { 1.0 };
-            let Some(last) = st.liquify_last else {
-                st.liquify_last = Some(p);
-                continue;
+        let mut stroke = Vec::with_capacity(points.len() / 4);
+        for &[x, y, force, ms] in points.as_chunks::<4>().0 {
+            let Some(at) = view.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.is_finite()) else { continue };
+            let force = if pen && force.is_finite() {
+                st.input.pressure_curve.eval(force.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+            } else {
+                1.0
             };
-            let gap = p.distance(last);
-            let count = (gap / step).floor() as usize;
-            if count == 0 {
-                continue;
-            }
-            let dir = (p - last) * (1.0 / gap);
-            let mut at = last;
-            for _ in 0..count {
-                let next = at + dir * step;
-                st.strokes = st.strokes.wrapping_add(1);
-                stamps.push(LiquifyStamp {
-                    centre: [next.x, next.y],
-                    moved: stamp_move(brush.kind, dir * step),
-                    radius,
-                    pressure,
-                    distortion: brush.distortion.clamp(0.0, 1.0),
-                    seed: (st.strokes % 997) as f32,
-                    mode: brush.kind.into(),
-                });
-                at = next;
-            }
-            st.liquify_last = Some(at);
+            stroke.push(Point { at, force, seconds: if ms.is_finite() { ms.max(0.0) / 1000.0 } else { 0.0 } });
         }
-        if let (false, Some(canvas)) = (stamps.is_empty(), st.canvas.as_mut()) {
-            canvas.liquify_stamps(&stamps);
-            if let Some(f) = st.last_filter {
-                canvas.set_filter(f);
-            }
-            self.shared.frame(st);
-        }
+        let steps = st.liquify.along(&stroke, pen, brush);
+        self.shared.lay_liquify(st, steps);
     }
 
     /// The liquify brush held still at window point (`x`, `y`) works on, from `from` to `to`
-    /// seconds of being held: one stamp, that adds on from where the last left off. False if
-    /// `brush` does nothing held.
+    /// seconds of being held. False if `brush` does nothing held.
     pub fn liquify_held(&self, x: f32, y: f32, from: f32, to: f32, brush: LiquifyBrush) -> bool {
-        let rate = match brush.kind {
-            LiquifyKind::TwirlRight | LiquifyKind::TwirlLeft => LIQUIFY_HELD_TURN,
-            LiquifyKind::Pinch | LiquifyKind::Expand => LIQUIFY_HELD_DRAW,
-            _ => return false,
-        };
+        if !liquify::timed(brush.kind) {
+            return false;
+        }
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(view) = st.view else { return true };
-        let Some(p) = view.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.is_finite()) else { return true };
-        st.strokes = st.strokes.wrapping_add(1);
-        let stamp = LiquifyStamp {
-            centre: [p.x, p.y],
-            moved: [from * rate, to * rate],
-            radius: liquify_radius(brush.size),
-            pressure: 0.01 + 0.99 * brush.pressure.clamp(0.0, 1.0),
-            distortion: brush.distortion.clamp(0.0, 1.0),
-            seed: (st.strokes % 997) as f32,
-            mode: brush.kind.into(),
-        };
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.liquify_stamps(&[stamp]);
-            if let Some(f) = st.last_filter {
-                canvas.set_filter(f);
-            }
-            self.shared.frame(st);
-        }
+        let Some(at) = view.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.is_finite()) else { return true };
+        let steps = st.liquify.held(at, to - from, brush);
+        self.shared.lay_liquify(st, steps);
         true
     }
 
-    /// The liquify brush carries on after it lifts: from its last stamp along the window velocity
-    /// (`vx`, `vy`, pixels a millisecond), slowing to a stop and fading as it goes, for as long as
-    /// `momentum` (0..1) lets it.
-    pub fn liquify_coast(&self, vx: f32, vy: f32, momentum: f32, brush: LiquifyBrush) {
+    /// The liquify brush lifts: it carries on as it was going, for as long as `momentum` (0..1)
+    /// lets it. True if something goes on, which needs [`CanvasSession::liquify_tick`].
+    pub fn liquify_lift(&self, momentum: f32, brush: LiquifyBrush) -> bool {
+        let momentum = if momentum.is_finite() { momentum.clamp(0.0, 1.0) } else { 0.0 };
+        let mut guard = self.shared.lock();
+        guard.liquify.lift(momentum, brush);
+        guard.liquify.going()
+    }
+
+    /// `seconds` go by for what is going on by itself. True if it is still going.
+    pub fn liquify_tick(&self, seconds: f32, brush: LiquifyBrush) -> bool {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let (Some(view), Some(last)) = (st.view, st.liquify_last.take()) else { return };
-        let Some(inv) = view.to_screen().inverse() else { return };
-        let velocity = inv.apply(Vec2::new(vx, vy)) - inv.apply(Vec2::new(0.0, 0.0));
-        let momentum = if momentum.is_finite() { momentum.clamp(0.0, 1.0) } else { 0.0 };
-        let reach = velocity.length() * momentum * LIQUIFY_COAST_MS;
-        let radius = liquify_radius(brush.size);
-        let step = liquify_step(radius, view.zoom());
-        if !reach.is_finite() || reach < step {
-            return;
-        }
-        let dir = velocity * (1.0 / velocity.length());
-        let strength = 0.01 + 0.99 * brush.pressure.clamp(0.0, 1.0);
-        let count = ((reach / step) as usize).min(LIQUIFY_COAST_STAMPS);
-        let mut stamps = Vec::with_capacity(count);
-        let mut at = last;
-        for k in 0..count {
-            // the speed falls off evenly, so the stamps fade as the brush slows
-            let left = 1.0 - k as f32 / count as f32;
-            at = at + dir * step;
-            st.strokes = st.strokes.wrapping_add(1);
-            stamps.push(LiquifyStamp {
-                centre: [at.x, at.y],
-                moved: stamp_move(brush.kind, dir * step),
-                radius,
-                pressure: strength * left,
-                distortion: brush.distortion.clamp(0.0, 1.0),
-                seed: (st.strokes % 997) as f32,
-                mode: brush.kind.into(),
-            });
-        }
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.liquify_stamps(&stamps);
-            if let Some(f) = st.last_filter {
-                canvas.set_filter(f);
-            }
-            self.shared.frame(st);
-        }
+        let steps = st.liquify.tick(seconds.clamp(0.0, 0.1), brush);
+        self.shared.lay_liquify(st, steps);
+        st.liquify.going()
     }
 
     /// How much of the liquify shows (0..1): the adjust slider.
@@ -709,13 +616,12 @@ impl CanvasSession {
     pub fn liquify_reset(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.liquify = LiquifyRun::default();
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.liquify_clear();
-            if let Some(f) = st.last_filter {
-                canvas.set_filter(f);
-            }
-            self.shared.frame(st);
         }
+        st.adjust(Filter::Liquify { amount: 1.0 });
+        self.shared.frame(st);
     }
 
     /// Ends the adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
@@ -784,6 +690,11 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if !st.adjusting {
+            return;
+        }
+        // back from it, a plugin's filter draws as it does on any change
+        if !original && st.draw_filter() {
+            self.shared.frame(st);
             return;
         }
         // nothing sharpened is the layer as it was

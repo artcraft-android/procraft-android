@@ -59,6 +59,13 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import io.github.artcraftandroid.procraft.core.PluginControl
+import io.github.artcraftandroid.procraft.core.PluginInfo
+import io.github.artcraftandroid.procraft.core.PluginSlider
+import io.github.artcraftandroid.procraft.core.PluginSource
+import io.github.artcraftandroid.procraft.core.pluginSliderAlong
+import io.github.artcraftandroid.procraft.core.pluginSliderAt
+import io.github.artcraftandroid.procraft.core.pluginSliderShown
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import java.io.File
@@ -83,10 +90,10 @@ private class Toggle(val label: String, val checked: Boolean, val fixed: Boolean
 private class Heading(val label: String) : ActionRow
 
 /** A setting with its value on the right and a slider under its name, always shown. */
-private class Slide(val label: String, val value: String, val fraction: Float, val tall: Dp = 63.dp, val onChange: (Float) -> Unit) : ActionRow
+private class Slide(val label: String, val value: String, val fraction: Float, val tall: Dp = 63.dp, val onDone: () -> Unit = {}, val onChange: (Float) -> Unit) : ActionRow
 
 /** The pages the panel shows: its tabs, or a page of settings reached from one of them. */
-private enum class ActionsPage { TABS, PRESSURE, CURSOR }
+private enum class ActionsPage { TABS, PRESSURE, CURSOR, PLUGINS }
 
 private val CurveFill get() = if (Pc.light) Color(0xFFE7E7E9) else Color(0xFF262626)
 
@@ -285,6 +292,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             listOf(
                 Act("Pressure and Smoothing") { page = ActionsPage.PRESSURE },
                 Act("Gesture controls") { vm.gestureControlsOpen = true },
+                Act("Plugins") { page = ActionsPage.PLUGINS },
             ),
             listOf(
                 Slide(
@@ -293,12 +301,6 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     (vm.rapidUndoDelay - CanvasViewModel.RAPID_UNDO_MIN_S) / (CanvasViewModel.RAPID_UNDO_MAX_S - CanvasViewModel.RAPID_UNDO_MIN_S),
                 ) { vm.changeRapidUndoDelay(CanvasViewModel.RAPID_UNDO_MIN_S + it * (CanvasViewModel.RAPID_UNDO_MAX_S - CanvasViewModel.RAPID_UNDO_MIN_S)) },
                 Slide("Selection mask visibility", "%.1f%%".format(vm.selectionVisibility * 100f), vm.selectionVisibility, onChange = vm::changeSelectionVisibility),
-                Slide(
-                    "ColorDrop gap closing",
-                    if (vm.fillGap == 0) "Off" else "${vm.fillGap} px",
-                    vm.fillGap / CanvasViewModel.MOST_FILL_GAP.toFloat(),
-                    onChange = vm::changeFillGap,
-                ),
             ),
             listOf(Toggle("Size & Opacity sidebar", vm.showSideBar) { vm.showSideBar = it }),
         )
@@ -334,6 +336,10 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 }
                 if (shown == ActionsPage.CURSOR) {
                     CursorPage(vm) { page = ActionsPage.TABS }
+                    return@Column
+                }
+                if (shown == ActionsPage.PLUGINS) {
+                    PluginsPage(vm) { page = ActionsPage.TABS }
                     return@Column
                 }
                 Text(
@@ -464,8 +470,8 @@ private fun modelGroups(
     2 -> listOf(
         listOf(
             Heading("Share Model"),
-            // the native package doesn't hold a model yet
-            Act(CanvasViewModel.OWN_LABEL),
+            // ours comes back whole in another copy of the app; the other package holds no model yet
+            Act(CanvasViewModel.OWN_LABEL) { share(CanvasViewModel.Export.MODEL_ARTWORK, 100) },
             Act(CanvasViewModel.PACKAGE_LABEL),
             Act("USDZ") { share(CanvasViewModel.Export.MODEL_USDZ, 100) },
             Act("OBJ") { share(CanvasViewModel.Export.MODEL_OBJ, 100) },
@@ -555,6 +561,121 @@ private fun CursorPage(vm: CanvasViewModel, onBack: () -> Unit) {
     }
 }
 
+/** The plugins, a page of the panel: a card each, drawn from what the list says of them. */
+@Composable
+private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    androidx.compose.runtime.LaunchedEffect(Unit) { vm.readPlugins() }
+    val importer = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(vm::offerPlugin)
+    }
+    Row(Modifier.fillMaxWidth().padding(start = 8.dp, top = 12.dp).height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(44.dp, 34.dp).clickable(onClick = onBack), contentAlignment = Alignment.Center) {
+            Icon(PcIcons.ChevronLeft, contentDescription = "Back", tint = Pc.PanelTitle, modifier = Modifier.size(22.dp))
+        }
+        Text("Plugins", color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+        Box(Modifier.height(34.dp).clickable { importer.launch(arrayOf("*/*")) }.padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
+            Text("Import", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+        }
+    }
+    val shown = vm.pluginList
+    Column(
+        Modifier.verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(20.dp),
+    ) {
+        if (shown.isEmpty()) Text("Nothing imported yet. Import a .procraft-plugin file to add one.", color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(16.dp))
+        for (plugin in shown) PluginCard(plugin, vm)
+    }
+}
+
+/** The tag on a card. */
+private val PluginTag get() = if (Pc.light) Color(0x14000000) else Color(0x1FFFFFFF)
+
+/** A plugin: its name and tag, what it does, what is the matter with it, its controls whatever they are, and the rows that turn it on or off and remove it. */
+@Composable
+private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(plugin.name, color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                if (plugin.experimental) {
+                    Text(
+                        "experimental",
+                        color = Pc.ActionsRow,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        modifier = Modifier.padding(start = 8.dp).clip(RoundedCornerShape(9.dp)).background(PluginTag).padding(horizontal = 7.dp, vertical = 2.dp),
+                    )
+                }
+            }
+            Text(plugin.description, color = Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+            plugin.problem?.let { Text(it, color = Pc.SlideValue, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp)) }
+        }
+        if (plugin.on && plugin.problem == null) {
+            for (control in plugin.controls) {
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                when (control) {
+                    is PluginControl.Switch -> ActionRowView(Toggle(control.control.label, control.control.on) { vm.setPluginSwitch(control.control.key, it) })
+                    is PluginControl.Slider -> PluginSliderRow(control.control, vm::setPluginSlider)
+                }
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+        ActionRowView(Act(if (plugin.on) "Turn off" else "Turn on") { vm.setPluginOn(plugin, !plugin.on) })
+        if (plugin.source == PluginSource.FILE) {
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+            ActionRowView(Act("Remove") { vm.removePlugin(plugin) })
+        }
+    }
+}
+
+/** A slider on a card: the row follows the finger, and the value goes in as it lets go, as what it sets may move the row itself, unless it is live. */
+@Composable
+private fun PluginSliderRow(slider: PluginSlider, onSet: (PluginSlider, Float) -> Unit) {
+    var moved by remember(slider.key) { mutableStateOf<Float?>(null) }
+    val value = moved ?: slider.value
+    SlideRow(
+        Slide(
+            slider.label,
+            pluginSliderShown(slider, value),
+            pluginSliderAlong(slider, value),
+            onDone = {
+                moved?.let { onSet(slider, it) }
+                moved = null
+            },
+            onChange = {
+                val to = pluginSliderAt(slider, it)
+                if (slider.live) onSet(slider, to) else moved = to
+            },
+        ),
+    )
+}
+
+/** The one screen that asks whether to import a plugin file: what it is, and what it can do. Also where a setting that has moved to a plugin is said, once. */
+@Composable
+fun PluginOfferAlert(vm: CanvasViewModel) {
+    Alert(
+        vm.movedNotice,
+        title = { "Now a plugin" },
+        message = { it },
+        action = "OK",
+        onCancel = vm::movedNoticeRead,
+        onAction = { vm.movedNoticeRead() },
+        destructive = false,
+        alone = true,
+    )
+    Alert(
+        vm.pluginOffer,
+        title = { it.name },
+        message = { it.message },
+        action = "Import",
+        onCancel = vm::declinePlugin,
+        onAction = { vm.acceptPlugin() },
+        destructive = false,
+    )
+}
+
 /** Choices as rows of a rounded group, the chosen one a full blue row. */
 @Composable
 private fun ChoiceGroup(choices: List<String>, chosen: Int, onPick: (Int) -> Unit) {
@@ -604,8 +725,9 @@ private fun PressurePage(vm: CanvasViewModel, onBack: () -> Unit) {
             ),
         )
         Spacer(Modifier.height(16.dp))
-        // the stroke always starts at the pen's tip here
-        Group(listOf(Toggle("Tip Attachment", true, fixed = true)))
+        // with no filtering it has nothing to do
+        val tipChange: ((Boolean) -> Unit)? = if (vm.inputMotionFiltering > 0f) ({ on -> vm.changeInput(tipAttached = on) }) else null
+        Group(listOf(Toggle("Tip Attachment", vm.inputTipAttached, onChange = tipChange)))
         Spacer(Modifier.height(24.dp))
         Text("App Pressure Sensitivity", color = Pc.SlideLabel, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 13.dp).height(19.dp))
         Box(Modifier.padding(horizontal = 7.dp).fillMaxWidth().aspectRatio(1f).background(CurveFill)) {
@@ -620,17 +742,21 @@ private fun PressurePage(vm: CanvasViewModel, onBack: () -> Unit) {
 @Composable
 private fun SlideRow(row: Slide) {
     val change by rememberUpdatedState(row.onChange)
+    val done by rememberUpdatedState(row.onDone)
     Box(
         Modifier.fillMaxWidth().height(row.tall)
             .pointerInput(Unit) {
                 val inset = 16.dp.toPx()
                 fun at(x: Float) = ((x - inset) / (size.width - 2f * inset)).coerceIn(0f, 1f)
-                detectTapGestures { change(at(it.x)) }
+                detectTapGestures {
+                    change(at(it.x))
+                    done()
+                }
             }
             .pointerInput(Unit) {
                 val inset = 16.dp.toPx()
                 fun at(x: Float) = ((x - inset) / (size.width - 2f * inset)).coerceIn(0f, 1f)
-                detectHorizontalDragGestures(onDragStart = { change(at(it.x)) }) { c, _ ->
+                detectHorizontalDragGestures(onDragStart = { change(at(it.x)) }, onDragEnd = { done() }, onDragCancel = { done() }) { c, _ ->
                     c.consume()
                     change(at(c.position.x))
                 }

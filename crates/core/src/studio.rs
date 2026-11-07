@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use procraft_engine::brush::{Brush, MaterialSource, ResetPoint, Source, StockImage};
+use procraft_engine::brush::{
+    Brush, FULL_GRAIN_MOST, FullGrain, GrainFile, MaterialSource, ResetPoint, ShapeFile, Source, StockImage,
+};
 use procraft_engine::curve::Curve;
 use procraft_engine::geom::{Affine, Vec2};
 use procraft_engine::studio::{MAX_GRAIN_SCALE, SliderCurve};
@@ -46,7 +48,7 @@ pub fn source_library(grain: bool) -> Vec<SourceImage> {
         .collect()
 }
 
-/// `pixels` (a `source_size` square greyscale image) made to repeat without seams: the grain
+/// `pixels` (a square greyscale image, of any size) made to repeat without seams: the grain
 /// editor's Auto repeat, the image `scale` times across (1 to 4), turned `rotation_degrees`,
 /// faded at its edges over `overlap` of the way in (0..1) as sharply as `hardness` (0..1), into
 /// its shifted copy, turned round with `mirror`, fine detail apart with `pyramid`.
@@ -65,15 +67,27 @@ pub fn repeatable_source(
     textures::repeatable(&pixels, repeat)
 }
 
+/// A square source image at `source_size`, however big it is: what a brush always holds of it,
+/// and quick enough to make repeat as a slider moves. Anything else comes back as it was.
+#[uniffi::export]
+pub fn small_source(pixels: Vec<u8>) -> Vec<u8> {
+    let n = pixels.len().isqrt();
+    if n <= textures::TEXTURE_SIZE || n * n != pixels.len() {
+        return pixels;
+    }
+    crate::brush_files::gray_square((n, n, 1), &pixels, false, textures::TEXTURE_SIZE)
+}
+
 /// A picture (`width` by `height`, RGBA) as a source image: its lightness over black (what
-/// shows through it counting as black), fitted into the `source_size` square, centred.
-/// Empty if the pixels aren't that size.
+/// shows through it counting as black), fitted into a square, centred. The square is as big as
+/// a brush file's image of that size would be, and `source_size` at the least. Empty if the
+/// pixels aren't that size.
 #[uniffi::export]
 pub fn source_from_picture(rgba: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
-    let n = textures::TEXTURE_SIZE as u32;
     if width == 0 || height == 0 || rgba.len() as u64 != u64::from(width) * u64::from(height) * 4 {
         return Vec::new();
     }
+    let n = crate::brush_files::image_side(width.max(height) as usize) as u32;
     let lightness: Vec<u8> = rgba
         .as_chunks::<4>()
         .0
@@ -213,6 +227,18 @@ impl CanvasSession {
         st.brush(st.tool).name.clone()
     }
 
+    /// Names the brush open in the studio (a dual brush's whole, not a part), as a set is named;
+    /// Cancel puts the old name back with the rest. Returns its name now: for a name of nothing
+    /// but spaces, which no brush has, the one it had when the studio opened.
+    pub fn set_studio_name(&self, name: String) -> String {
+        let name = name.trim();
+        let mut st = self.shared.lock();
+        let Some(opened) = st.studio.as_ref().map(|(_, before)| before.name.clone()) else { return String::new() };
+        let Some(brush) = st.studio_whole() else { return String::new() };
+        brush.name = if name.is_empty() { opened } else { name.chars().take(256).collect() };
+        brush.name.clone()
+    }
+
     /// Whether the brush open in the studio is a dual brush.
     pub fn studio_is_dual(&self) -> bool {
         self.shared.lock().studio_whole().is_some_and(|b| b.secondary.is_some())
@@ -304,16 +330,55 @@ impl CanvasSession {
         shipped.and_then(|i| images.into_iter().nth(i as usize)).map_or_else(Vec::new, |i| i.pixels)
     }
 
-    /// The brush's `kind` of source becomes an image of the user's own (`source_size` square
-    /// greyscale, white = paint). False if the pixels aren't that size.
+    /// [`Self::studio_source`] at all the size it has, whatever square that is: a shape or grain
+    /// from a brush file or the user's own picture, to show and to edit.
+    pub fn studio_source_picture(&self, kind: SourceKind) -> Vec<u8> {
+        let own = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let full = st.studio_brush().and_then(|b| match kind {
+                SourceKind::Shape => b.shape_file_now().map(|f| f.full.clone()),
+                SourceKind::Grain => b.grain_file_now().and_then(|f| f.full.clone()),
+                SourceKind::Metallic | SourceKind::Roughness => None,
+            });
+            full.and_then(|f| st.grain_store.pixels(&f))
+        };
+        own.map_or_else(|| self.studio_source(kind), |pixels| pixels.to_vec())
+    }
+
+    /// The brush's `kind` of source becomes an image of the user's own (a greyscale square, white =
+    /// paint): `source_size`, or a power of two more up to the most kept, of which a shape or grain
+    /// keeps all, as a brush file's does. False if the pixels are no such square, or are what it
+    /// uses now (a brush left as it was keeps what its file gave it).
     pub fn set_studio_source(&self, kind: SourceKind, pixels: Vec<u8>) -> bool {
-        let Some(source) = Source::new(pixels) else { return false };
-        let mut st = self.shared.lock();
+        let n = pixels.len().isqrt();
+        let fits = n * n == pixels.len() && n.is_power_of_two();
+        if !fits || !(textures::TEXTURE_SIZE..=FULL_GRAIN_MOST).contains(&n) {
+            return false;
+        }
+        if pixels == self.studio_source_picture(kind) {
+            return false;
+        }
+        let Some(source) = Source::new(small_source(pixels.clone())) else { return false };
+        let id = source.id;
+        let mut full = (n > textures::TEXTURE_SIZE).then(|| FullGrain::new(n as u32, pixels)).flatten();
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if let Some(full) = &mut full {
+            st.grain_store.keep(full);
+        }
         let Some(brush) = st.studio_change() else { return false };
         // an image of the user's own: no longer the stock one its file named
         let (own, _, stock) = sources(brush, kind);
         *own = Some(source);
         *stock = None;
+        if let Some(full) = full {
+            match kind {
+                SourceKind::Shape => brush.shape_file = Some(ShapeFile { source: id, full }),
+                SourceKind::Grain => brush.grain_file = Some(GrainFile { source: id, width: 0, full: Some(full) }),
+                SourceKind::Metallic | SourceKind::Roughness => {}
+            }
+        }
         true
     }
 
@@ -384,14 +449,16 @@ impl CanvasSession {
         }
     }
 
-    /// The app's own smoothing and pressure for every stroke, each 0..1, and its pressure curve
-    /// (x, y pairs, 0..1; fewer than two points keep it straight).
+    /// The app's own smoothing and pressure for every stroke, each 0..1, whether motion filtering
+    /// keeps the stroke's end on the pen, and its pressure curve (x, y pairs, 0..1; fewer than two
+    /// points keep it straight).
     pub fn set_input_settings(
         &self,
         stabilization: f32,
         motion_filtering: f32,
         motion_expression: f32,
         pressure_smoothing: f32,
+        tip_attached: bool,
         curve: Vec<f32>,
     ) {
         let unit = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
@@ -404,6 +471,7 @@ impl CanvasSession {
             pressure_smoothing: unit(pressure_smoothing),
             pressure_curve: if pts.len() >= 2 { Curve::new(&pts) } else { Curve::linear() },
             speed_distance: st.input.speed_distance,
+            tip_attached,
         };
     }
 
@@ -981,4 +1049,61 @@ fn evenly(path: &[Vec2], steps: usize) -> Vec<Vec2> {
 pub(crate) struct PadSync {
     pub(crate) running: bool,
     pub(crate) next: Option<(std::sync::Arc<CanvasSession>, [f32; 3])>,
+}
+
+#[cfg(test)]
+mod naming {
+    use crate::CanvasSession;
+
+    fn name(s: &CanvasSession, set: usize, index: usize) -> String {
+        s.brush_library().get(set).and_then(|x| x.brushes.get(index)).map(|b| b.name.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_studio_names_a_brush_kept_by_done_and_put_back_by_cancel() {
+        let s = CanvasSession::new(64, 64);
+        assert!(s.select_brush(1, 2));
+        let was = name(&s, 1, 2);
+
+        // nothing open: nothing named
+        assert_eq!(s.set_studio_name("Mine".to_owned()), "");
+        assert_eq!(name(&s, 1, 2), was);
+
+        // cancelled, the old name comes back
+        assert_eq!(s.studio_begin(), was);
+        assert_eq!(s.set_studio_name("  Mine  ".to_owned()), "Mine");
+        s.studio_end(false);
+        assert_eq!(name(&s, 1, 2), was);
+
+        // typed away to nothing, it is the name it opened with; a long name is cut where a set's is
+        s.studio_begin();
+        assert_eq!(s.set_studio_name("M".to_owned()), "M");
+        assert_eq!(s.set_studio_name("   ".to_owned()), was);
+        assert_eq!(s.set_studio_name("x".repeat(300)).chars().count(), 256);
+        assert_eq!(s.set_studio_name("Mine".to_owned()), "Mine");
+        s.studio_end(true);
+        assert_eq!(name(&s, 1, 2), "Mine");
+        assert_eq!(s.current_brush().name, "Mine");
+
+        // a brush that ships keeps the name kept for it, and resetting it leaves the name
+        let t = CanvasSession::new(64, 64);
+        assert!(t.load_brush_library(s.saved_brush_library()));
+        assert_eq!(name(&t, 1, 2), "Mine");
+        assert!(t.select_brush(1, 2));
+        t.studio_begin();
+        t.studio_reset();
+        t.studio_end(true);
+        assert_eq!(name(&t, 1, 2), "Mine");
+    }
+
+    #[test]
+    fn a_dual_brush_is_named_whole_whichever_part_shows() {
+        let s = CanvasSession::new(64, 64);
+        assert!(s.select_brush(1, 0) && s.combine_brushes(1, 0, 1));
+        s.studio_begin();
+        s.studio_show_second(true);
+        assert_eq!(s.set_studio_name("Pair".to_owned()), "Pair");
+        s.studio_end(true);
+        assert_eq!(name(&s, 1, 0), "Pair");
+    }
 }

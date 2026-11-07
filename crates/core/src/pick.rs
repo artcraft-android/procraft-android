@@ -8,8 +8,8 @@ use crate::CanvasSession;
 /// What the eyedropper sees.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Pick {
-    /// The colour under the point (0xRRGGBB): the canvas's, or the current layer's when the
-    /// eyedropper picks from it (none where that is clear); none when the point is off the canvas.
+    /// The colour under the point (0xRRGGBB): the canvas's, or the current layer's when a plugin
+    /// says to read that (none where it is clear); none when the point is off the canvas.
     pub rgb: Option<u32>,
     /// The window around the point as it is shown, `side` × `side` RGBA8, rows top to bottom.
     pub side: u32,
@@ -25,6 +25,9 @@ impl CanvasSession {
         let side = side.clamp(1, 1024);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.scene_shown() {
+            return st.scene_pick(x, y, side);
+        }
         let view = st.view?;
         // the window shifted so that the point lands in the middle of the small target
         let corner = Vec2::new(x - side as f32 / 2.0, y - side as f32 / 2.0);
@@ -67,7 +70,7 @@ impl CanvasSession {
         // clear with the background hidden, that is what the composite holds, not the surround
         let (w, h) = (st.doc.width() as f32, st.doc.height() as f32);
         let at = view.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x < w && p.y < h);
-        let rgb = if st.eyedropper_from_layer {
+        let rgb = if st.hooks.as_ref().is_some_and(|hooks| hooks.pick_layer()) {
             // the current layer's own pixel (kept premultiplied): its colour, where it isn't clear
             at.and_then(|p| {
                 let (px, py) = (p.x as i32, p.y as i32);

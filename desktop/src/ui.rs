@@ -37,6 +37,19 @@ fn is_picture(path: &std::path::Path) -> bool {
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     PICTURES.contains(&extension.as_str())
 }
+
+/// Why layer or group `name`, which would hide a change, takes none, by what hides it (`by`).
+fn hidden_message(name: &str, by: Option<procraft_core::HiddenBy>) -> String {
+    use procraft_core::HiddenBy as H;
+    let why = match by {
+        Some(H::MaskLayer) => "its layer is hidden",
+        Some(H::Group) => "its group is hidden",
+        Some(H::Inside) => "a layer in it is hidden",
+        Some(H::Solo) => "another layer is shown alone",
+        Some(H::Itself) | None => "it is hidden",
+    };
+    format!("\u{201c}{name}\u{201d} can't be changed while {why}.")
+}
 /// A video's frames come in at the animation's frame rate, or this one; this many at most.
 const VIDEO_FPS: u32 = 15;
 const MOST_VIDEO_FRAMES: u32 = 999;
@@ -132,9 +145,13 @@ pub struct Interface {
     /// show it, or open Layers).
     blocked: Option<(Blocked, u64)>,
     blocked_alert: Alert,
+    model_warning_alert: Alert,
     /// Share's PDF asks how well it keeps its pictures first (for this format).
     pdf_alert: Alert,
     pdf_for: Option<Format>,
+    /// A plugin file's one screen, and the file while it asks.
+    plugin_alert: Alert,
+    plugin_file: Option<Vec<u8>>,
     /// An export under way, as its card shows it.
     pub export_card: crate::export_card::ExportCard,
     /// The brushes changed (the library closed, a slider let go, a notch saved): keep them.
@@ -230,8 +247,11 @@ impl Default for Interface {
             styled: false,
             blocked: None,
             blocked_alert: Alert::default(),
+            model_warning_alert: Alert::default(),
             pdf_alert: Alert::default(),
             pdf_for: None,
+            plugin_alert: Alert::default(),
+            plugin_file: None,
             export_card: crate::export_card::ExportCard::default(),
             keep_brushes: false,
             tool_hold_acted: false,
@@ -281,6 +301,8 @@ impl Interface {
 
     /// `session` is shown now (at `scale` window pixels a point): it paints in the colour chosen.
     pub fn opened(&mut self, session: &Arc<CanvasSession>, scale: f32) {
+        // each artwork its own Reference window, none if it never had one
+        self.reference.restore(session);
         self.model = session.model_info().is_some();
         self.lighting.forget();
         // brush files given while no canvas was open
@@ -288,6 +310,7 @@ impl Interface {
         session.set_touch_layer_opacity(None);
         if self.model {
             crate::lighting::light_model(session);
+            self.model_warnings(session);
         }
         self.layers.forget();
         self.text.forget();
@@ -312,6 +335,7 @@ impl Interface {
     /// The artwork is put away (to the gallery, for another, or with the window): brushes coming
     /// in from files are waited for, Recolor ends keeping what it filled, and Layer Opacity ends.
     pub fn closing(&mut self, session: &CanvasSession) {
+        self.reference.keep(session);
         self.library.finish_importing(session);
         self.end_recolor(session);
         session.set_touch_layer_opacity(None);
@@ -336,6 +360,11 @@ impl Interface {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn drag_format(&self) -> crate::files::Format {
         crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
+    }
+
+    /// The plugins, which say how big the interface shows.
+    pub fn plugins(&self) -> &procraft_core::Plugins {
+        &self.prefs.plugins
     }
 
     /// Tap Assistance is on (Advanced settings).
@@ -408,8 +437,6 @@ impl Interface {
         // a mask current paints with masks' own colour
         let on_mask = session.layers().iter().any(|l| l.current && l.kind == procraft_core::LayerType::Mask);
         self.colours.follow_mask(session, on_mask);
-        // the eyedropper picks from the current layer or the canvas, as the preferences say
-        session.set_eyedropper_from_layer(self.prefs.eyedropper_layer);
         let paste_shown = (self.open == Some(Popover::Actions) || self.copy_paste) && ctx.input(|i| i.focused);
         if paste_shown && !self.paste_shown {
             self.system_clipboard.offer();
@@ -421,9 +448,11 @@ impl Interface {
         }
         // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
         // do (the first, set to nothing, the eraser and back), where the pointer is; one set to
-        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it
-        let presses = crate::pen::take_button_presses();
-        let held = crate::pen::buttons_held();
+        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it;
+        // with the canvas out of sight they do nothing, then or later: the tool would change unseen
+        let covered = self.studio.open || self.time_lapse.replaying();
+        let presses = crate::pen::take_button_presses().map(|n| if covered { 0 } else { n });
+        let held = crate::pen::buttons_held().map(|h| h && !covered);
         let purposes = [Trigger::PenDoubleTap, Trigger::PenSqueeze].map(|t| self.gestures.purpose_of(t));
         let (x, y) = input.cursor().unwrap_or_default();
         for (button, (&pressed, &is_held)) in presses.iter().zip(&held).enumerate() {
@@ -453,6 +482,11 @@ impl Interface {
         self.keep_brushes |= self.brushes_were_open && !brushes_open;
         self.brushes_were_open = brushes_open;
         let info = session.info();
+        // a snapped shape's handles sit at window points, and the view can move under them from a
+        // zoom, a pan or a turn that comes in through the input layer rather than as a command
+        if self.overlays.shape.is_some() {
+            self.overlays.shape = session.quickshape_info();
+        }
         self.follow_brush(session, info.tool);
         self.shortcuts(&ctx, session, &info);
         self.overlays.cursor_style = self.prefs.cursor_style;
@@ -566,6 +600,7 @@ impl Interface {
             self.quick_menu(&ctx, session);
             self.blocked_alert(&ctx, session);
             self.pdf_quality_alert(&ctx);
+            self.plugin_alert(&ctx);
             self.export_card.show(&ctx, &mut self.look);
             self.touch_companion(&ctx, session);
             if self.show_interface_button(&ctx) {
@@ -620,7 +655,10 @@ impl Interface {
             }
         }
         self.canvas_rect = ui.available_rect_before_wrap();
-        let mut backdrops = Vec::new();
+        // the bars are glass over the canvas: the top bar's frost, the side bar's and its tracks'
+        let (mut backdrops, mut windows) = (Vec::new(), Vec::new());
+        let top_bar = ctx.content_rect().with_max_y(ctx.content_rect().top() + crate::look::pc::BAR_HEIGHT);
+        crate::chrome::frost(&mut backdrops, top_bar, 0.0, ctx.pixels_per_point());
         // a mode taking the screen puts the side bar away
         let adjusting = session.adjustment_shown();
         let side_bar = self.side_bar_shown
@@ -633,7 +671,7 @@ impl Interface {
         let taps = if side_bar {
             let modify_lit = session.pick_next();
             let right = self.prefs.right_handed;
-            self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops)
+            self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops, &mut windows)
         } else {
             crate::chrome::SideTaps::default()
         };
@@ -681,6 +719,10 @@ impl Interface {
             Popover::Layers => bar.rect(BarButton::Layers),
             Popover::Colour => bar.rect(BarButton::Colour),
         };
+        // it opens as the adjustments, however it was left
+        if self.open != Some(Popover::Adjustments) {
+            self.adjustments.showing_filters = false;
+        }
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
         }
@@ -696,7 +738,11 @@ impl Interface {
             self.actions_panel.closed();
         }
         self.transform.show(&ctx, &mut self.look, session, &mut backdrops);
-        self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT);
+        crate::model_picture::show(&ctx, &mut self.look, session);
+        if let Some(on) = self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT, self.model) {
+            self.prefs.selection_x_ray = on;
+            self.prefs.keep();
+        }
         if let Some(asked) = self.adjustments.show(
             &ctx,
             &mut self.look,
@@ -709,7 +755,10 @@ impl Interface {
             self.adjustment_asked(session, asked);
         }
         let hold = std::time::Duration::from_secs_f32(self.gestures.delay(GesturePurpose::Eyedropper).max(0.0));
-        match self.reference.show(&ctx, &mut self.look, session, hold) {
+        let picked = self.reference.show(&ctx, &mut self.look, session, hold);
+        // kept with the artwork as it changes, a toggle elsewhere last frame included
+        self.reference.keep(session);
+        match picked {
             Some(crate::reference::Picked::Moving { at, side, rgba, rgb }) => {
                 self.overlays.pick_reference(&ctx, at, side, &rgba, rgb);
             }
@@ -734,7 +783,9 @@ impl Interface {
         self.layer_choice(&ctx, session);
         self.quick_menu(&ctx, session);
         self.blocked_alert(&ctx, session);
+        _ = self.model_warning_alert.show(&ctx, &mut self.look);
         self.pdf_quality_alert(&ctx);
+        self.plugin_alert(&ctx);
         self.export_card.show(&ctx, &mut self.look);
         self.text_editor(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
@@ -773,7 +824,7 @@ impl Interface {
         self.shortcut_list.show(&ctx, keys_to_canvas);
         self.name_colour(&ctx);
         self.place_canvas(session, ctx.pixels_per_point());
-        session.set_backdrops(backdrops);
+        session.set_glass(backdrops, windows);
         if input.moving_view() && !ctx.is_pointer_over_egui() {
             let icon = if input.zooming_view() { egui::CursorIcon::ZoomIn } else { egui::CursorIcon::Grab };
             ctx.set_cursor_icon(icon);
@@ -986,10 +1037,22 @@ impl Interface {
     /// isn't, and the system's pointer stays where the pen went down, so the outline or the cross
     /// go on through the stroke.
     fn hover_cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, input: &mut Input) {
-        let painting = session.adjustment_shown().adjustment.is_none() && !self.selection.on && !self.transform.on;
+        let shown = session.adjustment_shown();
+        let painting = shown.adjustment.is_none() && !self.selection.on && !self.transform.on;
         let on_canvas = |at: egui::Pos2| {
             self.canvas_rect.contains(at) && ctx.layer_id_at(at).is_none_or(|l| l.order == egui::Order::Background)
         };
+        // Liquify's brush shows as a ring of its reach, hovering and pressed
+        if let (Some(procraft_core::Adjustment::Liquify), Some(&size)) = (shown.adjustment, shown.liquify.first()) {
+            let ppp = ctx.pixels_per_point();
+            input.hover_shown = true;
+            let at = input.hovering().map(|(x, y)| egui::pos2(x, y) / ppp).or_else(|| ctx.pointer_latest_pos());
+            if let Some(at) = at.filter(|at| on_canvas(*at)) {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+                hover_ring(ctx, at, procraft_core::liquify_reach(size) * info.zoom / ppp);
+            }
+            return;
+        }
         if !input.idle() {
             if painting
                 && input.pressing()
@@ -1136,11 +1199,12 @@ impl Interface {
         if let Some((x, y, threshold)) = sliding {
             session.show_colour_selection(x, y, threshold);
         }
-        // a stroke on a locked or hidden layer drew nothing: say why (a text layer takes none
-        // until it is rasterized, which it asks about itself)
+        // a stroke on a locked or hidden layer, or a group, drew nothing: say why (a text layer
+        // takes none until it is rasterized, which it asks about itself)
         let on_text = session.layers().iter().any(|l| l.current && l.text);
         if stroke_ended && !on_text {
-            self.takes_changes(session);
+            let why = session.why_unpainted();
+            self.say_blocked(session, why);
         }
     }
 
@@ -1149,6 +1213,12 @@ impl Interface {
         self.overlays.notice(snapped_to(info.kind), false);
         self.overlays.shape = Some(info);
         self.overlays.shape_editing = false;
+    }
+
+    /// Undo or redo stepped through a snapped shape: as it now is, if it is still there.
+    fn follow_shape(&mut self, session: &CanvasSession) {
+        self.overlays.shape = session.quickshape_info();
+        self.overlays.shape_editing &= self.overlays.shape.is_some();
     }
 
     /// Undo (recoloring, the core takes back the open fill first).
@@ -1177,6 +1247,7 @@ impl Interface {
         if could || name.is_some() {
             self.overlays.notice(name.map_or("Undo".into(), |n| format!("Undo {n}")), false);
         }
+        self.follow_shape(session);
         // a model's tile chosen before comes back, with its channel's colour
         self.layers.follow_channel(session, &mut self.colours);
     }
@@ -1200,6 +1271,7 @@ impl Interface {
         if could {
             self.overlays.notice(name.map_or("Redo".into(), |n| format!("Redo {n}")), false);
         }
+        self.follow_shape(session);
         self.layers.follow_channel(session, &mut self.colours);
         if let Some(id) = text {
             self.text.edit(session, id);
@@ -1216,6 +1288,14 @@ impl Interface {
     /// Layer Select at window point (`x`, `y`): the top layer drawn there becomes current, and
     /// the others drawn there are listed to choose from.
     fn layer_select(&mut self, ctx: &egui::Context, session: &CanvasSession, x: f32, y: f32) {
+        // on a model, the mesh there is picked
+        if self.model && !session.model_flat() {
+            if let Some(said) = session.pick_submesh_at(x, y) {
+                self.layers.follow_picked_mesh(session);
+                self.overlays.notice(said, false);
+            }
+            return;
+        }
         let ids = session.layers_at(x, y);
         let Some(&top) = ids.first() else {
             crate::files::say("Nothing is drawn there.");
@@ -1338,13 +1418,10 @@ impl Interface {
             QuickAction::FillLayer => _ = id.map(|id| session.fill_layer(id)),
             QuickAction::SelectLayer => _ = id.map(|id| session.select_layer_contents(id)),
             QuickAction::AlphaLock => _ = current.map(|l| session.set_layer_alpha_lock(l.id, !l.alpha_lock)),
-            QuickAction::LayerVisibility => _ = current.map(|l| session.set_layer_visible(l.id, !l.visible)),
+            QuickAction::LayerVisibility => _ = current.map(|l| session.tap_visibility(l.id)),
             QuickAction::Solo => {
-                if let Some(id) = id {
-                    let on = session.solo() != Some(id);
-                    if session.set_solo(on.then_some(id)) {
-                        self.overlays.notice(if on { "Solo visibility on" } else { "Solo visibility off" }, false);
-                    }
+                if let Some(said) = id.and_then(|id| session.hold_visibility(id)) {
+                    self.overlays.notice(said, false);
                 }
             }
             QuickAction::Copy => self.copy_layer(session),
@@ -1548,6 +1625,21 @@ impl Interface {
         session.adjustment_start(a);
     }
 
+    /// Opens the plugin's filter `id` on the current layer, as [`Self::start_adjustment`] does. The
+    /// artwork is saved first, the first time in a session.
+    fn start_plugin_filter(&mut self, session: &CanvasSession, id: String) {
+        if !self.takes_changes(session) {
+            return;
+        }
+        self.switch_modes(session, ModeButton::Adjustment);
+        self.open = None;
+        session.set_pick_next(false);
+        let plugins = std::sync::Arc::clone(&self.prefs.plugins);
+        if let Some(why) = session.plugin_filter_start(plugins, id, self.artwork_dir.clone()) {
+            self.overlays.notice(why, true);
+        }
+    }
+
     /// Ends the open adjustment: `commit` keeps it (and says so), otherwise the layer goes back.
     fn end_adjustment(&mut self, session: &CanvasSession, commit: bool) {
         self.adjustments.menu_at = None;
@@ -1670,8 +1762,14 @@ impl Interface {
     fn pasted(&mut self, session: &Arc<CanvasSession>) -> bool {
         match self.system_clipboard.take_pasted() {
             Some(Pasted::Own { private }) => self.paste_own(session, private),
+            // (a mask that takes what is pasted has no use for a copy of the picture)
+            Some(Pasted::Picture { image, private: false }) if session.paste_picture_into_mask(image.clone()) => {}
             Some(Pasted::Picture { image, private }) => {
-                if session.insert_image(image, private).is_some() {
+                if self.model && !session.model_flat() {
+                    if !session.model_picture_begin(image, true) {
+                        crate::files::no_room(session);
+                    }
+                } else if session.insert_image(image, private).is_some() {
                     self.toggle_transform(session);
                 } else {
                     crate::files::no_room(session);
@@ -1687,6 +1785,12 @@ impl Interface {
     fn paste_own(&mut self, session: &CanvasSession, private: bool) {
         self.open = None;
         let Some(image) = self.clipboard.clone() else { return };
+        if self.model && !session.model_flat() {
+            if !session.model_picture_begin(image, false) {
+                crate::files::no_room(session);
+            }
+            return;
+        }
         let pasted = if private { session.paste_private(image) } else { session.paste(image) };
         if pasted.is_none() {
             crate::files::no_room(session);
@@ -1705,10 +1809,16 @@ impl Interface {
         }
     }
 
-    /// Whether the current layer takes a change; if not (locked, hidden, or an empty group), an
-    /// alert says why. What was tried is not done afterwards.
+    /// Whether the current layer takes a change; if not (locked, hidden or left out of the
+    /// picture, or an empty group), an alert says why. What was tried is not done afterwards.
     fn takes_changes(&mut self, session: &CanvasSession) -> bool {
-        let Some(why) = session.why_blocked() else { return true };
+        let why = session.why_blocked();
+        self.say_blocked(session, why)
+    }
+
+    /// As [`Self::takes_changes`], for why the current layer took nothing (`why`, if anything).
+    fn say_blocked(&mut self, session: &CanvasSession, why: Option<Blocked>) -> bool {
+        let Some(why) = why else { return true };
         let Some(l) = session.layers().into_iter().find(|l| l.current) else { return true };
         let (title, message, icon, extra) = match why {
             Blocked::Locked => (
@@ -1717,17 +1827,41 @@ impl Interface {
                 &crate::icons::PAGE_LOCKED,
                 Some("Unlock"),
             ),
-            Blocked::Hidden => (
-                "Layer is hidden",
-                format!("\u{201c}{}\u{201d} can't be changed while it is hidden.", l.name),
+            Blocked::Hidden | Blocked::GroupHidden => (
+                if why == Blocked::Hidden { "Layer is hidden" } else { "Group is hidden" },
+                hidden_message(&l.name, session.hidden_by()),
                 &crate::icons::EYE_STRUCK,
                 Some("Show"),
+            ),
+            Blocked::Group => (
+                "Group is selected",
+                format!("\u{201c}{}\u{201d} is a group: choose one of its layers to paint on.", l.name),
+                &crate::icons::FOLDER,
+                None,
             ),
             Blocked::EmptyGroup => (
                 "Group is empty",
                 format!("\u{201c}{}\u{201d} holds no layers to change.", l.name),
                 &crate::icons::FOLDER,
                 None,
+            ),
+            Blocked::MeshHidden => (
+                "Mesh is hidden",
+                format!(
+                    "\u{201c}{}\u{201d} can't be painted while it is hidden.",
+                    session.meant_mesh_name().unwrap_or_default()
+                ),
+                &crate::icons::EYE_STRUCK,
+                Some("Show"),
+            ),
+            Blocked::MeshLocked => (
+                "Mesh is locked",
+                format!(
+                    "\u{201c}{}\u{201d} can't be painted while it is locked.",
+                    session.meant_mesh_name().unwrap_or_default()
+                ),
+                &crate::icons::PAGE_LOCKED,
+                Some("Unlock"),
             ),
         };
         self.blocked = Some((why, l.id));
@@ -1754,13 +1888,78 @@ impl Interface {
         }
     }
 
+    /// Asks whether to import the plugin file at `path`: nothing in it runs, and nothing is kept
+    /// until the answer comes. What can't be imported says why.
+    pub fn offer_plugin_file(&mut self, path: &std::path::Path) {
+        let cant = "Can't import this plugin";
+        let Some(bytes) = procraft_core::read_plugin_file(path) else {
+            self.plugin_alert.tell(cant, "This file can't be read.", None);
+            return;
+        };
+        let offer = self.prefs.plugins.inspect(bytes.clone());
+        if let Some(why) = offer.refused {
+            self.plugin_alert.tell(cant, &why, None);
+            return;
+        }
+        self.plugin_file = Some(bytes);
+        self.plugin_alert.ask(Asking {
+            title: offer.name,
+            message: offer.message,
+            action: "Import".to_owned(),
+            icon: None,
+            destructive: false,
+            extra: None,
+            first: None,
+            alone: false,
+        });
+    }
+
+    /// A plugin file's screen, while it shows: answered, the file is imported, or it was only
+    /// being told something.
+    pub fn plugin_alert(&mut self, ctx: &egui::Context) {
+        if let Some(said) = self.prefs.plugins.take_moved_notice() {
+            self.plugin_alert.tell("Now a plugin", &said, None);
+        }
+        let Some(answer) = self.plugin_alert.show(ctx, &mut self.look) else { return };
+        let Some(bytes) = self.plugin_file.take().filter(|_| answer == Answer::Action) else { return };
+        match self.prefs.plugins.install(bytes) {
+            Some(why) => self.plugin_alert.tell("Can't import this plugin", &why, None),
+            None => self.prefs.keep(),
+        }
+    }
+
+    /// Says what a model newly opened may not paint well with.
+    fn model_warnings(&mut self, session: &CanvasSession) {
+        let warnings = session.take_model_warnings();
+        if warnings.is_empty() {
+            return;
+        }
+        let names: Vec<String> = warnings.into_iter().map(procraft_core::model_warning_name).collect();
+        self.model_warning_alert.ask(Asking {
+            title: "Unsupported model features".into(),
+            message: format!("Painting on this model may not go as expected because of:\n{}", names.join("\n")),
+            action: "OK".into(),
+            icon: None,
+            destructive: false,
+            extra: None,
+            first: None,
+            alone: true,
+        });
+    }
+
     /// The blocked alert, while it shows: unlock or show the layer, or open Layers.
     fn blocked_alert(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let Some(answer) = self.blocked_alert.show(ctx, &mut self.look) else { return };
         let Some((why, id)) = self.blocked.take() else { return };
         match answer {
             Answer::Extra if why == Blocked::Locked => _ = session.set_layer_locked(id, false),
-            Answer::Extra if why == Blocked::Hidden => _ = session.set_layer_visible(id, true),
+            // its own box ticked (what else hides it stays)
+            Answer::Extra if matches!(why, Blocked::Hidden | Blocked::GroupHidden) => {
+                if let Some(said) = session.show_layer(id) {
+                    self.overlays.notice(said, false);
+                }
+            }
+            Answer::Extra if matches!(why, Blocked::MeshHidden | Blocked::MeshLocked) => session.free_meant_meshes(),
             Answer::Action => self.open = Some(Popover::Layers),
             _ => {}
         }
@@ -1956,9 +2155,20 @@ impl Interface {
                 rect
             }
             Popover::Adjustments => {
-                let (shown, tapped) = crate::adjustments::menu(ctx, &mut self.look, button, backdrops);
-                if let Some(a) = tapped {
-                    self.start_adjustment(session, a);
+                use crate::adjustments::MenuRow;
+                let filters = self.prefs.plugins.filters();
+                let turned = self.adjustments.showing_filters && !filters.is_empty();
+                let (shown, tapped) =
+                    crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, turned);
+                match tapped {
+                    Some(MenuRow::Open(a)) => self.start_adjustment(session, a),
+                    Some(MenuRow::Plugins) => self.adjustments.showing_filters = true,
+                    Some(MenuRow::Back) => self.adjustments.showing_filters = false,
+                    Some(MenuRow::Filter(id)) => {
+                        self.adjustments.showing_filters = false;
+                        self.start_plugin_filter(session, id);
+                    }
+                    None => {}
                 }
                 shown
             }
@@ -1980,6 +2190,11 @@ impl Interface {
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
                 match act {
+                    Some(Act::ImportPlugin) => {
+                        if let Some(path) = crate::files::pick_plugin() {
+                            self.offer_plugin_file(&path);
+                        }
+                    }
                     Some(Act::Prefs) => {
                         self.prefs.apply(session);
                         session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
@@ -2080,11 +2295,11 @@ impl Interface {
                     Some(
                         Act::Page(_)
                         | Act::ScalingMenu
+                        | Act::TipAttachment
                         | Act::LightInterface
                         | Act::RightHanded
                         | Act::BrushCursor
                         | Act::ProjectCanvas
-                        | Act::EyedropperLayer
                         | Act::ResetInput,
                     )
                     | None => {}
@@ -2329,6 +2544,19 @@ fn hover_cross(ctx: &egui::Context, at: egui::Pos2) {
         .show(ctx, |ui| fine_cross(ui.painter(), at));
 }
 
+/// A fine ring `radius` points round `at`, a cross at its middle, seen on any colour.
+fn hover_ring(ctx: &egui::Context, at: egui::Pos2, radius: f32) {
+    egui::Area::new(egui::Id::unique("hover ring")).order(egui::Order::Tooltip).interactable(false).fixed_pos(at).show(
+        ctx,
+        |ui| {
+            for (width, colour) in [(3.0, Color32::WHITE), (1.0, Color32::BLACK)] {
+                ui.painter().circle_stroke(at, radius, Stroke::new(width, colour));
+            }
+            fine_cross(ui.painter(), at);
+        },
+    );
+}
+
 /// The desktop's pointer over the canvas where no outline shows: a fine cross at `at` (points),
 /// dark on a light edge, seen on any colour.
 fn fine_cross(painter: &egui::Painter, at: egui::Pos2) {
@@ -2410,7 +2638,12 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
             let rgba = picture.to_rgba8();
             let image =
                 procraft_core::ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
-            Inserted::Picture(session.insert_image(image, private).is_some())
+            let on_model = session.model_info().is_some() && !session.model_flat();
+            Inserted::Picture(if on_model {
+                session.model_picture_begin(image, true)
+            } else {
+                session.insert_image(image, private).is_some()
+            })
         }
         Err(_) => Inserted::Failed("This picture can't be opened."),
     }

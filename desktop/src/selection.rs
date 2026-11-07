@@ -166,11 +166,20 @@ impl Selection {
         self.look(session);
     }
 
-    /// Draws what shows while selecting and the toolbar with its popover; does what was asked.
-    pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, session: &CanvasSession, bar_top: f32) {
+    /// Draws what shows while selecting and the toolbar with its popover (on a `model`, with
+    /// X-Ray); does what was asked. Returns X-Ray as it is when it was turned on or off.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        bar_top: f32,
+        model: bool,
+    ) -> Option<bool> {
         if !self.on {
-            return;
+            return None;
         }
+        let mut x_ray_set = None;
         self.overlay(ctx, session, bar_top);
         let drawing = !session.freehand_path().is_empty();
         let (has, joins) = (self.has, self.kind != SelectKind::Automatic);
@@ -186,7 +195,7 @@ impl Selection {
                 (icon, label, self.kind == k)
             })
             .collect();
-        let buttons = [
+        let mut buttons = vec![
             Button::new(&icons::SELECT_ADD, "Add", 44.0).active(!joins || !self.removes),
             Button::new(&icons::SELECT_REMOVE, "Remove", 44.0).active(joins && self.removes).enabled(joins),
             Button::new(&icons::INVERT, "Invert", 44.0).enabled(has),
@@ -196,8 +205,12 @@ impl Selection {
                 .active(self.popup == Popup::Saved)
                 .enabled(has || drawing),
             Button::new(&icons::COLOR_FILL, "Color Fill", 37.0).active(self.color_fill),
-            Button::new(&icons::CLEAR_SELECTION, "Clear", 44.0).enabled(has || drawing),
         ];
+        // on a model: a selection reaches every surface under it
+        if model {
+            buttons.push(Button::new(&icons::X_RAY, "X-Ray", 44.0).active(session.selection_x_ray()));
+        }
+        buttons.push(Button::new(&icons::CLEAR_SELECTION, "Clear", 44.0).enabled(has || drawing));
         let tapped =
             floating_toolbar(ctx, look, "selection toolbar", (BUTTON_ROOMY, BUTTON_NARROW), &segments, &buttons, 41.0);
         match tapped {
@@ -237,6 +250,11 @@ impl Selection {
                     session.fill_selection();
                 }
             }
+            Some(Tapped::Button(7)) if model => {
+                let on = !session.selection_x_ray();
+                session.set_selection_x_ray(on);
+                x_ray_set = Some(on);
+            }
             Some(Tapped::Button(_)) => {
                 session.set_touch_selecting(None);
                 self.touches(session);
@@ -251,6 +269,7 @@ impl Selection {
             self.set_popup(session, Popup::None);
         }
         self.popover(ctx, look, session);
+        x_ray_set
     }
 
     fn open_popup(&mut self, ctx: &egui::Context, session: &CanvasSession, p: Popup) {

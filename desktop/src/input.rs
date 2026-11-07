@@ -453,6 +453,11 @@ impl Input {
         // a contact the system took back (a palm, say): what it did goes
         let phase = match touch.phase {
             TouchPhase::Ended if crate::pen::was_taken_back(touch.id) => TouchPhase::Cancelled,
+            // a new contact isn't an old one's: that may have gone where nothing heard of it
+            TouchPhase::Started => {
+                crate::pen::was_taken_back(touch.id);
+                TouchPhase::Started
+            }
             phase => phase,
         };
         // a pen with its pressure, or a finger: as the system says which (a touch screen may give

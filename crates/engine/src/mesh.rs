@@ -88,11 +88,26 @@ pub struct Mesh {
     pub material_file: Option<String>,
 }
 
+/// Where a line of sight first meets a model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceHit {
+    /// The part (texture set) it lands on.
+    pub part: usize,
+    /// The submesh it lands on, if the part has them.
+    pub submesh: Option<usize>,
+    /// Texture coordinates there, v up (as the files keep them; not brought into 0..1).
+    pub uv: [f32; 2],
+    /// How far along the line, in lengths of the direction given.
+    pub distance: f32,
+}
+
 /// Why a file can't be painted on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MeshError {
-    /// Points or lines only, or nothing.
+    /// Nothing to draw.
     NoFaces,
+    /// Points with no faces joining them.
+    PointCloud,
     /// Faces without texture coordinates: there is nothing to paint into.
     NoTextureCoordinates,
     /// More triangles than [`MAX_TRIANGLES`].
@@ -118,6 +133,39 @@ impl Mesh {
         (color, roughness, metallic)
     }
 
+    /// Where the line from `from` along `along` first meets the model, either side of its
+    /// triangles, leaving out the submeshes `hidden` says are. Goes through every triangle: for a
+    /// touch, not for every pixel.
+    pub fn first_surface(&self, from: [f32; 3], along: [f32; 3], hidden: impl Fn(usize) -> bool) -> Option<SurfaceHit> {
+        let mut best: Option<(usize, f32, [f32; 2])> = None;
+        for (first, count) in self.shown_runs(&hidden) {
+            for (k, t) in self.triangles.get(first..first + count).unwrap_or(&[]).iter().enumerate() {
+                let corners = t.map(|i| self.vertices.get(i as usize).map(|v| v.position));
+                let [Some(a), Some(b), Some(c)] = corners else { continue };
+                let Some((d, u, v)) = line_meets_triangle(from, along, a, b, c) else { continue };
+                if best.is_none_or(|(_, nearest, _)| d < nearest) {
+                    best = Some((first + k, d, [u, v]));
+                }
+            }
+        }
+        let (triangle, distance, [u, v]) = best?;
+        let uvs = self.triangles.get(triangle)?.map(|i| self.vertices.get(i as usize).map_or([0.0; 2], |p| p.uv));
+        let [a, b, c] = uvs;
+        let w = 1.0 - u - v;
+        let uv = [w * a[0] + u * b[0] + v * c[0], w * a[1] + u * b[1] + v * c[1]];
+        let part = self.parts.iter().position(|p| (p.first..p.first + p.count).contains(&triangle))?;
+        let submesh = self.submeshes.iter().position(|m| (m.first..m.first + m.count).contains(&triangle));
+        Some(SurfaceHit { part, submesh, uv, distance })
+    }
+
+    /// The runs of [`Mesh::triangles`] not hidden: each submesh's, or the parts' if there are none.
+    fn shown_runs(&self, hidden: &impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
+        if self.submeshes.is_empty() {
+            return self.parts.iter().map(|p| (p.first, p.count)).collect();
+        }
+        self.submeshes.iter().enumerate().filter(|(i, _)| !hidden(*i)).map(|(_, m)| (m.first, m.count)).collect()
+    }
+
     /// The smallest box holding the model: its least and most corners.
     pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
         let mut it = self.vertices.iter().map(|v| v.position);
@@ -125,6 +173,51 @@ impl Mesh {
         Some(it.fold((first, first), |(lo, hi), p| {
             ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])])
         }))
+    }
+
+    /// Where submeshes `meshes` lie in their texture: a byte a texel of a `side` square, rows
+    /// running down from v = 1, grown `grow` texels past their edges, as a stroke is.
+    pub fn submesh_coverage(&self, meshes: &[usize], side: usize, grow: usize) -> Vec<u8> {
+        let mut cover = vec![0u8; side * side];
+        for m in meshes.iter().filter_map(|&i| self.submeshes.get(i)) {
+            for t in self.triangles.get(m.first..m.first + m.count).unwrap_or(&[]) {
+                let uv = t.map(|i| self.vertices.get(i as usize).map_or([0.0, 0.0], |v| v.uv));
+                raster_triangle(uv, side, |k| {
+                    if let Some(c) = cover.get_mut(k) {
+                        *c = 255;
+                    }
+                });
+            }
+        }
+        // across, then down
+        let mut wide = vec![0u8; side * side];
+        for y in 0..side {
+            for x in (0..side).filter(|x| cover.get(y * side + x) == Some(&255)) {
+                for k in x.saturating_sub(grow)..(x + grow + 1).min(side) {
+                    if let Some(c) = wide.get_mut(y * side + k) {
+                        *c = 255;
+                    }
+                }
+            }
+        }
+        let mut out = vec![0u8; side * side];
+        for y in 0..side {
+            for x in (0..side).filter(|x| wide.get(y * side + x) == Some(&255)) {
+                for k in y.saturating_sub(grow)..(y + grow + 1).min(side) {
+                    if let Some(c) = out.get_mut(k * side + x) {
+                        *c = 255;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether any of its texture coordinates lie outside the texture: it repeats there, and paint
+    /// on one repeat shows on the others.
+    pub fn repeats_textures(&self) -> bool {
+        const SLACK: f32 = 1e-3;
+        self.vertices.iter().any(|v| v.uv.iter().any(|t| !(-SLACK..=1.0 + SLACK).contains(t)))
     }
 
     /// How much of part `index`'s texture its triangles cover more than once: the share of the
@@ -146,6 +239,33 @@ impl Mesh {
         let twice = cover.iter().filter(|&&c| c > 1).count();
         if covered == 0 { 0.0 } else { twice as f32 / covered as f32 }
     }
+}
+
+/// How far along the line from `from` along `along` the triangle `a`, `b`, `c` lies, and how far
+/// towards `b` and `c` the point is: none if the line misses it or the triangle is behind `from`.
+fn line_meets_triangle(
+    from: [f32; 3],
+    along: [f32; 3],
+    a: [f32; 3],
+    b: [f32; 3],
+    c: [f32; 3],
+) -> Option<(f32, f32, f32)> {
+    let sub = |p: [f32; 3], q: [f32; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+    let dot = |p: [f32; 3], q: [f32; 3]| p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+    let cross =
+        |p: [f32; 3], q: [f32; 3]| [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
+    let (ab, ac) = (sub(b, a), sub(c, a));
+    let across = cross(along, ac);
+    let det = dot(ab, across);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let to = sub(from, a);
+    let u = dot(to, across) / det;
+    let up = cross(to, ab);
+    let v = dot(along, up) / det;
+    let d = dot(ac, up) / det;
+    (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && d > 0.0).then_some((d, u, v))
 }
 
 /// Calls `hit` with the index of each texel (row-major, `side` square, v up: row 0 at v = 1)
@@ -307,7 +427,7 @@ impl Gathered {
     pub(crate) fn into_mesh(self, materials: Vec<Material>, material_file: Option<String>) -> Result<Mesh, MeshError> {
         let Gathered { positions, uvs, normals, corners, faces, parts, objects } = self;
         if faces.is_empty() {
-            return Err(MeshError::NoFaces);
+            return Err(if positions.is_empty() { MeshError::NoFaces } else { MeshError::PointCloud });
         }
         if faces.len() > MAX_TRIANGLES {
             return Err(MeshError::TooLarge);
@@ -687,10 +807,32 @@ f 1/1 2/2 3/3
 
     #[test]
     fn models_without_faces_or_texture_coordinates_are_refused() {
-        assert_eq!(read_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\n", None), Err(MeshError::NoFaces));
+        assert_eq!(read_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\n", None), Err(MeshError::PointCloud));
+        assert_eq!(read_obj("# nothing\n", None), Err(MeshError::NoFaces));
         assert_eq!(read_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", None), Err(MeshError::NoTextureCoordinates));
         assert_eq!(read_obj("v 0 0 0\nf 1 2 3\n", None), Err(MeshError::Malformed(2)));
         assert_eq!(read_obj("v 0 zero 0\n", None), Err(MeshError::Malformed(1)));
+    }
+
+    #[test]
+    fn a_line_finds_the_nearest_surface_and_its_texture_coordinates() {
+        let square = |z: f32, name: &str| {
+            format!("o {name}\nv -1 -1 {z}\nv 1 -1 {z}\nv 1 1 {z}\nv -1 1 {z}\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n")
+        };
+        let text = format!("{}f 1/1 2/2 3/3 4/4\n{}f 5/1 6/2 7/3 8/4\n", square(0.0, "near"), square(-1.0, "far"));
+        let mesh = read_obj(&text, None).unwrap();
+        let along = [0.0, 0.0, -1.0];
+        // from in front, on the first square a quarter of the way along each side
+        let hit = mesh.first_surface([-0.5, -0.5, 4.0], along, |_| false).unwrap();
+        assert_eq!(hit.submesh, Some(0));
+        assert!((hit.uv[0] - 0.25).abs() < 1e-5 && (hit.uv[1] - 0.25).abs() < 1e-5, "{:?}", hit.uv);
+        assert!((hit.distance - 4.0).abs() < 1e-4);
+        // the near one hidden, the far one is met; off the squares, nothing
+        let hit = mesh.first_surface([0.0, 0.0, 4.0], along, |i| i == 0).unwrap();
+        assert_eq!(hit.submesh, Some(1));
+        assert!(mesh.first_surface([3.0, 0.0, 4.0], along, |_| false).is_none());
+        // behind the line's start is not ahead of it
+        assert!(mesh.first_surface([0.0, 0.0, -4.0], along, |_| false).is_none());
     }
 
     #[test]

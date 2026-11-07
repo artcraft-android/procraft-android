@@ -5,7 +5,8 @@
 
 struct LayerUniform {
     opacity: f32,
-    // 0: no stroke on this layer, 1: the stroke paints, 2: it erases, 3: it paints alpha-locked
+    // 0: no stroke on this layer, 1: the stroke paints, 2: it erases, 3: it paints alpha-locked,
+    // 4: it takes the layer's place where it reaches
     stroke_mode: u32,
     stroke_opacity: f32,
     blend: u32,
@@ -177,6 +178,11 @@ fn burnt(under: vec4<f32>, r: vec4<f32>, w: f32) -> vec4<f32> {
 // a layer with the stroke in progress on it applied
 fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
     var c = c0;
+    if (lu.stroke_mode == 4u) {
+        // where it reaches its alpha is marked by 1, so that clear can be laid down as well
+        let t = textureLoad(stroke_tex, p, 0);
+        return select(c0, vec4<f32>(t.rgb, t.a - 1.0), t.a >= 0.5);
+    }
     if (lu.stroke_mode != 0u) {
         let px = stroke_pixel(p);
         let s = px.s;

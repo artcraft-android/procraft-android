@@ -141,6 +141,20 @@ pub(crate) fn option_slider(
     both: bool,
     label_ink: impl Shade,
 ) -> Option<f32> {
+    option_slider_let_go(ui, at, width, label, value, shown, both, label_ink).0
+}
+
+/// [`option_slider`], and whether it was let go just now.
+fn option_slider_let_go(
+    ui: &Ui,
+    at: Pos2,
+    width: f32,
+    label: &str,
+    value: f32,
+    shown: &str,
+    both: bool,
+    label_ink: impl Shade,
+) -> (Option<f32>, bool) {
     let top = at.y + 6.0;
     text(ui.painter(), pos2(at.x + 10.0, top), Align2::LEFT_TOP, label, 16.0, Weight::Regular, argb(label_ink));
     text(ui.painter(), pos2(at.x + width - 15.0, top), Align2::RIGHT_TOP, shown, 16.0, Weight::Regular, argb(VALUE));
@@ -161,12 +175,15 @@ pub(crate) fn option_slider(
     ui.painter().rect_filled(k, 5.5, Color32::WHITE);
     // it changes as it is dragged, not where it is pressed
     let response = ui.interact(bar, ui.scope_id().with(("option slider", label)), Sense::drag());
+    let let_go = response.drag_stopped();
     if !response.dragged() {
-        return None;
+        return (None, let_go);
     }
-    let p = response.interact_pointer_pos()?;
-    let t = ((p.x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0);
-    Some(if both { t * 2.0 - 1.0 } else { t })
+    let moved = response.interact_pointer_pos().map(|p| {
+        let t = ((p.x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0);
+        if both { t * 2.0 - 1.0 } else { t }
+    });
+    (moved, let_go)
 }
 
 /// Recolor's toolbar: the Flood slider, how far from the colour under the reticle the fill
@@ -226,6 +243,7 @@ impl Toolbars {
             Some(procraft_core::Adjustment::ColorBalance) => self.balance(ctx, look, session, shown, screen, wide),
             Some(procraft_core::Adjustment::Curves) => self.curves(ctx, session, shown, screen),
             Some(procraft_core::Adjustment::Liquify) => self.liquify.show(ctx, look, session, shown),
+            Some(procraft_core::Adjustment::Plugin) => plugin_filter(ctx, session, shown, screen),
             Some(procraft_core::Adjustment::GradientMap) => {
                 self.gradient_map.show(ctx, look, session, shown, gradients, colours, backdrops);
             }
@@ -709,6 +727,45 @@ fn bloom(ctx: &egui::Context, session: &CanvasSession, shown: &AdjustShown, scre
             };
             if let Some(v) = option_slider(ui, at, w, name, v, &self::shown(v, true), false, LABEL) {
                 session.adjustment_bloom_value(i as u32, v);
+            }
+        }
+    });
+}
+
+/// A plugin's filter's toolbar: one for all of them, its controls as the file lists them.
+fn plugin_filter(ctx: &egui::Context, session: &CanvasSession, shown: &AdjustShown, screen: Rect) {
+    use procraft_core::{PluginControl, plugin_slider_along, plugin_slider_at, plugin_slider_shown};
+    let Some(filter) = &shown.plugin else { return };
+    let rows = filter.controls.len().max(1) as f32;
+    let rect = panel_rect(screen, 532.0, 41.0 + 54.0 * rows + 8.5 * (rows - 1.0));
+    panel(ctx, "plugin filter toolbar", rect, |ui| {
+        for (i, control) in filter.controls.iter().enumerate() {
+            let at = pos2(rect.center().x - 250.0, rect.top() + 24.0 + i as f32 * 62.5);
+            match control {
+                PluginControl::Slider { control } => {
+                    let along = plugin_slider_along(control.clone(), control.value);
+                    let reads = plugin_slider_shown(control.clone(), control.value);
+                    let (moved, let_go) =
+                        option_slider_let_go(ui, at, 500.0, &control.label, along, &reads, false, LABEL);
+                    if let Some(along) = moved {
+                        let to = plugin_slider_at(control.clone(), along);
+                        session.plugin_filter_slider(control.key.clone(), to, false);
+                    }
+                    if let_go {
+                        session.plugin_filter_slider(control.key.clone(), control.value, true);
+                    }
+                }
+                PluginControl::Switch { control } => {
+                    let row = Rect::from_min_size(at, vec2(500.0, 54.0));
+                    let ink = argb(LABEL);
+                    let left = pos2(row.left() + 10.0, row.center().y);
+                    text(ui.painter(), left, Align2::LEFT_CENTER, &control.label, 16.0, Weight::Regular, ink);
+                    let place = pos2(row.right() - 15.0 - 63.0, row.center().y - 14.0);
+                    crate::transform::switch(ui, place, control.on, &control.key);
+                    if ui.interact(row, ui.scope_id().with(&control.key), Sense::click()).clicked() {
+                        session.plugin_filter_switch(control.key.clone(), !control.on);
+                    }
+                }
             }
         }
     });

@@ -1,12 +1,21 @@
 package io.github.artcraftandroid.procraft.ui
 
+import android.content.res.Configuration
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.PlatformTextStyle
@@ -16,6 +25,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.em
+import io.github.artcraftandroid.procraft.core.Plugins
 
 /** Touches leave no ripple: the controls show presses in their own ways, or not at all. */
 private object NoIndication : androidx.compose.foundation.IndicationNodeFactory {
@@ -36,7 +46,7 @@ private const val TRACKING = -0.045f
  * whatever the system font scale: sp equal dp inside the theme.
  */
 @Composable
-fun ProCraftTheme(content: @Composable () -> Unit) {
+fun ProCraftTheme(interfaceSize: Float = 1f, content: @Composable () -> Unit) {
     val assets = LocalContext.current.assets
     val text = remember(assets) {
         val family = FontFamily(
@@ -70,11 +80,62 @@ fun ProCraftTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Pc.Accent), typography = typography) {
         val density = LocalDensity.current
         CompositionLocalProvider(
-            LocalDensity provides Density(density.density, 1f),
+            LocalDensity provides Density(density.density * interfaceSize, 1f),
+            LocalConfiguration provides sizedScreen(interfaceSize),
+            LocalSizeSettled provides sizeSettled(interfaceSize),
             LocalTextStyle provides text,
             androidx.compose.foundation.LocalIndication provides NoIndication,
             content = content,
         )
+    }
+}
+
+/** Moves a frame after the interface's size does: see [sizeSettled]. */
+private val LocalSizeSettled = staticCompositionLocalOf { 0 }
+
+/**
+ * Counts the sizes the interface has settled at. A BoxWithConstraints gives its content the size
+ * in dp through the density of its last measuring, and as the window stays as it is nothing
+ * composes it again after that: it would go on with the old size until the next turn of the
+ * screen. Changing a static local a frame on, measured by then, has all of it read the new one.
+ */
+@Composable
+private fun sizeSettled(interfaceSize: Float): Int {
+    var settled by remember { mutableIntStateOf(0) }
+    var last by remember { mutableFloatStateOf(interfaceSize) }
+    LaunchedEffect(interfaceSize) {
+        if (interfaceSize != last) {
+            last = interfaceSize
+            withFrameNanos { }
+            settled++
+        }
+    }
+    return settled
+}
+
+/** How big the interface shows with [chosen] set: as far as the window has room. */
+@Composable
+fun fittedInterfaceSize(plugins: Plugins, changes: Any? = null): Float {
+    val screen = LocalConfiguration.current
+    return remember(plugins, changes, screen.screenWidthDp, screen.screenHeightDp) {
+        plugins.interfaceScale(screen.screenWidthDp.toFloat(), screen.screenHeightDp.toFloat())
+    }
+}
+
+/** The screen as the interface measures it at [interfaceSize]: as many of its dp as fit across it. */
+@Composable
+private fun sizedScreen(interfaceSize: Float): Configuration {
+    val screen = LocalConfiguration.current
+    return remember(screen, interfaceSize) {
+        if (interfaceSize == 1f) {
+            screen
+        } else {
+            Configuration(screen).apply {
+                screenWidthDp = (screenWidthDp / interfaceSize).toInt()
+                screenHeightDp = (screenHeightDp / interfaceSize).toInt()
+                smallestScreenWidthDp = (smallestScreenWidthDp / interfaceSize).toInt()
+            }
+        }
     }
 }
 
@@ -88,7 +149,8 @@ const val MATCHED_POPUP_TEXT = 0.85f
 /**
  * A popup whose text keeps one size whatever the system font scale. A popup is a window of its
  * own, composed with the system's font scale, so its text followed it where the rest of the
- * interface doesn't; this hands it the theme's density, its text scaled by [textScale].
+ * interface doesn't; this hands it the theme's density, its text scaled by [textScale], and the
+ * theme's screen.
  */
 @Composable
 fun PcPopup(
@@ -100,8 +162,9 @@ fun PcPopup(
     content: @Composable () -> Unit,
 ) {
     val density = Density(LocalDensity.current.density, textScale)
+    val screen = LocalConfiguration.current
     androidx.compose.ui.window.Popup(alignment, offset, onDismissRequest, properties) {
-        CompositionLocalProvider(LocalDensity provides density, content = content)
+        CompositionLocalProvider(LocalDensity provides density, LocalConfiguration provides screen, content = content)
     }
 }
 
@@ -115,7 +178,8 @@ fun PcPopup(
     content: @Composable () -> Unit,
 ) {
     val density = Density(LocalDensity.current.density, textScale)
+    val screen = LocalConfiguration.current
     androidx.compose.ui.window.Popup(popupPositionProvider, onDismissRequest, properties) {
-        CompositionLocalProvider(LocalDensity provides density, content = content)
+        CompositionLocalProvider(LocalDensity provides density, LocalConfiguration provides screen, content = content)
     }
 }

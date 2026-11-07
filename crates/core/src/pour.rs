@@ -1,14 +1,43 @@
 //! Dropping a colour on the canvas: the colour poured into the area joined to a point whose colour
 //! is near the point's own, measured on the reference layer if there is one. While the finger stays
 //! down the threshold can change and the pour is redone from the layer as it was; it ends as one
-//! undo step. Recolor keeps a pour open while its point moves and its colour changes.
+//! undo step. Recolor keeps a pour open while its point moves and its colour changes. A plugin on
+//! the fill hook has its say as a pour is let go, on a thread of its own: the pour stays open, its
+//! layer held, until it has.
+
+use std::sync::{Arc, Condvar, Mutex};
 
 use procraft_engine::document::LayerId;
 use procraft_engine::fill::{self, Flood};
-use procraft_engine::geom::Vec2;
 use procraft_engine::selection::Mask;
 
-use crate::CanvasSession;
+use crate::hooks::Hooks;
+use crate::plugin_run::MOST_FILL;
+use crate::{CanvasSession, Shared, State};
+
+/// What is said of a fill with more in it than can go through a plugin.
+const TOO_BIG: &str = "This fill is too big for a plugin: it stays as it is.";
+
+/// A pour a plugin is finishing: when it has, and whoever is waiting for that.
+#[derive(Default)]
+pub(crate) struct Finishing {
+    done: Mutex<bool>,
+    ended: Condvar,
+}
+
+impl Finishing {
+    fn wait(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        while !*done {
+            done = self.ended.wait(done).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn end(&self) {
+        *self.done.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.ended.notify_all();
+    }
+}
 
 /// A pour under way.
 pub(crate) struct Pour {
@@ -28,8 +57,10 @@ pub(crate) struct Pour {
     shown_region: Option<[u32; 4]>,
     /// What it last poured, as the flood reached (within the selection).
     shown_mask: Option<Mask>,
-    /// It keeps out of gaps up to this many pixels wide (0: none).
-    gap: u32,
+    /// The flood as a plugin left it, once one has.
+    closed: Option<Mask>,
+    /// Being finished by a plugin: nothing more changes it.
+    finishing: Option<Arc<Finishing>>,
 }
 
 impl Pour {
@@ -40,10 +71,7 @@ impl Pour {
     /// Remembered as shown.
     fn pour_region(&mut self, width: u32, threshold: f32, same_flood: bool) -> Option<([u32; 4], Vec<u8>)> {
         let mask = self.flood.as_ref().map(|flood| {
-            let mut mask = flood.mask(threshold);
-            if self.gap > 0 {
-                mask = fill::close_gaps(&mask, flood.seed(), self.gap);
-            }
+            let mut mask = self.closed.clone().unwrap_or_else(|| flood.mask(threshold));
             // poured into what is see-through, it goes on under the line it stopped at
             if flood.colour[3] == 0 {
                 fill::under_edges(&mut mask, self.elsewhere.as_deref().unwrap_or(&self.before));
@@ -134,6 +162,57 @@ impl Pour {
     }
 }
 
+/// `mask`, a fill from `seed`, as the plugins on the fill hook leave it: its box goes through with
+/// a pixel round it, which, in the picture, is a pixel of no fill, and past the picture's edge
+/// nothing. None if they change nothing, or it is too big to go through. Takes a while: nothing
+/// is held while it does.
+pub(crate) fn closed_by(hooks: &Hooks, mut mask: Mask, seed: (u32, u32)) -> Option<Mask> {
+    let [x, y, w, h] = mask.bounds()?;
+    let (left, top) = (x.saturating_sub(1), y.saturating_sub(1));
+    let (right, bottom) = ((x + w + 1).min(mask.width), (y + h + 1).min(mask.height));
+    let (width, height) = ((right - left) as usize, (bottom - top) as usize);
+    if (width * height) as u64 > MOST_FILL {
+        hooks.say(TOO_BIG);
+        return None;
+    }
+    let (stride, words) = (mask.width as usize, width.div_ceil(64));
+    let mut rows = vec![0_u64; words * height];
+    for (from, to) in mask.data.chunks_exact(stride).skip(top as usize).zip(rows.chunks_exact_mut(words)) {
+        for (i, &v) in from.iter().skip(left as usize).take(width).enumerate() {
+            if let Some(word) = to.get_mut(i / 64).filter(|_| v > 0) {
+                *word |= 1 << (i % 64);
+            }
+        }
+    }
+    let from = (seed.0.checked_sub(left)? as usize, seed.1.checked_sub(top)? as usize);
+    if !hooks.fill_rows(&mut rows, width, height, from) {
+        return None;
+    }
+    for (to, left_of) in mask.data.chunks_exact_mut(stride).skip(top as usize).zip(rows.chunks_exact(words)) {
+        for (i, v) in to.iter_mut().skip(left as usize).take(width).enumerate() {
+            if left_of.get(i / 64).is_some_and(|word| word >> (i % 64) & 1 == 0) {
+                *v = 0;
+            }
+        }
+    }
+    Some(mask)
+}
+
+/// Ends the open pour: `keep` makes it one undo step, called `name` if given (else "ColorDrop");
+/// otherwise (or with nothing poured) the layer goes back to how it was.
+fn end_pour(shared: &Shared, st: &mut State, keep: bool, name: Option<&str>) {
+    let Some(pour) = st.pour.take() else { return };
+    let keep = keep && pour.flood.is_some();
+    if let Some(canvas) = st.canvas.as_mut() {
+        if keep {
+            canvas.name_next_step(name.unwrap_or("ColorDrop"));
+        }
+        canvas.release_layer(keep, None);
+    }
+    st.revision += 1;
+    shared.frame(st);
+}
+
 /// The smallest rectangle (x, y, width, height) holding every pixel where masks `a` and `b` (of
 /// the same size) differ; none where they don't.
 fn differ(a: &Mask, b: &Mask) -> Option<[u32; 4]> {
@@ -173,19 +252,11 @@ fn unit(c: f32) -> f32 {
 
 /// The canvas pixel under window point (`x`, `y`), if it is on the canvas.
 fn seed_at(st: &crate::State, x: f32, y: f32) -> Option<(u32, u32)> {
-    let p = st.view.and_then(|v| v.screen_to_canvas(Vec2::new(x, y)))?;
-    let (w, h) = (st.doc.width(), st.doc.height());
-    (p.x >= 0.0 && p.y >= 0.0 && p.x < w as f32 && p.y < h as f32).then_some((p.x as u32, p.y as u32))
+    st.window_texel(x, y)
 }
 
 #[uniffi::export]
 impl CanvasSession {
-    /// ColorDrop keeps out of gaps up to `pixels` wide (canvas pixels, at most
-    /// [`fill::MOST_GAP`]) in the lines that bound it; 0 fills through any.
-    pub fn set_fill_gap(&self, pixels: u32) {
-        self.shared.lock().fill_gap = pixels.min(fill::MOST_GAP);
-    }
-
     /// Whether window point (`x`, `y`) is on the artwork, where a dragged colour can come to rest.
     pub fn pour_lands(&self, x: f32, y: f32) -> bool {
         seed_at(&self.shared.lock(), x, y).is_some()
@@ -197,6 +268,7 @@ impl CanvasSession {
     /// [`CanvasSession::pour_threshold`] until [`CanvasSession::pour_end`].
     pub fn pour_begin(&self, x: f32, y: f32, r: f32, g: f32, b: f32, threshold: f32) -> bool {
         self.pour_end(true, None);
+        self.await_pour();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(seed) = seed_at(st, x, y) else { return false };
@@ -207,6 +279,7 @@ impl CanvasSession {
             return false;
         }
         let Some(before) = st.current_pixels() else { return false };
+        let within = st.reach_selection();
         // measured on the reference layer when another layer is it
         let elsewhere = st.doc.reference().filter(|&r| r != current).and_then(|r| st.layer_pixels(r));
         let mut pour = Pour {
@@ -215,12 +288,13 @@ impl CanvasSession {
             flood: None,
             elsewhere,
             colour: [r, g, b].map(unit),
-            selection: st.selection.clone(),
+            selection: within,
             alpha_lock: layer.alpha_lock,
             shown: thousandths(threshold),
             shown_region: None,
             shown_mask: None,
-            gap: st.fill_gap,
+            closed: None,
+            finishing: None,
         };
         pour.measure(w, h, seed);
         if pour.flood.is_none() {
@@ -242,7 +316,7 @@ impl CanvasSession {
         let st = &mut *guard;
         let seed = seed_at(st, x, y);
         let (w, h) = (st.doc.width(), st.doc.height());
-        let Some(pour) = st.pour.as_mut() else { return false };
+        let Some(pour) = st.pour.as_mut().filter(|p| p.finishing.is_none()) else { return false };
         let same = match seed {
             Some(seed) => pour.moved(w, h, seed),
             None => {
@@ -262,7 +336,7 @@ impl CanvasSession {
     pub fn pour_colour(&self, r: f32, g: f32, b: f32) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(pour) = st.pour.as_mut() else { return };
+        let Some(pour) = st.pour.as_mut().filter(|p| p.finishing.is_none()) else { return };
         let colour = [r, g, b].map(unit);
         if colour == pour.colour {
             return;
@@ -277,7 +351,7 @@ impl CanvasSession {
     pub fn pour_threshold(&self, threshold: f32) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(pour) = st.pour.as_mut() else { return };
+        let Some(pour) = st.pour.as_mut().filter(|p| p.finishing.is_none()) else { return };
         let t = thousandths(threshold);
         if t == pour.shown {
             return;
@@ -289,19 +363,115 @@ impl CanvasSession {
     }
 
     /// Ends the open pour: `keep` makes it one undo step, called `name` if given (else
-    /// "ColorDrop"); otherwise (or with nothing poured) the layer goes back to how it was.
+    /// "ColorDrop"); otherwise (or with nothing poured) the layer goes back to how it was. Kept,
+    /// with a plugin on the fill hook, it ends when that has had its say, on a thread of its own:
+    /// [`CanvasSession::pour_finishing`] until then.
     pub fn pour_end(&self, keep: bool, name: Option<String>) {
+        self.await_pour();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(pour) = st.pour.take() else { return };
-        let keep = keep && pour.flood.is_some();
-        if let Some(canvas) = st.canvas.as_mut() {
-            if keep {
-                canvas.name_next_step(name.as_deref().unwrap_or("ColorDrop"));
-            }
-            canvas.release_layer(keep, None);
+        if keep && self.finish_pour(st, &name) {
+            return;
         }
-        st.revision += 1;
-        self.shared.frame(st);
+        end_pour(&self.shared, st, keep, name.as_deref());
+    }
+
+    /// Whether a fill let go is still being finished by a plugin: nothing should be started until
+    /// it is. The pour's own calls wait for it.
+    pub fn pour_finishing(&self) -> bool {
+        self.shared.lock().pour.as_ref().is_some_and(|pour| pour.finishing.is_some())
+    }
+}
+
+impl CanvasSession {
+    /// Waits for a fill a plugin is finishing, if there is one.
+    pub(crate) fn await_pour(&self) {
+        let finishing = self.shared.lock().pour.as_ref().and_then(|pour| pour.finishing.clone());
+        if let Some(finishing) = finishing {
+            finishing.wait();
+        }
+    }
+
+    /// Hands the open pour to a thread of its own, to end when the plugins on the fill hook have
+    /// had their say; false if none wants to, and it is to end now.
+    fn finish_pour(&self, st: &mut State, name: &Option<String>) -> bool {
+        let Some(hooks) = st.hooks.clone().filter(|hooks| hooks.fill_mask()) else { return false };
+        let Some(pour) = st.pour.as_mut() else { return false };
+        let threshold = pour.shown as f32 / 1000.0;
+        let Some(flood) = pour.flood.as_ref() else { return false };
+        let (mask, seed) = (flood.mask(threshold), flood.seed());
+        let finishing = Arc::new(Finishing::default());
+        let (shared, ended, name) = (Arc::clone(&self.shared), Arc::clone(&finishing), name.clone());
+        let work = move || {
+            let closed = closed_by(&hooks, mask, seed);
+            let mut guard = shared.lock();
+            let st = &mut *guard;
+            let width = st.doc.width();
+            if let (Some(pour), Some(closed)) = (st.pour.as_mut(), closed) {
+                pour.closed = Some(closed);
+                pour.show(width, st.canvas.as_mut(), false);
+            }
+            end_pour(&shared, st, true, name.as_deref());
+            drop(guard);
+            ended.end();
+        };
+        if std::thread::Builder::new().name("fill".to_owned()).spawn(work).is_err() {
+            return false;
+        }
+        pour.finishing = Some(finishing);
+        true
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// A mask filled all over.
+    pub(crate) fn mask_of_box(width: u32, height: u32) -> Mask {
+        Mask { width, height, data: vec![255; width as usize * height as usize] }
+    }
+
+    #[test]
+    fn a_fill_goes_through_a_row_of_bits_and_comes_back_by_where_it_was() {
+        use crate::plugin_run::tests::{FILL_AT, fill_module};
+        use crate::plugin_run::{Hook, Running};
+        // takes out the fifth pixel of every row it is handed
+        let out = "(i64.store (i32.const 65536) (i64.const 16))";
+        let hooks = Hooks::default();
+        let module = fill_module(FILL_AT, "(i32.const 1)", out);
+        hooks.put_on("fill".to_owned(), Running::start(&module, &[]).unwrap(), &[Hook::FillMask]);
+        // a block of 10 x 3 at (20, 5) in a mask of 100 x 50, with soft values
+        let mut mask = Mask { width: 100, height: 50, data: vec![0; 100 * 50] };
+        for y in 5..8 {
+            mask.data[y * 100 + 20..y * 100 + 30].fill(90);
+        }
+        let closed = closed_by(&hooks, mask.clone(), (22, 6)).unwrap();
+        // its box and a pixel round it start at (19, 4): the fifth pixel is at 23
+        for y in 5..8 {
+            assert_eq!(closed.data[y * 100 + 23], 0, "{y}");
+            assert_eq!(closed.data[y * 100 + 22], 90, "what stays keeps its value");
+            assert_eq!(closed.data[y * 100 + 24], 90);
+        }
+        assert_eq!(closed.data.iter().filter(|&&v| v > 0).count(), 27);
+    }
+
+    #[test]
+    fn a_box_at_the_picture_s_edge_has_nothing_past_it() {
+        use crate::plugin_run::tests::fill_module;
+        use crate::plugin_run::{Hook, Running};
+        // it must be told 3 wide and 2 tall (nothing left or above, a pixel right and below) and
+        // the seed at (1, 0), or it crashes
+        let begin = "(if (i32.or (i32.ne (local.get 0) (i32.const 3)) (i32.or (i32.ne (local.get 1) (i32.const 2))
+                (i32.or (i32.ne (local.get 2) (i32.const 1)) (i32.ne (local.get 3) (i32.const 0)))))
+                (then (unreachable)))
+             (i32.const 65536)";
+        let hooks = Hooks::default();
+        let module = fill_module(begin, "(i32.const 0)", "");
+        hooks.put_on("fill".to_owned(), Running::start(&module, &[]).unwrap(), &[Hook::FillMask]);
+        let mut mask = Mask { width: 100, height: 50, data: vec![0; 100 * 50] };
+        mask.data[0..2].fill(255);
+        assert!(closed_by(&hooks, mask, (1, 0)).is_none());
+        assert_eq!(hooks.take_said(), None);
     }
 }

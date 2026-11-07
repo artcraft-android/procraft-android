@@ -22,10 +22,12 @@ pub enum Adjustment {
     ChromaticAberration,
     Liquify,
     Clone,
+    /// A plugin's filter: open only from its row, and named after it.
+    Plugin,
 }
 
 /// Each adjustment: its name, whether its amount is swiped, and its amount when first painted on.
-const ADJUSTMENTS: [(Adjustment, &str, bool, Option<f32>); 15] = [
+const ADJUSTMENTS: [(Adjustment, &str, bool, Option<f32>); 16] = [
     (Adjustment::Hsb, "Hue, Saturation, Brightness", false, None),
     (Adjustment::ColorBalance, "Color Balance", false, None),
     (Adjustment::Curves, "Curves", false, None),
@@ -41,6 +43,7 @@ const ADJUSTMENTS: [(Adjustment, &str, bool, Option<f32>); 15] = [
     (Adjustment::ChromaticAberration, "Chromatic Aberration", true, Some(1.0)),
     (Adjustment::Liquify, "Liquify", false, None),
     (Adjustment::Clone, "Clone", false, None),
+    (Adjustment::Plugin, "Plugin", false, None),
 ];
 
 fn entry(a: Adjustment) -> (Adjustment, &'static str, bool, Option<f32>) {
@@ -68,7 +71,7 @@ pub fn adjustment_pencil_amount(adjustment: Adjustment) -> Option<f32> {
 /// Whether it can be painted on with the brush (Pencil) instead of changing the whole layer.
 #[uniffi::export]
 pub fn adjustment_paintable(adjustment: Adjustment) -> bool {
-    !matches!(adjustment, Adjustment::Liquify | Adjustment::Clone)
+    !matches!(adjustment, Adjustment::Liquify | Adjustment::Clone | Adjustment::Plugin)
 }
 
 /// The menu's groups in order: colour, blurs, effects, painting.
@@ -112,9 +115,10 @@ mod tests {
     #[test]
     fn every_adjustment_is_in_the_menu_once() {
         let all: Vec<Adjustment> = adjustment_groups().into_iter().flatten().collect();
-        assert_eq!(all.len(), ADJUSTMENTS.len());
+        assert_eq!(all.len() + 1, ADJUSTMENTS.len());
         for e in ADJUSTMENTS {
-            assert_eq!(all.iter().filter(|&&a| a == e.0).count(), 1, "{:?}", e.0);
+            let times = usize::from(e.0 != Adjustment::Plugin);
+            assert_eq!(all.iter().filter(|&&a| a == e.0).count(), times, "{:?}", e.0);
         }
     }
 

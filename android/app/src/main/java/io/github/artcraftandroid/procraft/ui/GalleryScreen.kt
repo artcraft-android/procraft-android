@@ -219,7 +219,10 @@ fun GalleryScreen(vm: CanvasViewModel) {
                         vm.stackArtworks(picked())
                         endSelecting()
                     },
-                    onPreview = { previewing = picked() },
+                    onPreview = {
+                        previewFrom = 0
+                        previewing = picked()
+                    },
                     onShare = { sharing = GalleryShare(picked(), null) },
                     onDuplicate = {
                         picked().forEach(vm::duplicateArtwork)
@@ -1456,6 +1459,7 @@ private fun readFrames(dir: String, side: Int): PlayedFrames? {
     if (!io.github.artcraftandroid.procraft.core.artworkPlays(dir)) return null
     val s = runCatching { io.github.artcraftandroid.procraft.core.CanvasSession.open(dir) }.getOrNull() ?: return null
     try {
+        if (s.modelInfo() != null) return readTurntable(s, side)
         val settings = s.animationSettings()?.takeIf { !it.pages } ?: return null
         if (!s.drawWithoutWindow()) return null
         val count = s.animationFrameCount()
@@ -1471,6 +1475,21 @@ private fun readFrames(dir: String, side: Int): PlayedFrames? {
     } finally {
         s.destroy()
     }
+}
+
+/** A model going round, opened in [s], at no more than [side] pixels. */
+private fun readTurntable(s: io.github.artcraftandroid.procraft.core.CanvasSession, side: Int): PlayedFrames? {
+    if (!s.drawWithoutWindow()) return null
+    val count = s.modelPreviewFrames()
+    val fit = kotlin.math.sqrt(PLAYED_MOST / 4.0 / count.coerceAtLeast(1u).toDouble()).toInt()
+    val pictures = (0u until count).mapNotNull { i ->
+        s.modelPreviewPicture(i, minOf(side, fit).toUInt())?.let { t ->
+            val bitmap = CanvasSpace.tag(android.graphics.Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), android.graphics.Bitmap.Config.ARGB_8888))
+            bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(t.rgba))
+            bitmap.asImageBitmap()
+        }
+    }
+    return PlayedFrames(pictures, pictures.indices.toList(), s.modelPreviewFps().toInt(), io.github.artcraftandroid.procraft.core.AnimationPlayback.LOOP)
 }
 
 private val PreviewClose = Color(0xFFD7D7D7)

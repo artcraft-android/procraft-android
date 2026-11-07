@@ -34,6 +34,8 @@ pub(crate) const DIRECTIONAL_INNER: f32 = 40.0;
 pub(crate) const DIRECTIONAL_REACH: f32 = 110.0;
 /// Perspective blur's arrow at first: up the window. The point along it given for drawing lies
 /// this far from the puck (canvas pixels).
+/// How many ways liquify has.
+const LIQUIFY_KINDS: usize = 8;
 const ARROW_UP: f32 = -std::f32::consts::FRAC_PI_2;
 const ARROW_TIP: f32 = 100.0;
 
@@ -95,6 +97,8 @@ pub struct AdjustShown {
     pub perspective_puck: Option<Vec<f32>>,
     /// Anything was changed since it opened (or was last kept).
     pub changed: bool,
+    /// A plugin's filter: its name, and its controls for one panel to draw.
+    pub plugin: Option<crate::plugin_filter::PluginFilterShown>,
 }
 
 pub(crate) struct Adjusting {
@@ -123,8 +127,9 @@ pub(crate) struct Adjusting {
     glitch_kind: GlitchKind,
     glitch: [Vec<f32>; 4],
     liquify_kind: LiquifyKind,
-    /// Size, pressure, distortion and momentum.
+    /// Size, pressure, distortion and momentum; each way keeps its own distortion.
     liquify: [f32; 4],
+    liquify_distortions: [f32; LIQUIFY_KINDS],
     liquify_amount: f32,
     liquified: bool,
     /// Changed since it opened (a slider, a choice, a liquify stroke): undo takes that back.
@@ -184,7 +189,8 @@ impl Default for Adjusting {
             glitch_kind: GlitchKind::Artifact,
             glitch: glitch_defaults(),
             liquify_kind: LiquifyKind::Push,
-            liquify: [0.5, 1.0, 0.0, 0.8],
+            liquify: [0.5, 1.0, 0.0, 0.0],
+            liquify_distortions: [0.0; LIQUIFY_KINDS],
             liquify_amount: 1.0,
             liquified: false,
             touched: false,
@@ -259,6 +265,25 @@ impl Adjusting {
         self.open == Some(Adjustment::ChromaticAberration) && self.chroma_kind == ChromaticKind::Displace
     }
 
+    /// A plugin's filter is open, as if just begun.
+    pub(crate) fn open_plugin(&mut self) {
+        self.open = Some(Adjustment::Plugin);
+        self.pencil = false;
+        self.preview = false;
+        self.touched = false;
+    }
+
+    /// The plugin's filter open has stopped.
+    pub(crate) fn close_plugin(&mut self) {
+        self.open = None;
+        self.preview = false;
+    }
+
+    /// Something open was changed.
+    pub(crate) fn touch(&mut self) {
+        self.touched = true;
+    }
+
     /// Open, and changed since it opened: undo takes that back.
     pub(crate) fn touched(&self) -> bool {
         self.open.is_some() && self.touched
@@ -269,7 +294,7 @@ impl Adjusting {
             Some(Adjustment::Hsb) => self.hsb.iter().any(|&v| v != 0.5),
             Some(Adjustment::ColorBalance) => self.balance.iter().any(|&v| v != 0.5),
             Some(Adjustment::Curves) => self.curves.iter().any(|c| *c != straight()),
-            Some(Adjustment::GradientMap) => true,
+            Some(Adjustment::GradientMap | Adjustment::Plugin) => true,
             Some(Adjustment::PerspectiveBlur) => self.amount > 0.0 || !self.perspective_before.is_empty(),
             _ => self.amount > 0.0,
         }
@@ -308,6 +333,7 @@ impl Adjusting {
             perspective_kind: self.perspective_kind,
             perspective_puck: self.perspective_puck(view, middle),
             changed: self.changed(),
+            plugin: None,
         }
     }
 
@@ -500,10 +526,17 @@ impl CanvasSession {
         let begun = match adjustment {
             Adjustment::Liquify => self.liquify_begin(),
             Adjustment::Clone => self.clone_begin(),
+            Adjustment::Plugin => return self.plugin_filter_again(),
             _ => self.adjust_begin(),
         };
         if !begun {
             return false;
+        }
+        // these work on the texture, not through the camera; the others keep to the meshes picked
+        if matches!(adjustment, Adjustment::Liquify | Adjustment::Clone) {
+            self.shared.lock().scene_flat_for_tool();
+        } else {
+            self.shared.lock().scene_selection_for_adjustment();
         }
         let up = self.shared.lock().canvas_angle(ARROW_UP);
         let redraw = self.adjusting(|a, _| {
@@ -549,6 +582,9 @@ impl CanvasSession {
         });
         if open {
             self.adjust_end(commit);
+            let mut st = self.shared.lock();
+            st.scene_selection_back();
+            st.scene_back_from_tool();
         }
         open
     }
@@ -556,7 +592,8 @@ impl CanvasSession {
     /// What the open adjustment shows.
     pub fn adjustment_shown(&self) -> AdjustShown {
         let st = self.shared.lock();
-        st.adjust.shown(st.view, Vec2::new(st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0))
+        let shown = st.adjust.shown(st.view, Vec2::new(st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0));
+        AdjustShown { plugin: st.filters.shown(), ..shown }
     }
 
     /// The amount moved by `step` (a swipe's), within 0..1.
@@ -739,8 +776,13 @@ impl CanvasSession {
 
     /// Keeps what the adjustment did as one undo step and starts it again from there.
     pub fn adjustment_apply(&self) {
-        if let Some(open) = self.adjusting(|a, _| a.open) {
-            self.adjustment_again(open, true);
+        match self.adjusting(|a, _| a.open) {
+            // it draws as it opens: opened again, it would go over what it did
+            Some(Adjustment::Plugin) => {
+                self.adjustment_end(true);
+            }
+            Some(open) => self.adjustment_again(open, true),
+            None => {}
         }
     }
 
@@ -805,13 +847,21 @@ impl CanvasSession {
 
     /// Liquify's way.
     pub fn adjustment_liquify_kind(&self, kind: LiquifyKind) {
-        self.adjusting(|a, _| a.liquify_kind = kind);
+        self.adjusting(|a, _| {
+            a.liquify_kind = kind;
+            a.liquify[2] = a.liquify_distortions.get(kind as usize).copied().unwrap_or(0.0);
+        });
     }
 
     /// Liquify's slider `index` (0 size, 1 pressure, 2 distortion, 3 momentum) moved to `value`.
     pub fn adjustment_liquify_value(&self, index: u32, value: f32) {
         self.adjusting(|a, _| {
             if let Some(v) = a.liquify.get_mut(index as usize) {
+                *v = value.clamp(0.0, 1.0);
+            }
+            if index == 2
+                && let Some(v) = a.liquify_distortions.get_mut(a.liquify_kind as usize)
+            {
                 *v = value.clamp(0.0, 1.0);
             }
         });
@@ -833,14 +883,15 @@ impl CanvasSession {
         });
     }
 
-    /// A liquify stroke's window points (x, y, pressure each); `start` begins it.
-    pub fn adjustment_liquify_stroke(&self, points: Vec<f32>, start: bool) {
+    /// A liquify stroke's window points (x, y, pressure, milliseconds since the last, each), a
+    /// pen's if `pen`; `start` begins it.
+    pub fn adjustment_liquify_stroke(&self, points: Vec<f32>, start: bool, pen: bool) {
         let brush = self.adjusting(|a, _| {
             a.liquified = true;
             a.touched = true;
             a.liquify_brush()
         });
-        self.liquify_stroke(points, start, brush);
+        self.liquify_stroke(points, start, pen, brush);
     }
 
     /// The liquify brush held still at window point (`x`, `y`) works on, from `from` to `to`
@@ -850,11 +901,16 @@ impl CanvasSession {
         self.liquify_held(x, y, from, to, brush)
     }
 
-    /// The liquify brush lifted moving at (`vx`, `vy`) window pixels a millisecond: it carries on
-    /// with its momentum.
-    pub fn adjustment_liquify_coast(&self, vx: f32, vy: f32) {
+    /// The liquify brush lifts: true if it, or what it threw off, goes on.
+    pub fn adjustment_liquify_lift(&self) -> bool {
         let (brush, momentum) = self.adjusting(|a, _| (a.liquify_brush(), a.liquify_momentum()));
-        self.liquify_coast(vx, vy, momentum, brush);
+        self.liquify_lift(momentum, brush)
+    }
+
+    /// `seconds` go by for what liquify set going: true if it goes on. Nothing does once it closes.
+    pub fn adjustment_liquify_tick(&self, seconds: f32) -> bool {
+        let (open, brush) = self.adjusting(|a, _| (a.open, a.liquify_brush()));
+        open == Some(Adjustment::Liquify) && self.liquify_tick(seconds, brush)
     }
 
     /// Cloning, the source moved to window point (`x`, `y`): the next stroke fixes how far from it

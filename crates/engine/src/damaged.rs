@@ -91,6 +91,8 @@ fn package() -> Vec<u8> {
         tracked_seconds: 1.5,
         seed: 9,
         time_lapse: Some(&time_lapse),
+        reference: None,
+        reference_picture: None,
     })
 }
 

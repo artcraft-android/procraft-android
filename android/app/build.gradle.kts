@@ -17,7 +17,7 @@ val minApi = 29
 // workflow builds a release. The version code follows from it (0.0.1-beta → 101, 0.0.1-beta.2 →
 // 102, 0.0.1 → 199, 0.1.0-beta → 10001), so a pre-release comes before its release and every
 // release before the next version's pre-releases; times ten plus the ABI of a one-ABI build
-// (arm64-v8a 2, x86_64 3; 0 for several), so each APK of a release has its own code.
+// (armeabi-v7a 1, arm64-v8a 2, x86_64 3; 0 for several), so each APK of a release has its own code.
 val appVersion: String = providers.gradleProperty("procraft.version").get()
 val appVersionCode: Int = run {
     val m = requireNotNull(Regex("""(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z-]+?(\.(\d+))?)?""").matchEntire(appVersion)) {
@@ -35,6 +35,7 @@ val appVersionCode: Int = run {
         }
     }
     val abi = when (rustAbis.singleOrNull()) {
+        "armeabi-v7a" -> 1
         "arm64-v8a" -> 2
         "x86_64" -> 3
         else -> 0

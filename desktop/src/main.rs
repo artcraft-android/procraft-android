@@ -39,6 +39,7 @@ mod lighting;
 mod liquify;
 mod look;
 mod menu;
+mod model_picture;
 mod overlays;
 mod panel;
 mod pdf;
@@ -195,6 +196,7 @@ fn main() {
         started: Instant::now(),
         last_frame: Instant::now(),
         again: None,
+        finishing_since: None,
         opening: None,
         importing: None,
         reading_artwork: None,
@@ -240,6 +242,8 @@ struct App {
     /// moving, or a hold to be timed).
     last_frame: Instant,
     again: Option<Instant>,
+    /// Since when a plugin has been finishing a fill.
+    finishing_since: Option<Instant>,
     /// An artwork's canvas being made on a thread of its own as it opens, and since when.
     opening: Option<(Instant, std::thread::JoinHandle<()>)>,
     /// Artworks being brought in, read on a thread of their own one after another.
@@ -388,7 +392,8 @@ impl ApplicationHandler for App {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(session) = &session {
                     session.set_display_scale(scale_factor as f32);
-                    self.ui.place_canvas(session, scale_factor as f32);
+                    let interface = scale_factor as f32 * screen.egui.egui_ctx().zoom_factor();
+                    self.ui.place_canvas(session, interface);
                 }
             }
             WindowEvent::RedrawRequested => self.frame(),
@@ -400,9 +405,12 @@ impl ApplicationHandler for App {
                 let Some(session) = session else { return };
                 // with a popover open, a press on the canvas only closes it (a panel alone lets it
                 // through, to wait there to be a tap or a drag); while the artwork is being
-                // exported none reaches it (nothing the export would end is started)
+                // exported, or a plugin finishes a fill, none reaches it (nothing either would end is
+                // started)
                 let through = self.ui.popover_open && self.ui.panel_lets_through;
-                let blocked = (self.ui.popover_open && !through) || files::exporting_since().is_some();
+                let blocked = (self.ui.popover_open && !through)
+                    || files::exporting_since().is_some()
+                    || session.pour_finishing();
                 session.set_touch_panel_open(through);
                 let canvas = self.ui.canvas_rect;
                 let over = |p: (f32, f32)| blocked || screen.over_interface(p, canvas);
@@ -481,7 +489,9 @@ impl ApplicationHandler for App {
         // the touches' waits (a hold, a repeat) run out
         if self.input.tick(session) || !self.input.commands.is_empty() {
             screen.window.request_redraw();
-        } else if let Some(due) = self.again.or_else(|| session.wants_frame().then(Instant::now)) {
+        } else if let Some(due) =
+            self.again.or_else(|| (session.wants_frame() && !screen.minimised()).then(Instant::now))
+        {
             // what moves by itself (the selection's bands, a fade) draws once a refresh, not as
             // fast as frames can be made
             let due = due.max(self.last_frame + frame_gap(&screen.window));
@@ -511,7 +521,7 @@ impl App {
             last.keep_brushes(files::brushes_dir());
         }
         session.open_brushes(files::brushes_dir());
-        self.ui.opened(&session, scale);
+        self.ui.opened(&session, scale * screen.egui.egui_ctx().zoom_factor());
         session.show_in(size.width, size.height);
         self.input = input::Input::default();
         self.session = Some(session);
@@ -586,9 +596,14 @@ impl App {
         {
             zoom.hold();
         }
+        // a plugin finishing a fill: after a moment it says so
+        let finishing = session.pour_finishing();
+        self.finishing_since = finishing.then(|| self.finishing_since.unwrap_or_else(Instant::now));
+        let finishing_slowly = self.finishing_since.is_some_and(|since| since.elapsed() >= SLOW_OPENING);
         // an export shows its own card; the veil is for a slow save
         let exporting = !self.ui.export_card.busy()
             && files::exporting_since().is_some_and(|since| since.elapsed() >= SLOW_OPENING);
+        screen.size_interface(self.ui.plugins(), Some(session.as_ref()));
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
@@ -600,6 +615,8 @@ impl App {
                 opening_veil(ui.ctx());
             } else if exporting {
                 veil(ui.ctx(), "Exporting…");
+            } else if finishing_slowly {
+                veil(ui.ctx(), "Finishing the fill…");
             }
         });
         let pad_soon = self.studio_pad(&session);
@@ -608,8 +625,9 @@ impl App {
         if pad_soon {
             self.again = Some(Instant::now());
         }
-        // looked at again soon while the canvas is being made, an artwork read or saved as
-        if self.ui.saved_as() || self.opening.is_some() || self.importing.is_some() {
+        // looked at again soon while the canvas is being made, an artwork read or saved as, or a
+        // fill finished
+        if self.ui.saved_as() || self.opening.is_some() || self.importing.is_some() || finishing {
             let soon = Instant::now() + Duration::from_millis(50);
             self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }
@@ -643,6 +661,7 @@ impl App {
     fn gallery_frame(&mut self) {
         let Some(screen) = self.screen.as_mut() else { return };
         self.last_frame = Instant::now();
+        screen.size_interface(self.ui.plugins(), None);
         let raw = screen.egui.take_egui_input(&screen.window);
         let mut asked = None;
         let (gallery, interface) = (&mut self.gallery, &mut self.ui);
@@ -664,8 +683,11 @@ impl App {
                 None => zoom::Zoom::end(ui.ctx()),
             }
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+            // a pen's buttons do nothing here, and nothing in the artwork opened next either
+            crate::pen::take_button_presses();
             // a share from the gallery shows its card there
             interface.export_card.show(ui.ctx(), &mut interface.look);
+            interface.plugin_alert(ui.ctx());
             if reading == Some(true) {
                 opening_veil(ui.ctx());
             }
@@ -854,6 +876,11 @@ impl App {
     /// come in as Import brings them (an artwork, a picture, or a model with its files).
     fn take_dropped(&mut self) {
         let paths = std::mem::take(&mut self.dropped);
+        // a plugin file is asked about wherever it lands
+        let (plugins, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| files::is_plugin_file(p));
+        if let Some(path) = plugins.first() {
+            self.ui.offer_plugin_file(path);
+        }
         if paths.is_empty() {
             return;
         }
@@ -925,7 +952,7 @@ impl App {
                 // the gallery zooms into its picture
                 if let (Some(cell), Some(screen)) = (cell, &self.screen) {
                     let size = screen.window.inner_size();
-                    let scale = screen.window.scale_factor() as f32;
+                    let scale = screen.window.scale_factor() as f32 * screen.egui.egui_ctx().zoom_factor();
                     self.zoom = Some(zoom::Zoom::opening(&session, cell, (size.width, size.height), scale));
                 }
             }

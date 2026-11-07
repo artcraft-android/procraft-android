@@ -289,7 +289,9 @@ impl TextEditor {
         };
         // a medium sans, sized and placed as new text looks on screen
         let (screen, ppp) = (ctx.content_rect(), ctx.pixels_per_point());
-        let info = session.new_text_placed(info, screen.width() * ppp, screen.height() * ppp, ppp);
+        // what lands on the canvas isn't sized by the interface's size
+        let density = ppp / ctx.zoom_factor();
+        let info = session.new_text_placed(info, screen.width() * ppp, screen.height() * ppp, density);
         if session.text_begin(None, info.clone()).is_none() {
             return false;
         }
@@ -1145,17 +1147,20 @@ impl TextEditor {
         self.change(session, |t| t.text = typed);
     }
 
-    /// Copies a font file the user picks into the app and offers it; the text takes it.
+    /// Copies the font files the user picks into the app and offers them; the text takes the first.
     fn import_font(&mut self, session: &CanvasSession) -> Option<Said> {
-        let from =
-            rfd::FileDialog::new().set_title("Import a font").add_filter("Fonts", &["ttf", "otf"]).pick_file()?;
-        let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let bytes = std::fs::read(&from).ok()?;
+        let endings = ["ttf", "otf", "ttc", "otc", "TTF", "OTF", "TTC", "OTC"];
+        let picked = rfd::FileDialog::new().set_title("Import fonts").add_filter("Fonts", &endings).pick_files()?;
         fonts_ready();
         // kept in the fonts folder by the core (a file that isn't a font is dropped)
-        let typeface = procraft_core::import_text_font(bytes, name)?;
-        self.change(session, |t| t.font = typeface.family);
-        Some(Said::Notice("Font imported", false))
+        let mut kept = picked.iter().filter_map(|from| {
+            let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            procraft_core::import_text_font(std::fs::read(from).ok()?, name)
+        });
+        let first = kept.next()?;
+        let more = kept.count() > 0;
+        self.change(session, |t| t.font = first.family);
+        Some(Said::Notice(if more { "Fonts imported" } else { "Font imported" }, false))
     }
 }
 

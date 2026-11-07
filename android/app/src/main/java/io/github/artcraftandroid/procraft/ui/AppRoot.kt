@@ -45,12 +45,15 @@ import io.github.artcraftandroid.procraft.core.ToolKind
 /** The canvas screen: the canvas, the bars over it, and the panel that is open. */
 @Composable
 fun AppRoot(vm: CanvasViewModel) {
-    ProCraftTheme {
+    val interfaceSize = fittedInterfaceSize(vm.plugins, vm.pluginList)
+    androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
+    ProCraftTheme(interfaceSize) {
         if (vm.screen == Screen.GALLERY) {
             ZoomingGallery(vm, overlay = false)
             // a share from the gallery shows its card there, and a file brought in its own
             ExportProgress(vm.exportShown, vm::cancelExport)
             ImportProgress(vm.importShown, vm::cancelImport)
+            PluginOfferAlert(vm)
             return@ProCraftTheme
         }
         // back closes an open panel first, then leaves the artwork for the gallery
@@ -70,6 +73,14 @@ fun AppRoot(vm: CanvasViewModel) {
             }
         }
         // panels over the canvas are frosted
+        val window = androidx.compose.ui.platform.LocalView.current.rootView
+        androidx.compose.runtime.DisposableEffect(window) {
+            vm.backdrops.windowOnScreen = {
+                val at = IntArray(2).also(window::getLocationOnScreen)
+                androidx.compose.ui.geometry.Offset(at[0].toFloat(), at[1].toFloat())
+            }
+            onDispose { vm.backdrops.windowOnScreen = { androidx.compose.ui.geometry.Offset.Zero } }
+        }
         CompositionLocalProvider(LocalBackdrops provides vm.backdrops) {
             // files dragged in from another app: pictures as layers, brushes into the library
             val activity = androidx.compose.ui.platform.LocalContext.current.activity()
@@ -134,7 +145,9 @@ fun AppRoot(vm: CanvasViewModel) {
                     val fade = Modifier.graphicsLayer { alpha = barsShown }
                     val up = Modifier.graphicsLayer { translationY = -size.height * (1f - barsShown) }
                     val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
-                    TopBar(vm, Modifier.align(Alignment.TopCenter).then(up).then(fade))
+                    val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
+                    val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
+                    TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
                     val sideBar = Pc.sideBarFit(maxHeight)
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
@@ -145,7 +158,7 @@ fun AppRoot(vm: CanvasViewModel) {
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
-                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track)
+                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
                     }
                 }
                 NoticeBand(vm)
@@ -154,6 +167,17 @@ fun AppRoot(vm: CanvasViewModel) {
                 val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
                     vm.animatedExport != null || vm.modelAnimatedExport != null
                 if (!vm.barsHidden && !pageOver) AnimationBar(vm)
+                // the bottom toolbars rise from below the screen, and drop away
+                androidx.compose.animation.AnimatedVisibility(
+                    vm.transforming && !vm.barsHidden,
+                    Modifier.align(Alignment.BottomCenter),
+                    enter = Motion.toolbarIn(),
+                    exit = Motion.toolbarOut(),
+                ) { TransformToolbar(vm, maxWidth) }
+                BrushCursor(vm)
+                // the Reference window floats over the bars and the canvas's own marks; the panels,
+                // menus and pages opened later come over it
+                ReferenceWindow(vm)
                 // each panel hangs from its button: colour, layers, then the tool that opened the library;
                 // it grows out of its arrow as it opens and fades as it closes
                 PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
@@ -203,19 +227,10 @@ fun AppRoot(vm: CanvasViewModel) {
                 }
                 // the colour panel dragged out by its grabber: a window over the canvas until closed
                 FloatingColors(vm, maxWidth, maxHeight)
-                // the bottom toolbars rise from below the screen, and drop away
-                androidx.compose.animation.AnimatedVisibility(
-                    vm.transforming && !vm.barsHidden,
-                    Modifier.align(Alignment.BottomCenter),
-                    enter = Motion.toolbarIn(),
-                    exit = Motion.toolbarOut(),
-                ) { TransformToolbar(vm, maxWidth) }
                 if (vm.transforming && !vm.barsHidden) {
                     TransformPopover(vm, maxWidth, maxHeight)
                     TransformNumeric(vm)
                 }
-                BrushCursor(vm)
-                ReferenceWindow(vm)
                 TouchCompanion(vm)
                 CropOverlay(vm)
                 if (vm.textInfo != null) TextEditor(vm)
@@ -233,7 +248,19 @@ fun AppRoot(vm: CanvasViewModel) {
                     enter = androidx.compose.animation.slideInVertically(Motion.studioIn()) { it },
                     exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
                 ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
+                ModelPicture(vm)
                 BlockedDialog(vm)
+                ModelWarningsAlert(vm)
+                SharedLayerAlert(vm)
+                PluginOfferAlert(vm)
+                // a fill a plugin is finishing: nothing is touched until it is done
+                if (vm.fillFinishing) {
+                    Box(
+                        Modifier.fillMaxSize().pointerInput(Unit) {
+                            awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+                        },
+                    )
+                }
                 ExportProgress(vm.exportShown, vm::cancelExport)
                 ImportProgress(vm.importShown, vm::cancelImport)
                 // a passing message goes in the band under the top bar, as what undo and redo did
@@ -288,6 +315,7 @@ fun AppRoot(vm: CanvasViewModel) {
                             Adjustment.CHROMATIC_ABERRATION -> ChromaticPanel(vm, Modifier)
                             Adjustment.PERSPECTIVE_BLUR -> PerspectivePanel(vm, Modifier)
                             Adjustment.LIQUIFY -> LiquifyPanel(vm, maxWidth, maxHeight, Modifier)
+                            Adjustment.PLUGIN -> PluginFilterPanel(vm, Modifier)
                             else -> Unit
                         }
                     }
@@ -319,8 +347,8 @@ fun AppRoot(vm: CanvasViewModel) {
 }
 
 /**
- * The current layer turned a change away (locked, hidden, or an empty group): Cancel, unlock or
- * show it, or open Layers. What was tried is not done afterwards.
+ * The current layer turned a change away (locked, hidden or left out of the picture, or an empty
+ * group): Cancel, unlock or show it, or open Layers. What was tried is not done afterwards.
  */
 @Composable
 private fun BlockedDialog(vm: CanvasViewModel) {
@@ -334,30 +362,78 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.LOCKED -> "Layer is locked"
                 CanvasViewModel.Blocked.HIDDEN -> "Layer is hidden"
                 CanvasViewModel.Blocked.EMPTY_GROUP -> "Group is empty"
+                CanvasViewModel.Blocked.MESH_HIDDEN -> "Mesh is hidden"
+                CanvasViewModel.Blocked.MESH_LOCKED -> "Mesh is locked"
+                CanvasViewModel.Blocked.GROUP_HIDDEN -> "Group is hidden"
+                CanvasViewModel.Blocked.GROUP -> "Group is selected"
             }
         },
         message = { (w, l) ->
             when (w) {
                 CanvasViewModel.Blocked.LOCKED -> "“${l.name}” can't be changed while it is locked."
-                CanvasViewModel.Blocked.HIDDEN -> "“${l.name}” can't be changed while it is hidden."
+                CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> hiddenMessage(l.name, vm.blockedBy)
                 CanvasViewModel.Blocked.EMPTY_GROUP -> "“${l.name}” holds no layers to change."
+                CanvasViewModel.Blocked.GROUP -> "“${l.name}” is a group: choose one of its layers to paint on."
+                CanvasViewModel.Blocked.MESH_HIDDEN -> "“${vm.meantMeshName()}” can't be painted while it is hidden."
+                CanvasViewModel.Blocked.MESH_LOCKED -> "“${vm.meantMeshName()}” can't be painted while it is locked."
             }
         },
         action = "Open Layers",
         onCancel = { vm.answerBlocked(fix = false, openLayers = false) },
         onAction = { vm.answerBlocked(fix = false, openLayers = true) },
         icon = when (why) {
-            CanvasViewModel.Blocked.LOCKED -> PcIcons.PageLocked
-            CanvasViewModel.Blocked.HIDDEN -> PcIcons.EyeStruck
+            CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> PcIcons.PageLocked
+            CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> PcIcons.EyeStruck
             else -> PcIcons.Folder
         },
         destructive = false,
         extra = when (why) {
-            CanvasViewModel.Blocked.LOCKED -> "Unlock"
-            CanvasViewModel.Blocked.HIDDEN -> "Show"
+            CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> "Unlock"
+            CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> "Show"
             else -> null
         },
         onExtra = { vm.answerBlocked(fix = true, openLayers = false) },
+    )
+}
+
+/** Why layer or group [name], which would hide a change, takes none, by what hides it ([by]). */
+private fun hiddenMessage(name: String, by: io.github.artcraftandroid.procraft.core.HiddenBy?): String =
+    "“$name” can't be changed while " + when (by) {
+        io.github.artcraftandroid.procraft.core.HiddenBy.MASK_LAYER -> "its layer is hidden."
+        io.github.artcraftandroid.procraft.core.HiddenBy.GROUP -> "its group is hidden."
+        io.github.artcraftandroid.procraft.core.HiddenBy.INSIDE -> "a layer in it is hidden."
+        io.github.artcraftandroid.procraft.core.HiddenBy.SOLO -> "another layer is shown alone."
+        io.github.artcraftandroid.procraft.core.HiddenBy.ITSELF, null -> "it is hidden."
+    }
+
+/** A layer a texture set's meshes share is about to go from all of them. */
+@Composable
+internal fun SharedLayerAlert(vm: CanvasViewModel) {
+    Alert(
+        vm.deletingShared,
+        title = { "Delete shared layer?" },
+        message = { "“${it.name}” is on every mesh of this texture set." },
+        action = "Delete",
+        onCancel = { vm.deletingShared = null },
+        onAction = {
+            vm.deletingShared = null
+            vm.delete(it)
+        },
+    )
+}
+
+/** What a model newly opened may not paint well with, said once. */
+@Composable
+internal fun ModelWarningsAlert(vm: CanvasViewModel) {
+    Alert(
+        vm.modelWarnings.takeIf { it.isNotEmpty() },
+        title = { "Unsupported model features" },
+        message = { w -> "Painting on this model may not go as expected because of:\n" + w.joinToString("\n") },
+        action = "OK",
+        onCancel = { vm.modelWarnings = emptyList() },
+        onAction = { vm.modelWarnings = emptyList() },
+        destructive = false,
+        alone = true,
     )
 }
 
@@ -365,6 +441,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
 private val BottomPanels = setOf(
     Adjustment.HSB, Adjustment.COLOR_BALANCE, Adjustment.CURVES, Adjustment.GRADIENT_MAP, Adjustment.GLITCH, Adjustment.NOISE,
     Adjustment.BLOOM, Adjustment.HALFTONE, Adjustment.CHROMATIC_ABERRATION, Adjustment.PERSPECTIVE_BLUR, Adjustment.LIQUIFY,
+    Adjustment.PLUGIN,
 )
 
 /**

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use procraft_core::{CanvasSession, configure, screen_profile};
+use procraft_core::{CanvasSession, Plugins, configure, screen_profile};
 use procraft_gpu::{Gpu, wgpu};
 use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
@@ -69,6 +69,14 @@ fn make_canvases(gpu: &Gpu, wake: winit::event_loop::EventLoopProxy<()>) -> Opti
 /// it as it is (a Mac's screen, which takes Display P3, would show it over-saturated); the canvas
 /// is shown in sRGB there, as on screens without wide colour.
 const INTERFACE_WIDE: bool = false;
+
+/// How soon a window left without its surface asks for it again.
+const SURFACE_RETRY: Duration = Duration::from_millis(100);
+
+/// A window of no size is minimised: nothing shows until it has one.
+fn is_minimised(size: winit::dpi::PhysicalSize<u32>) -> bool {
+    size.width == 0 || size.height == 0
+}
 
 impl Screen {
     /// The window's surface, and a device that can show it, and which backend made them: the
@@ -156,6 +164,11 @@ impl Screen {
         Some(self.canvases.take()?.join().unwrap_or(false))
     }
 
+    /// Whether nothing can show: its next size brings it back.
+    pub fn minimised(&self) -> bool {
+        is_minimised(self.window.inner_size())
+    }
+
     /// The window is `width` × `height` pixels now.
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
@@ -167,6 +180,27 @@ impl Screen {
         if let Some(format) = self.config.as_ref().map(|c| c.format).filter(|f| *f != self.format) {
             self.format = format;
             self.renderer = egui_wgpu::Renderer::new(&self.gpu.device, format, egui_wgpu::RendererOptions::default());
+        }
+    }
+
+    /// The interface as `plugins` say for this window; `session` is told, so what it hit-tests goes
+    /// with what is drawn. Everything in points follows, the canvas stays in pixels.
+    /// A press under way holds it as it is: a slider growing with its own drag would run from the
+    /// pointer dragging it.
+    pub fn size_interface(&self, plugins: &Plugins, session: Option<&CanvasSession>) {
+        let ctx = self.egui.egui_ctx();
+        let (size, scale) = (self.window.inner_size(), self.window.scale_factor() as f32);
+        let shown = plugins.interface_scale(size.width as f32 / scale, size.height as f32 / scale);
+        if ctx.zoom_factor() != shown {
+            ctx.request_repaint();
+            if ctx.input(|i| i.pointer.any_down()) {
+                return;
+            }
+            // at once, not from the next frame on: this one's input is about to be read at it
+            ctx.options_mut(|o| o.zoom_factor = shown);
+        }
+        if let Some(session) = session {
+            session.set_interface_size(shown);
         }
     }
 
@@ -250,7 +284,15 @@ impl Screen {
         for id in std::mem::take(&mut textures_delta.free) {
             self.renderer.free_texture(&id);
         }
-        let config = self.config.as_ref()?;
+        // a surface the GPU refused (it couldn't come idle, another thread submitting work) is asked
+        // for again here: only a new size would, and the window would stay as it was until then
+        let window = self.window.inner_size();
+        if self.config.is_none() && !is_minimised(window) {
+            self.resize(window.width, window.height);
+        }
+        let Some(config) = self.config.as_ref() else {
+            return (!is_minimised(window)).then_some(SURFACE_RETRY);
+        };
         let size = (config.width, config.height);
         let (format, screen) = (config.format, screen_profile(config));
         let frame = match self.surface.get_current_texture() {
@@ -301,5 +343,19 @@ impl Screen {
         // the backend shows: a crash from now on isn't its start's
         crate::startup::gpu_shown();
         if canvas_soon { Some(Duration::ZERO) } else { interface_after }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use winit::dpi::PhysicalSize;
+
+    use super::is_minimised;
+
+    #[test]
+    fn only_a_window_of_no_size_counts_as_minimised() {
+        assert!(is_minimised(PhysicalSize::new(0, 0)));
+        assert!(is_minimised(PhysicalSize::new(0, 600)));
+        assert!(!is_minimised(PhysicalSize::new(1, 1)));
     }
 }
