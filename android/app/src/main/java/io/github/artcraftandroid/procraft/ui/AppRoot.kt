@@ -73,6 +73,14 @@ fun AppRoot(vm: CanvasViewModel) {
             }
         }
         // panels over the canvas are frosted
+        val window = androidx.compose.ui.platform.LocalView.current.rootView
+        androidx.compose.runtime.DisposableEffect(window) {
+            vm.backdrops.windowOnScreen = {
+                val at = IntArray(2).also(window::getLocationOnScreen)
+                androidx.compose.ui.geometry.Offset(at[0].toFloat(), at[1].toFloat())
+            }
+            onDispose { vm.backdrops.windowOnScreen = { androidx.compose.ui.geometry.Offset.Zero } }
+        }
         CompositionLocalProvider(LocalBackdrops provides vm.backdrops) {
             // files dragged in from another app: pictures as layers, brushes into the library
             val activity = androidx.compose.ui.platform.LocalContext.current.activity()
