@@ -99,7 +99,8 @@ final class PluginsModel {
     private init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        store = Plugins.withStore(dir: support.appendingPathComponent("plugins").path)
+        // those the app comes with added there first, once, and off
+        store = Plugins.withBundled(dir: support.appendingPathComponent("plugins").path)
         kept = UserDefaults.standard.dictionary(forKey: Self.keptKey) as? [String: String] ?? [:]
         for (key, value) in kept {
             store.readKept(key: key, value: value)
