@@ -20,11 +20,11 @@ private let windowCorner: CGFloat = 24
 private let handleSide: CGFloat = 60
 /// How far down from the window's top a drag moves it, the bars shown or not.
 private let grabHeight: CGFloat = 16
+/// The picture's size until the window is sized (the core's least and most then hold it).
 private let firstSize = CGSize(width: 350, height: 423)
 /// How far above the screen's foot it starts.
 private let firstBottom: CGFloat = 50
-private let leastSide: CGFloat = 150
-private let mostSide: CGFloat = 700
+private let bars = topBarHeight + bottomBarHeight
 /// How many pixels the canvas is read at for the window, and how long between reads.
 private let canvasPixels: UInt32 = 700
 private let readEvery = 0.3
@@ -38,7 +38,8 @@ enum ReferenceMode {
     case canvas, image, face
 }
 
-/// The reference window: where it is, what it shows, and how each picture sits in it.
+/// The reference window: where it is, what it shows, and how each picture sits in it. Each artwork
+/// has its own, kept by the core with the artwork: it comes back as it was left.
 @Observable
 final class ReferenceTool {
     private unowned let model: CanvasModel
@@ -58,12 +59,85 @@ final class ReferenceTool {
     private(set) var size = firstSize
     /// The window's bars are slid out of the way.
     private(set) var barsHidden = false
+    /// The screen the window was last laid out on, none before it first is.
+    private var room: CGSize?
 
     @ObservationIgnored private var reading = false
     @ObservationIgnored private var stale = false
 
     init(model: CanvasModel) {
         self.model = model
+        restore()
+    }
+
+    /// The window as the artwork left it, or none if it never had one.
+    private func restore() {
+        let session = model.session
+        let w = session.referenceWindow()
+        mode = switch w.shows {
+        case .image: .image
+        case .face: .face
+        // a model's own view is only on a model, which this app doesn't open yet
+        case .canvas, .model: .canvas
+        }
+        if w.sized {
+            size = CGSize(width: CGFloat(w.width), height: CGFloat(w.height))
+        }
+        if w.placed {
+            offset = CGPoint(x: CGFloat(w.x), y: CGFloat(w.y))
+        }
+        canvasView = w.canvasView
+        imageView = w.imageView
+        on = w.shown
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let picture = session.referencePicture().flatMap { Self.decode($0) }
+            DispatchQueue.main.async {
+                guard let self, let picture, self.model.session === session else { return }
+                self.image = picture
+            }
+        }
+        refresh()
+    }
+
+    /// The window as it now is, kept with the artwork.
+    private func keep() {
+        let shows: ReferenceShows = switch mode {
+        case .canvas: .canvas
+        case .image: .image
+        case .face: .face
+        }
+        model.session.setReferenceWindow(state: ReferenceWindowState(
+            shown: on, shows: shows, sized: size != firstSize,
+            width: Float(size.width), height: Float(size.height),
+            placed: offset != nil, x: Float(offset?.x ?? 0), y: Float(offset?.y ?? 0),
+            canvasView: canvasView, imageView: imageView
+        ))
+    }
+
+    /// The picture's size as the window shows it: as big as it was sized, within the window's least
+    /// and most (the core's), and no bigger than the screen.
+    var shownSize: CGSize {
+        fitted(size)
+    }
+
+    private func fitted(_ size: CGSize) -> CGSize {
+        let r = referenceWindowSize(
+            width: Float(size.width), height: Float(size.height),
+            screenWidth: Float(room?.width ?? .nan), screenHeight: Float(room?.height ?? .nan)
+        )
+        return CGSize(width: CGFloat(r.width), height: CGFloat(r.height))
+    }
+
+    /// Where the window at `at` goes to be all on the screen it was last laid out on (its top left,
+    /// if it is bigger).
+    private func onScreen(_ at: CGPoint) -> CGPoint {
+        guard let room else { return at }
+        let shown = shownSize
+        let p = referenceWindowFitted(
+            x: Float(at.x), y: Float(at.y), width: Float(shown.width), tall: Float(shown.height + bars),
+            screenWidth: Float(room.width), screenHeight: Float(room.height)
+        )
+        return CGPoint(x: CGFloat(p.x), y: CGFloat(p.y))
     }
 
     var shown: UIImage? {
@@ -88,6 +162,7 @@ final class ReferenceTool {
 
     func setOn(_ on: Bool) {
         withAnimation(Motion.referenceFade) { self.on = on }
+        keep()
         if on {
             refresh()
         }
@@ -95,29 +170,45 @@ final class ReferenceTool {
 
     func setMode(_ next: ReferenceMode) {
         mode = next
+        keep()
         refresh()
     }
 
-    /// The window's first place: in the middle, near the bottom of the screen.
-    func place(on screen: CGSize, tall: CGFloat) {
-        guard offset == nil else { return }
-        offset = CGPoint(x: (screen.width - size.width) / 2, y: max(screen.height - firstBottom - tall, 0))
+    /// The window laid out on `screen`: the first time in the middle, near the bottom; then where it
+    /// was put, all of it on the screen (an artwork may have left it on a screen of another shape,
+    /// or the screen turned or split). What the artwork keeps changes only as it is moved or sized.
+    func place(on screen: CGSize) {
+        if room != screen {
+            room = screen
+        }
+        guard let at = offset else {
+            let shown = shownSize
+            offset = CGPoint(x: (screen.width - shown.width) / 2, y: max(screen.height - firstBottom - shown.height - bars, 0))
+            return
+        }
+        let kept = onScreen(at)
+        if kept != at {
+            offset = kept
+        }
     }
 
     func move(by delta: CGSize) {
         guard let at = offset else { return }
-        offset = CGPoint(x: at.x + delta.width, y: at.y + delta.height)
+        offset = onScreen(CGPoint(x: at.x + delta.width, y: at.y + delta.height))
+        keep()
     }
 
-    /// A drag on a size handle; from the left one the window's left edge moves.
+    /// A drag on a size handle, from the size the window shows at; from the left one the window's
+    /// left edge moves.
     func resize(by delta: CGSize, fromLeft: Bool) {
-        let old = size
-        let width = min(max(old.width + (fromLeft ? -delta.width : delta.width), leastSide), mostSide)
-        let height = min(max(old.height + delta.height, leastSide), mostSide)
+        let old = shownSize
+        let next = fitted(CGSize(width: old.width + (fromLeft ? -delta.width : delta.width), height: old.height + delta.height))
         if fromLeft, let at = offset {
-            offset = CGPoint(x: at.x + old.width - width, y: at.y)
+            offset = CGPoint(x: at.x + old.width - next.width, y: at.y)
         }
-        size = CGSize(width: width, height: height)
+        size = next
+        offset = offset.map { onScreen($0) }
+        keep()
     }
 
     private static func decode(_ data: Data) -> UIImage? {
@@ -137,11 +228,21 @@ final class ReferenceTool {
         }
         image = picture
         imageView = ReferenceView(zoom: 1, x: 0, y: 0)
+        keep()
+        // kept with the artwork as a PNG, whatever kind of file it came from
+        let session = model.session
+        DispatchQueue.global(qos: .utility).async {
+            if let png = picture.pngData() {
+                session.setReferencePicture(png: png)
+            }
+        }
     }
 
     func clear() {
         image = nil
         imageView = ReferenceView(zoom: 1, x: 0, y: 0)
+        model.session.clearReferencePicture()
+        keep()
     }
 
     /// A tap on the window's picture: its bars slide away, or back.
@@ -153,6 +254,7 @@ final class ReferenceTool {
     func fit() {
         set(ReferenceView(zoom: 1, x: 0, y: 0))
         withAnimation(Motion.bars) { barsHidden = true }
+        keep()
     }
 
     /// Fingers on the window's picture moved from `from` to `to` (their middle), `spread` times as
@@ -162,6 +264,7 @@ final class ReferenceTool {
             view: view, sizes: sizes, fromX: Float(from.x), fromY: Float(from.y),
             toX: Float(to.x), toY: Float(to.y), spread: Float(spread)
         ))
+        keep()
     }
 
     /// The colour of one pixel of `image`.
@@ -436,8 +539,9 @@ struct ReferenceWindow: View {
     }
 
     var body: some View {
-        let width = tool.size.width
-        let tall = topBarHeight + tool.size.height + bottomBarHeight
+        let shown = tool.shownSize
+        let width = shown.width
+        let tall = bars + shown.height
         let hidden = tool.barsHidden
         let at = tool.offset ?? .zero
         let shape = RoundedRectangle(cornerRadius: windowCorner, style: .circular)
@@ -465,7 +569,8 @@ struct ReferenceWindow: View {
         }
         .frame(width: width, height: tall, alignment: .topLeading)
         .offset(x: at.x, y: at.y)
-        .onAppear { tool.place(on: screen, tall: tall) }
+        .onAppear { tool.place(on: screen) }
+        .onChange(of: screen) { _, screen in tool.place(on: screen) }
         .photosPicker(isPresented: $choosing, selection: $photo, matching: .images)
         .onChange(of: photo) { _, item in
             guard let item else { return }
