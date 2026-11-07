@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2, pos2, vec2};
 use procraft_core::{
     CanvasSession, ReferenceShows, ReferenceSizes, ReferenceView, ReferenceWindowState, reference_picture_point,
-    reference_picture_rect, reference_view_pinched, reference_window_fitted,
+    reference_picture_rect, reference_view_pinched, reference_window_fitted, reference_window_size,
 };
 
 use crate::icons;
@@ -38,11 +38,8 @@ const BARS_SLIDE: f32 = 0.3;
 const SECOND_CLICK: Duration = Duration::from_millis(300);
 /// How many pixels a picture's longer side has as the bars' glass: drawn back up, that's its blur.
 const GLASS_SIDE: usize = 24;
-/// Its picture's size at first, the least and most it is sized to, and how far up from the
-/// screen's bottom it first sits.
+/// Its picture's size at first, and how far up from the screen's bottom it first sits.
 const START: Vec2 = Vec2 { x: 350.0, y: 423.0 };
-const LEAST: f32 = 150.0;
-const MOST: f32 = 700.0;
 const ABOVE_BOTTOM: f32 = 50.0;
 /// The canvas is read again at most this often while it changes, this large.
 const REFRESH: Duration = Duration::from_millis(300);
@@ -58,6 +55,20 @@ struct Pixels {
     width: usize,
     height: usize,
     rgba: Vec<u8>,
+}
+
+/// The window's picture sized `size` (between the bars) as it shows on `screen`: within its least
+/// and most, and no bigger than the screen.
+fn shown_size(size: Vec2, screen: Rect) -> Vec2 {
+    let fitted = reference_window_size(size.x, size.y, screen.width(), screen.height());
+    vec2(fitted.width, fitted.height)
+}
+
+/// Where a window `size` big at `at` goes to be all on `screen` (its top left, if it is bigger).
+fn on_screen(at: Pos2, size: Vec2, screen: Rect) -> Pos2 {
+    let o = screen.min;
+    let fitted = reference_window_fitted(at.x - o.x, at.y - o.y, size.x, size.y, screen.width(), screen.height());
+    pos2(fitted.x + o.x, fitted.y + o.y)
 }
 
 /// The picture of `width` x `height` `rgba` pixels made a few pixels across, inside a clear pixel
@@ -133,10 +144,9 @@ pub struct Reference {
     /// The bars are slid out of the way; a click that may yet be the first of two came then.
     bars_hidden: bool,
     click: Option<Instant>,
-    /// The window as the artwork last had it; a place it brought back, to be fitted to this
-    /// screen when it next shows; and its picture (a PNG), to be shown then.
+    /// The window as the artwork last had it, and its picture (a PNG), to be shown when it next
+    /// shows.
     kept: Option<ReferenceWindowState>,
-    place_due: bool,
     picture_due: Option<Vec<u8>>,
 }
 
@@ -163,7 +173,6 @@ impl Default for Reference {
             bars_hidden: false,
             click: None,
             kept: None,
-            place_due: false,
             picture_due: None,
         }
     }
@@ -182,11 +191,10 @@ impl Reference {
                 ReferenceShows::Face => Mode::Face,
             },
             at: w.placed.then(|| pos2(w.x, w.y)),
-            size: if w.sized { vec2(w.width, w.height).clamp(Vec2::splat(LEAST), Vec2::splat(MOST)) } else { START },
+            size: if w.sized { vec2(w.width, w.height) } else { START },
             canvas_view: w.canvas_view,
             image_view: w.image_view,
             kept: Some(w),
-            place_due: w.placed,
             picture_due: session.reference_picture(),
             ..Reference::default()
         };
@@ -303,26 +311,21 @@ impl Reference {
             self.read_canvas(ctx, session);
         }
         let screen = ctx.content_rect();
-        let tall = TOP_BAR + self.size.y + BOTTOM_BAR;
+        // as big as it was sized, within its least and most, and no bigger than the screen
+        let size = shown_size(self.size, screen);
+        let tall = TOP_BAR + size.y + BOTTOM_BAR;
         if let Some(png) = self.picture_due.take()
             && let Ok(picture) = image::load_from_memory(&png)
         {
             self.take_picture(ctx, &picture);
         }
-        // where the artwork left it, perhaps on a screen of another shape: where it can be reached
-        if std::mem::take(&mut self.place_due)
-            && let Some(at) = self.at
-        {
-            let o = screen.min;
-            let fitted =
-                reference_window_fitted(at.x - o.x, at.y - o.y, self.size.x, tall, screen.width(), screen.height());
-            self.at = Some(pos2(fitted.x + o.x, fitted.y + o.y));
-        }
-        // the first time: in the middle near the bottom of the screen
-        let at = *self.at.get_or_insert_with(|| {
-            pos2(screen.center().x - self.size.x / 2.0, (screen.bottom() - ABOVE_BOTTOM - tall).max(screen.top()))
-        });
-        let window = Rect::from_min_size(at, vec2(self.size.x, tall));
+        // the first time: in the middle near the bottom of the screen; then where it was put, all
+        // of it on the screen (an artwork may have left it on a screen of another shape, or the
+        // window may have shrunk)
+        let first =
+            || pos2(screen.center().x - size.x / 2.0, (screen.bottom() - ABOVE_BOTTOM - tall).max(screen.top()));
+        let at = on_screen(*self.at.get_or_insert_with(first), vec2(size.x, tall), screen);
+        let window = Rect::from_min_size(at, vec2(size.x, tall));
         // room round it for the handles, which reach past its corners
         let reach = window.expand2(vec2(HANDLE / 2.0 - 12.0, 0.0)).with_max_y(window.bottom() + HANDLE / 2.0 - 15.0);
         let shown_bars = ctx.animate_bool_with_time(Id::unique("reference bars"), !self.bars_hidden, BARS_SLIDE);
@@ -501,7 +504,7 @@ impl Reference {
             let strip = Rect::from_min_size(window.min, vec2(window.width(), GRAB));
             let dragged = ui.interact(strip, ui.scope_id().with("move"), Sense::drag());
             if dragged.dragged() {
-                self.at = Some(at + dragged.drag_delta());
+                self.at = Some(on_screen(at + dragged.drag_delta(), vec2(size.x, tall), screen));
             }
             // the size handles, unseen, centred 12 in from the window's bottom corners and 15 up
             for left in [true, false] {
@@ -509,14 +512,13 @@ impl Reference {
                 let handle = Rect::from_center_size(pos2(x, window.bottom() - 15.0), vec2(HANDLE, HANDLE));
                 let drag = ui.interact(handle, ui.scope_id().with(("size", left)), Sense::drag());
                 if drag.dragged() {
+                    // from the size it shows at, as far as its least, its most and the screen let it
                     let d = drag.drag_delta();
-                    let old = self.size;
-                    let w = (old.x + if left { -d.x } else { d.x }).clamp(LEAST, MOST);
-                    let h = (old.y + d.y).clamp(LEAST, MOST);
+                    let new = shown_size(vec2(size.x + if left { -d.x } else { d.x }, size.y + d.y), screen);
                     if left {
-                        self.at = Some(at + vec2(old.x - w, 0.0));
+                        self.at = Some(at + vec2(size.x - new.x, 0.0));
                     }
-                    self.size = vec2(w, h);
+                    self.size = new;
                 }
             }
         });
@@ -667,6 +669,20 @@ const SCROLL_ZOOM: f32 = 0.005;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_shows_on_a_short_screen_whole_and_where_its_handles_reach() {
+        // a window under the menu bar, 500 tall: the picture shrinks so the whole window fits, and
+        // one left below the screen comes back up onto it
+        let screen = Rect::from_min_size(pos2(0.0, 30.0), vec2(1000.0, 500.0));
+        let size = shown_size(vec2(700.0, 700.0), screen);
+        assert_eq!(size, vec2(650.0, 500.0 - TOP_BAR - BOTTOM_BAR));
+        let tall = TOP_BAR + size.y + BOTTOM_BAR;
+        assert_eq!(on_screen(pos2(600.0, 400.0), vec2(size.x, tall), screen), pos2(350.0, 30.0));
+        assert_eq!(on_screen(pos2(100.0, 30.0), vec2(size.x, tall), screen), pos2(100.0, 30.0));
+        // a big screen keeps the size given
+        assert_eq!(shown_size(START, Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0))), START);
+    }
 
     #[test]
     fn the_bars_glass_is_the_picture_a_few_pixels_across_in_a_clear_rim() {

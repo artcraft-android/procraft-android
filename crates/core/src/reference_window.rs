@@ -110,6 +110,23 @@ pub(crate) fn upright(png: Vec<u8>, orientation: i64) -> Vec<u8> {
     }
 }
 
+/// A window's size, in points: its width, and its picture's height between the bars.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct ReferenceSize {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The size a window `width` wide, its picture `height` tall between the bars, shows at on a
+/// screen `screen_width` x `screen_height` (points; not a number: no screen yet): 282 to 650 wide
+/// and 230 to 650 tall with its bars, and no bigger than the screen while that leaves it that.
+#[uniffi::export]
+pub fn reference_window_size(width: f32, height: f32, screen_width: f32, screen_height: f32) -> ReferenceSize {
+    let [width, height] =
+        procraft_engine::reference_window::fitted_size([width, height], [screen_width, screen_height]);
+    ReferenceSize { width, height }
+}
+
 /// Where a window `width` x `tall` at (`x`, `y`) goes in a screen `screen_width` x `screen_height`,
 /// so that it can be reached: all of it shown (the top left of it, if it is bigger). An artwork
 /// may have left it on a screen of another shape.

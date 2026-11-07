@@ -10,6 +10,23 @@ const BARS: f32 = 64.0 + 45.0;
 /// The picture's size until the window is sized (points).
 const FIRST_SIZE: [f32; 2] = [350.0, 423.0];
 
+/// The least and the most the window is sized to by its handles (points, its bars included).
+const LEAST: [f32; 2] = [282.0, 230.0];
+const MOST: [f32; 2] = [650.0, 650.0];
+
+/// The picture's size `size` (points, between the bars) as the window shows it in `room` (the
+/// screen, points; not a number: no screen yet): within its least and most, and no bigger than
+/// the room while that leaves it its least. One that isn't a number is the first size.
+pub fn fitted_size(size: [f32; 2], room: [f32; 2]) -> [f32; 2] {
+    let [width, height] = if size.iter().all(|v| v.is_finite()) { size } else { FIRST_SIZE };
+    let ([least_w, least_h], [most_w, most_h], [room_w, room_h]) = (LEAST, MOST, room);
+    let side = |v: f32, least: f32, most: f32, room: f32| {
+        let most = if room.is_finite() { most.min(room) } else { most };
+        v.clamp(least, most.max(least))
+    };
+    [side(width, least_w, most_w, room_w), side(height + BARS, least_h, most_h, room_h) - BARS]
+}
+
 /// What the window shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReferenceKind {
@@ -115,6 +132,22 @@ mod tests {
         let read: ReferenceWindow = serde_json::from_str("{}").unwrap();
         assert!(read.is_unused());
         assert!(!ReferenceWindow { shown: true, ..ReferenceWindow::default() }.is_unused());
+    }
+
+    #[test]
+    fn the_window_is_sized_within_its_least_and_most_and_the_screen() {
+        let big = [f32::NAN; 2];
+        // the first size, and one left at the old least or most
+        assert_eq!(fitted_size(FIRST_SIZE, big), [350.0, 423.0]);
+        assert_eq!(fitted_size([150.0, 150.0], big), [282.0, 150.0]);
+        assert_eq!(fitted_size([300.0, 100.0], big), [300.0, 230.0 - BARS]);
+        assert_eq!(fitted_size([700.0, 700.0], big), [650.0, 650.0 - BARS]);
+        // a split screen's half: no bigger than it; a screen smaller than the least: the least
+        assert_eq!(fitted_size([600.0, 500.0], [530.0, 400.0]), [530.0, 400.0 - BARS]);
+        assert_eq!(fitted_size([350.0, 423.0], [200.0, 180.0]), [282.0, 230.0 - BARS]);
+        assert_eq!(fitted_size([f32::NAN, 9.0], big), FIRST_SIZE);
+        assert_eq!(fitted_size([300.0, 300.0], [f32::INFINITY, -f32::INFINITY]), [300.0, 300.0]);
+        assert_eq!(fitted_size([300.0, 300.0], [-5.0, 0.0]), [282.0, 230.0 - BARS]);
     }
 
     #[test]

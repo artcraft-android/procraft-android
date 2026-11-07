@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -3533,11 +3534,36 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var referenceSize by mutableStateOf(DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp))
         private set
 
+    /** The screen the window was last laid out on (pixels), and its bars' height together (pixels). */
+    private var referenceRoom by mutableStateOf(androidx.compose.ui.geometry.Size.Unspecified)
+    private var referenceBars = 0f
+
+    /**
+     * The window's picture as it shows: as big as it was sized, within the window's least and most
+     * (the core's), and no bigger than the screen.
+     */
+    val referenceShown: DpSize get() = fittedReference(referenceSize)
+
+    private fun fittedReference(size: DpSize): DpSize {
+        val room = referenceRoom
+        val (w, h) = if (room.isSpecified) room.width / density to room.height / density else Float.NaN to Float.NaN
+        val s = io.github.artcraftandroid.procraft.core.referenceWindowSize(size.width.value, size.height.value, w, h)
+        return DpSize(s.width.dp, s.height.dp)
+    }
+
+    /** Where the window at [at] (pixels) goes to be all on the screen it was last laid out on (its top left, if it is bigger). */
+    private fun onScreen(at: Offset): Offset {
+        val room = referenceRoom
+        if (!room.isSpecified) return at
+        val shown = referenceShown
+        val p = io.github.artcraftandroid.procraft.core.referenceWindowFitted(
+            at.x, at.y, shown.width.value * density, shown.height.value * density + referenceBars, room.width, room.height,
+        )
+        return Offset(p.x, p.y)
+    }
+
     private var referenceJob: Job? = null
     private var referenceStale = false
-
-    /** A place [restoreReference] brought back, to be fitted to this screen when it is next laid out. */
-    private var referenceFitDue = false
 
     /**
      * The window as the artwork [s] left it, or none if it never had one. Each artwork has its own,
@@ -3552,10 +3578,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             io.github.artcraftandroid.procraft.core.ReferenceShows.FACE -> ReferenceMode.FACE
         }
         if (w.sized) referenceSize = DpSize(w.width.dp, w.height.dp)
-        if (w.placed) {
-            referenceOffset = Offset(w.x * density, w.y * density)
-            referenceFitDue = true
-        }
+        if (w.placed) referenceOffset = Offset(w.x * density, w.y * density)
         referenceCanvasView = w.canvasView
         referenceImageView = w.imageView
         referenceOn = w.shown
@@ -3581,7 +3604,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun forgetReference() {
         referenceJob?.cancel()
         referenceStale = false
-        referenceFitDue = false
         referenceOn = false
         referenceMode = ReferenceMode.CANVAS
         referenceCanvas = null
@@ -3630,32 +3652,38 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshReference()
     }
 
-    /** The window's first place on a screen [width] × [height] (pixels), [tall] (pixels) tall in all: in the middle, near the bottom. */
-    fun placeReference(width: Float, height: Float, tall: Float) {
-        val w = referenceSize.width.value * density
-        if (referenceFitDue && referenceOffset != Offset.Unspecified) {
-            // left by the artwork, perhaps on a screen of another shape: where it can be reached
-            referenceFitDue = false
-            val at = io.github.artcraftandroid.procraft.core.referenceWindowFitted(referenceOffset.x, referenceOffset.y, w, tall, width, height)
-            referenceOffset = Offset(at.x, at.y)
+    /**
+     * The window laid out on a screen [width] × [height] (pixels), its bars [bars] (pixels) tall
+     * together: the first time in the middle, near the bottom; then where it was put, all of it on
+     * the screen (an artwork may have left it on a screen of another shape, or the screen changed:
+     * turned, or split). What the artwork keeps changes only as the window is moved or sized.
+     */
+    fun placeReference(width: Float, height: Float, bars: Float) {
+        val room = androidx.compose.ui.geometry.Size(width, height)
+        if (referenceRoom != room) referenceRoom = room
+        referenceBars = bars
+        if (referenceOffset == Offset.Unspecified) {
+            val shown = referenceShown
+            val tall = shown.height.value * density + bars
+            referenceOffset = Offset((width - shown.width.value * density) / 2f, (height - REFERENCE_BOTTOM_DP * density - tall).coerceAtLeast(0f))
             return
         }
-        if (referenceOffset != Offset.Unspecified) return
-        referenceOffset = Offset((width - w) / 2f, (height - REFERENCE_BOTTOM_DP * density - tall).coerceAtLeast(0f))
+        val at = onScreen(referenceOffset)
+        if (at != referenceOffset) referenceOffset = at
     }
 
     fun moveReference(by: Offset) {
-        referenceOffset += by
+        referenceOffset = onScreen(referenceOffset + by)
         keepReference()
     }
 
-    /** A drag on a size handle; from the left one the window's left edge moves. */
+    /** A drag on a size handle, from the size the window shows at; from the left one the window's left edge moves. */
     fun resizeReference(dx: Dp, dy: Dp, fromLeft: Boolean) {
-        val old = referenceSize
-        val w = (old.width + if (fromLeft) -dx else dx).coerceIn(REFERENCE_MIN_DP.dp, REFERENCE_MAX_DP.dp)
-        val h = (old.height + dy).coerceIn(REFERENCE_MIN_DP.dp, REFERENCE_MAX_DP.dp)
-        if (fromLeft) referenceOffset = referenceOffset.copy(x = referenceOffset.x + (old.width - w).value * density)
-        referenceSize = DpSize(w, h)
+        val old = referenceShown
+        val new = fittedReference(DpSize(old.width + if (fromLeft) -dx else dx, old.height + dy))
+        if (fromLeft) referenceOffset = referenceOffset.copy(x = referenceOffset.x + (old.width - new.width).value * density)
+        referenceSize = new
+        referenceOffset = onScreen(referenceOffset)
         keepReference()
     }
 
@@ -7237,8 +7265,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val REFERENCE_WIDTH_DP = 350f
         const val REFERENCE_HEIGHT_DP = 423f
         const val REFERENCE_BOTTOM_DP = 50f
-        const val REFERENCE_MIN_DP = 150f
-        const val REFERENCE_MAX_DP = 700f
         const val REFERENCE_PIXELS = 700
         const val REFERENCE_INTERVAL_MS = 300L
 
