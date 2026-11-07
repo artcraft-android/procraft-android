@@ -269,6 +269,8 @@ final class DropTouchView: UIView {
     var swatch: UInt32?
     var onHold: (() -> Void)?
     var onTap: () -> Void = {}
+    /// Pressed, or let go.
+    var onPress: (Bool) -> Void = { _ in }
 
     private var touch: UITouch?
     private var start = CGPoint.zero
@@ -282,6 +284,7 @@ final class DropTouchView: UIView {
         start = Interface.shared.point(first.location(in: nil))
         dragging = false
         held = false
+        onPress(true)
         guard onHold != nil else { return }
         holdTimer = Timer.scheduledTimer(withTimeInterval: holdWait, repeats: false) { [weak self] _ in
             self?.held = true
@@ -324,6 +327,7 @@ final class DropTouchView: UIView {
     private func finish(dragged: () -> Void, otherwise: () -> Void) {
         holdTimer?.invalidate()
         touch = nil
+        onPress(false)
         if dragging {
             dragged()
         } else {
@@ -340,6 +344,7 @@ struct DropSource: UIViewRepresentable {
     let model: CanvasModel
     var swatch: UInt32?
     var onHold: (() -> Void)?
+    var onPress: (Bool) -> Void = { _ in }
     let onTap: () -> Void
 
     func makeUIView(context: Context) -> DropTouchView {
@@ -351,6 +356,7 @@ struct DropSource: UIViewRepresentable {
         view.swatch = swatch
         view.onHold = onHold
         view.onTap = onTap
+        view.onPress = onPress
     }
 }
 

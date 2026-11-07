@@ -84,6 +84,10 @@ enum Motion {
     static let quickMenuClose = easeIn(0.12)
     /// A swatch pressed and let go.
     static let swatchPressed: CGFloat = 0.78
+    /// A tab's icon held shrinks this much, quickly, and lights as it is let go.
+    static let tabPressed: CGFloat = 0.75
+    static let highlightOn = Animation.linear(duration: 0.067)
+    static let highlightOff = Animation.linear(duration: 0.15)
     static let swatchPress = Animation.spring(duration: 0.1, bounce: 0.2)
     static let swatchRelease = Animation.spring(duration: 0.3, bounce: 0.5)
     /// The gallery going into and out of Select.

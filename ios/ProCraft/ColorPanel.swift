@@ -963,31 +963,23 @@ private struct SwatchGrid: View {
                         let slot = row * 10 + col
                         let rgb = palette.colors.indices.contains(slot) ? palette.colors[slot] : nil
                         if let rgb, droppable, c is BrushColor {
-                            Rectangle()
-                                .fill(canvasColor(rgb))
-                                .overlay {
-                                    DropSource(
-                                        model: model, swatch: rgb,
-                                        onHold: { model.setSwatch(index, slot, nil) },
-                                        onTap: { c.setRgb(rgb) }
-                                    )
-                                }
+                            DropSwatch(model: model, rgb: rgb, onHold: { model.setSwatch(index, slot, nil) }) { c.setRgb(rgb) }
                         } else {
-                            Rectangle()
-                                .fill(rgb.map(canvasColor) ?? Pc.emptySlot)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    if let rgb {
-                                        c.setRgb(rgb)
-                                    } else {
-                                        model.setSwatch(index, slot, c.rgb())
-                                    }
+                            Button {
+                                if let rgb {
+                                    c.setRgb(rgb)
+                                } else {
+                                    model.setSwatch(index, slot, c.rgb())
                                 }
-                                .onLongPressGesture {
-                                    if rgb != nil {
-                                        model.setSwatch(index, slot, nil)
-                                    }
+                            } label: {
+                                Rectangle().fill(rgb.map(canvasColor) ?? Pc.emptySlot)
+                            }
+                            .buttonStyle(PressScaleStyle())
+                            .simultaneousGesture(LongPressGesture().onEnded { _ in
+                                if rgb != nil {
+                                    model.setSwatch(index, slot, nil)
                                 }
+                            })
                         }
                     }
                 }
@@ -1014,18 +1006,19 @@ private struct PaletteTiles: View {
         LazyVGrid(columns: Array(repeating: GridItem(.fixed(120), spacing: 0), count: across), spacing: 0) {
             ForEach(filled, id: \.slot) { tile in
                 let bright = max((tile.rgb >> 16) & 0xFF, (tile.rgb >> 8) & 0xFF, tile.rgb & 0xFF) >= 217
-                ZStack(alignment: .bottomLeading) {
-                    canvasColor(tile.rgb)
-                    // dark lettering on bright colours
-                    Text(verbatim: colourName(rgb: tile.rgb & 0xFFFFFF))
-                        .font(.system(size: 15))
-                        .foregroundStyle(bright ? Color.black : Color.white)
-                        .padding(8)
+                Button { c.setRgb(tile.rgb) } label: {
+                    ZStack(alignment: .bottomLeading) {
+                        canvasColor(tile.rgb)
+                        // dark lettering on bright colours
+                        Text(verbatim: colourName(rgb: tile.rgb & 0xFFFFFF))
+                            .font(.system(size: 15))
+                            .foregroundStyle(bright ? Color.black : Color.white)
+                            .padding(8)
+                    }
+                    .frame(width: 120, height: 120)
                 }
-                .frame(width: 120, height: 120)
-                .contentShape(Rectangle())
-                .onTapGesture { c.setRgb(tile.rgb) }
-                .onLongPressGesture { model.setSwatch(index, tile.slot, nil) }
+                .buttonStyle(PressScaleStyle())
+                .simultaneousGesture(LongPressGesture().onEnded { _ in model.setSwatch(index, tile.slot, nil) })
             }
         }
     }
@@ -1437,6 +1430,64 @@ private struct DiscPicker: View {
     }
 }
 
+/// A swatch that can be dragged out onto the canvas to fill there, shrinking while pressed.
+private struct DropSwatch: View {
+    let model: CanvasModel
+    let rgb: UInt32
+    let onHold: () -> Void
+    let onTap: () -> Void
+
+    @State private var pressed = false
+
+    var body: some View {
+        Rectangle()
+            .fill(canvasColor(rgb))
+            .scaleEffect(pressed ? Motion.swatchPressed : 1)
+            .overlay {
+                DropSource(model: model, swatch: rgb, onHold: onHold, onPress: { down in
+                    withAnimation(down ? Motion.swatchPress : Motion.swatchRelease) { pressed = down }
+                }, onTap: onTap)
+            }
+    }
+}
+
+/// What it is on shrinks while pressed and springs back when let go, as swatches do.
+struct PressScaleStyle: ButtonStyle {
+    var pressed = Motion.swatchPressed
+    var press = Motion.swatchPress
+    var release = Motion.swatchRelease
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? pressed : 1)
+            .animation(configuration.isPressed ? press : release, value: configuration.isPressed)
+    }
+}
+
+/// A mode tab: its icon over its name, the chosen one lit as it is let go; held, its icon shrinks.
+private struct ModeTabStyle: ButtonStyle {
+    let mode: ColorMode
+    let selected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        ZStack(alignment: .top) {
+            // a 36 frame centred 27 down
+            PcIconView(mode.icon, size: 36, color: selected ? Pc.accent : Pc.panelTitle)
+                .scaleEffect(configuration.isPressed ? Motion.tabPressed : 1)
+                .animation(configuration.isPressed ? Motion.highlightOn : Motion.highlightOff, value: configuration.isPressed)
+                .padding(.top, 9)
+            Text(verbatim: mode.label)
+                .font(.system(size: 13, weight: .medium))
+                // the chosen one white, or black with the light interface
+                .foregroundStyle(!selected ? Pc.panelTitle : (Look.shared.light ? Color.black : Color.white))
+                .lineLimit(1)
+                .padding(.top, 41)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .contentShape(Rectangle())
+    }
+}
+
 /// The mode tabs along the panel's foot: each its icon over its name, the chosen one lit.
 private struct ModeTabs: View {
     let model: CanvasModel
@@ -1444,21 +1495,8 @@ private struct ModeTabs: View {
     var body: some View {
         HStack(spacing: 0) {
             ForEach(ColorMode.allCases, id: \.self) { mode in
-                let selected = model.colorMode == mode
-                ZStack(alignment: .top) {
-                    // a 36 frame centred 27 down
-                    PcIconView(mode.icon, size: 36, color: selected ? Pc.accent : Pc.panelTitle)
-                        .padding(.top, 9)
-                    Text(verbatim: mode.label)
-                        .font(.system(size: 13, weight: .medium))
-                        // the chosen one white, or black with the light interface
-                        .foregroundStyle(!selected ? Pc.panelTitle : (Look.shared.light ? Color.black : Color.white))
-                        .lineLimit(1)
-                        .padding(.top, 41)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .contentShape(Rectangle())
-                .onTapGesture { model.colorMode = mode }
+                Button { model.colorMode = mode } label: { EmptyView() }
+                    .buttonStyle(ModeTabStyle(mode: mode, selected: model.colorMode == mode))
             }
         }
         .frame(height: 70)
