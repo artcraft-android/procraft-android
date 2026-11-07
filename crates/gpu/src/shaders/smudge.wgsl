@@ -377,6 +377,20 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let w = select(unpack4x8unorm(work[k]), unpack4x8unorm(grained[k]), st.laid_apart == 2u);
     // smudging: the grain lets less of what is carried through
     var out = mix(w, carried(p), m * g);
+    if (st.mode == 0u && st.modulated == 1u) {
+        // what is carried goes on as strongly as the strongest stamp has been at the pixel, over
+        // the pixel as the stroke found it: the newest carried wins (the drag), and the stamp's
+        // shape and grain say where and how much, without stamp after stamp evening them out
+        let held = amount[k];
+        let l = st.stride * st.size.y + k;
+        if (held <= 0.0) {
+            amount[l] = bitcast<f32>(work[k]);
+        }
+        let first = unpack4x8unorm(bitcast<u32>(amount[l]));
+        let strongest = max(held, m * g);
+        amount[k] = strongest;
+        out = mix(first, carried(p), strongest);
+    }
     if (st.mode == 1u) {
         // wet: the stamp's plot mixed in, alpha and all (a stamp can lay bare paper), as far as
         // its weight there

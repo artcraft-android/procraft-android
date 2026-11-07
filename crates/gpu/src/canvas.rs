@@ -1044,7 +1044,8 @@ fn smudge_uniform(
         plot: 0,
         index: 0,
         carried: 0,
-        modulated: 0,
+        // a smudge lays what it carries as strongly as its stamps have been there (see `amount`)
+        modulated: 1,
         grain_blend: style.grain_blend,
         dual: 0,
         dual_threshold: -1.0,
@@ -4660,8 +4661,10 @@ impl Canvas {
             let grain = apart.is_some();
             // and builds up by what is left in the modulated mode (and keeps how much shows, laid
             // apart)
-            let amount_bytes = (wet_paint && style.rendering == Rendering::Gradual || apart.is_some())
-                .then(|| layer_bytes * if apart.is_some() { 2 } else { 1 });
+            // (a smudge keeps it too: the strongest its stamps have been at each pixel, and the
+            // pixel as the stroke found it; always made, as a smudge goes on with what a paint
+            // stroke made here)
+            let amount_bytes = Some(layer_bytes * 2);
             // all it takes made first, and the stroke not begun if any of it can't be (past the
             // GPU's memory, or more than a binding may hold): begun, each frame it is in would go
             // undrawn (the screen flashing) and its undo step would wipe what it covered
