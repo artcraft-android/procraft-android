@@ -740,11 +740,11 @@ impl Brush {
     }
 
     /// The grain's tile on the canvas (pixels): fixed to the canvas, a brush file's image is as
-    /// wide as the file's own times its scale over root two; else what the grain says.
+    /// wide as the file's own times its scale over twice root two; else what the grain says.
     pub fn grain_tile(&self) -> f32 {
         match self.grain_file_now() {
             Some(f) if self.grain.mode == GrainMode::Texturized => {
-                f.width as f32 * self.grain.file_scale() / std::f32::consts::SQRT_2
+                f.width as f32 * self.grain.file_scale() / (2.0 * std::f32::consts::SQRT_2)
             }
             _ => self.grain.scale,
         }
@@ -833,7 +833,7 @@ mod tests {
         // without a file's width: what the grain says
         assert_eq!(b.grain_tile(), scale);
         b.grain_file = Some(GrainFile { source: source.id, width: 2048, full: None });
-        let tile = 2048.0 * 0.75 / std::f32::consts::SQRT_2;
+        let tile = 2048.0 * 0.75 / (2.0 * std::f32::consts::SQRT_2);
         assert!((b.grain_tile() - tile).abs() < 0.5, "{}", b.grain_tile());
         // written with a smaller image it comes back the same size
         let written = b.clone().with_grain_image_width(1024);
