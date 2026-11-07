@@ -9,7 +9,6 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use procraft_engine::document::LayerId;
 use procraft_engine::fill::{self, Flood};
-use procraft_engine::geom::Vec2;
 use procraft_engine::selection::Mask;
 
 use crate::hooks::Hooks;
@@ -253,9 +252,7 @@ fn unit(c: f32) -> f32 {
 
 /// The canvas pixel under window point (`x`, `y`), if it is on the canvas.
 fn seed_at(st: &crate::State, x: f32, y: f32) -> Option<(u32, u32)> {
-    let p = st.view.and_then(|v| v.screen_to_canvas(Vec2::new(x, y)))?;
-    let (w, h) = (st.doc.width(), st.doc.height());
-    (p.x >= 0.0 && p.y >= 0.0 && p.x < w as f32 && p.y < h as f32).then_some((p.x as u32, p.y as u32))
+    st.window_texel(x, y)
 }
 
 #[uniffi::export]
@@ -282,6 +279,7 @@ impl CanvasSession {
             return false;
         }
         let Some(before) = st.current_pixels() else { return false };
+        let within = st.reach_selection();
         // measured on the reference layer when another layer is it
         let elsewhere = st.doc.reference().filter(|&r| r != current).and_then(|r| st.layer_pixels(r));
         let mut pour = Pour {
@@ -290,7 +288,7 @@ impl CanvasSession {
             flood: None,
             elsewhere,
             colour: [r, g, b].map(unit),
-            selection: st.selection.clone(),
+            selection: within,
             alpha_lock: layer.alpha_lock,
             shown: thousandths(threshold),
             shown_region: None,

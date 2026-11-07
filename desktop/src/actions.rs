@@ -189,8 +189,9 @@ fn model_groups(tab: usize, showing: &Showing) -> Vec<Vec<Row>> {
         2 => vec![
             vec![
                 Heading("Share Model"),
-                // the layered package doesn't hold a model yet
-                Button("ProCraft", None, None),
+                // ours comes back whole in another copy of the app; the other package holds no
+                // model yet
+                Button("ProCraft", None, Some(Act::Share(Format::ModelArtwork))),
                 Button("Procreate", None, None),
                 Button("USDZ", None, Some(Act::Share(Format::ModelUsdz))),
                 Button("OBJ", None, Some(Act::Share(Format::ModelObj))),

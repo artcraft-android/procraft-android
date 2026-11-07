@@ -36,12 +36,13 @@ pub enum Format {
     ModelJpeg,
     ModelTiff,
     ModelTextures,
+    ModelArtwork,
 }
 
 impl Format {
     pub fn name(self) -> &'static str {
         match self {
-            Format::Procraft => "ProCraft",
+            Format::Procraft | Format::ModelArtwork => "ProCraft",
             Format::Package => "Procreate",
             Format::Psd => "PSD",
             Format::Pdf | Format::LayersPdf => "PDF",
@@ -57,12 +58,12 @@ impl Format {
 
     /// A layered package: its file's name has underscores for spaces.
     fn package(self) -> bool {
-        matches!(self, Format::Procraft | Format::Package)
+        matches!(self, Format::Procraft | Format::Package | Format::ModelArtwork)
     }
 
     fn extension(self) -> &'static str {
         match self {
-            Format::Procraft => "procraft",
+            Format::Procraft | Format::ModelArtwork => "procraft",
             Format::Package => "procreate",
             Format::Psd => "psd",
             Format::Pdf | Format::LayersPdf => "pdf",
@@ -483,6 +484,11 @@ pub fn open_artwork_files(paths: Vec<PathBuf>) -> Option<(Arc<CanvasSession>, Op
     let path = paths.into_iter().next()?;
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    // a model's artwork opens from where it is unpacked, and is kept as any new artwork is
+    if procraft_core::zip_file_kind(path.to_string_lossy().into_owned()) == procraft_core::ZipKind::ModelArtwork {
+        let opened = open_model_artwork(&path).map(|s| (s, None));
+        return opened.map_err(|e| tell_later("Can't open the model", &e)).ok();
+    }
     let opened = match extension.as_str() {
         "psd" | "psb" => open_psd(&path, &name),
         "pdf" => open_pdf(&path, &name),
@@ -499,6 +505,19 @@ pub fn open_artwork_files(paths: Vec<PathBuf>) -> Option<(Arc<CanvasSession>, Op
     // a package brings its time-lapse too
     let package = matches!(extension.as_str(), "procraft" | "procreate").then_some(path);
     opened.map(|s| (s, package)).map_err(|e| tell_later("Can't open the file", &e)).ok()
+}
+
+/// The model's artwork in file `path`, unpacked beside the other things opened from files.
+fn open_model_artwork(path: &Path) -> Result<Arc<CanvasSession>, String> {
+    let work = std::env::temp_dir().join(format!("procraft-model-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    let dir = work.to_string_lossy().into_owned();
+    if !procraft_core::unpack_model_artwork(path.to_string_lossy().into_owned(), dir.clone()) {
+        return Err("This file can't be opened.".to_owned());
+    }
+    let opened = CanvasSession::open(dir).map_err(|e| e.to_string());
+    let _ = std::fs::remove_dir_all(&work);
+    opened
 }
 
 /// The PDF in file `path` as a new artwork named `name`: each page a layer ("Page 1" at the
@@ -687,12 +706,14 @@ pub fn export(
         return;
     };
     let path = with_extension(path, format.extension());
+    let artwork = dir.map(str::to_owned);
     let time_lapse = dir.map(crate::timelapse::for_package);
     writing(session, card, "Can't export", move |session| {
         // written beside it first, so a cancelled export leaves what was there as it was
         let part = PathBuf::from(format!("{}.part", path.to_string_lossy()));
         let at = part.to_string_lossy().into_owned();
         match format {
+            Format::ModelArtwork => session.export_model_artwork(artwork.unwrap_or_default(), at),
             Format::Procraft | Format::Package => session.export_package(at, seed(), time_lapse),
             Format::Psd => session.export_psd(at),
             Format::Pdf => session.export_pdf(at, false, pdf_quality),

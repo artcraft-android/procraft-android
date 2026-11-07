@@ -158,7 +158,10 @@ pub use reference_view::{
 pub use reference_window::{
     ReferencePlace, ReferenceShows, ReferenceSize, ReferenceWindowState, reference_window_fitted, reference_window_size,
 };
-pub use scene3d::{ModelFile, ModelInfo, ModelLight, ModelTextureFile, SubmeshInfo, Turntable, zip_model_name};
+pub use scene3d::{
+    ModelFile, ModelInfo, ModelLight, ModelTextureFile, ModelWarning, SubmeshInfo, Turntable, model_warning_name,
+    unpack_model_artwork, zip_model_name,
+};
 pub use selection::{SelectionDisplay, SelectionJoin};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
@@ -498,6 +501,8 @@ pub(crate) struct State {
     /// A model open to paint on, in place of the flat canvas (the document is its current
     /// texture set's).
     pub(crate) scene: Option<scene3d::Scene>,
+    /// A selection drawn on a model reaches every surface under it, not only the nearest.
+    pub(crate) x_ray: bool,
     /// What fitting the canvas keeps clear of (left, top, right, bottom, window pixels).
     fit_insets: [f32; 4],
     /// Frosted panels open over the canvas: left, top, right, bottom and corner radius (window
@@ -1275,6 +1280,7 @@ impl CanvasSession {
             gpu: None,
             canvas: None,
             scene: None,
+            x_ray: false,
             needs_frame: false,
             holding_frames: false,
             frame_held: false,
@@ -1667,6 +1673,11 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         // the fingers take the canvas from wherever it was settling to
         st.view_motion = None;
+        if st.scene_picture_under((pivot_x, pivot_y)) == Some(true) {
+            drop(st);
+            self.model_picture_move(pan_x, pan_y, scale, rotation);
+            return;
+        }
         if st.scene_shown() {
             st.scene_gesture(Vec2::new(pan_x, pan_y), scale);
             self.shared.frame(&mut st);
@@ -1906,6 +1917,11 @@ impl CanvasSession {
     /// Undoes the last step; returns what it was called, if it was named.
     pub fn undo(&self) -> Option<String> {
         self.await_pour();
+        // a picture being placed on a model goes first
+        if self.model_picture_box().is_some() {
+            self.model_picture_end(false);
+            return Some("new layer".to_owned());
+        }
         // editing text, a change to its box's width goes back first, the text still edited
         if let Some(name) = self.text_box_undo() {
             return Some(name);
@@ -1977,7 +1993,7 @@ impl CanvasSession {
             return;
         }
         // with a selection, only what is selected is cleared
-        if let Some(mask) = st.selection.clone() {
+        if let Some(mask) = st.reach_selection() {
             let Some(rect) = layer_ops::mask_rect(&mask) else { return };
             let pixels = st.layer_part(current, rect);
             if let (Some(mut pixels), Some(canvas)) = (pixels, st.canvas.as_mut()) {
@@ -2065,6 +2081,7 @@ impl CanvasSession {
             if let Some(before) = before {
                 st.follow_joint_step(before);
                 st.follow_tile_step(before);
+                st.follow_look_step(before);
             }
             st.sync_selection();
             st.revision += 1;

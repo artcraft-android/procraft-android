@@ -232,7 +232,8 @@ pub(crate) fn resident_budget() -> u64 {
 /// How many layers a canvas holds, has, and of which kinds.
 #[derive(uniffi::Record)]
 pub struct LayerStats {
-    /// Layers with pixels (paint layers and masks) the canvas can hold.
+    /// Layers with pixels (paint layers and masks) the canvas can hold; each of a model's texture
+    /// sets holds this many. The counts below are of all of them.
     pub maximum: u32,
     /// Layers with pixels it has.
     pub used: u32,
@@ -302,14 +303,9 @@ impl CanvasSession {
     pub fn layers_at(&self, x: f32, y: f32) -> Vec<u64> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(p) = st.view.and_then(|v| v.screen_to_canvas(procraft_engine::geom::Vec2::new(x, y))) else {
-            return Vec::new();
-        };
-        if p.x < 0.0 || p.y < 0.0 {
-            return Vec::new();
-        }
+        let Some((px, py)) = st.window_texel(x, y) else { return Vec::new() };
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Vec::new() };
-        let Ok(alphas) = canvas.alphas_at(gpu, &mut st.doc, p.x as u32, p.y as u32) else { return Vec::new() };
+        let Ok(alphas) = canvas.alphas_at(gpu, &mut st.doc, px, py) else { return Vec::new() };
         let doc = &st.doc;
         alphas
             .into_iter()
@@ -321,14 +317,15 @@ impl CanvasSession {
 
     pub fn layer_stats(&self) -> LayerStats {
         let st = self.shared.lock();
-        let d = &st.doc;
+        let docs = st.colour_docs();
         let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-        let kind = |k: LayerKind| count(d.layers().iter().filter(|l| l.kind == k).count());
+        let all = |of: &dyn Fn(&Document) -> usize| count(docs.iter().map(|d| of(d)).sum());
+        let kind = |k: LayerKind| all(&|d| d.layers().iter().filter(|l| l.kind == k).count());
         LayerStats {
-            maximum: count(d.layer_cap()),
-            used: count(d.pixel_layer_ids().count()),
-            assisted: count(d.layers().iter().filter(|l| l.assisted).count()),
-            clipping: count(d.layers().iter().filter(|l| l.clipped).count()),
+            maximum: count(st.doc.layer_cap()),
+            used: all(&|d| d.pixel_layer_ids().count()),
+            assisted: all(&|d| d.layers().iter().filter(|l| l.assisted).count()),
+            clipping: all(&|d| d.layers().iter().filter(|l| l.clipped).count()),
             masks: kind(LayerKind::Mask),
             groups: kind(LayerKind::Group),
         }
@@ -593,6 +590,9 @@ impl CanvasSession {
     /// Why the current layer takes no change (a stroke, a transform, an adjustment, clearing,
     /// cutting): it is locked, hidden, or a group with nothing in it. None if it takes them.
     pub fn why_blocked(&self) -> Option<Blocked> {
+        if let Some(why) = self.shared.lock().scene_blocked() {
+            return Some(why);
+        }
         let layers = self.layers();
         let l = layers.iter().find(|l| l.current)?;
         if l.locked {
@@ -1014,6 +1014,10 @@ pub enum Blocked {
     Locked,
     Hidden,
     EmptyGroup,
+    /// On a model, every mesh a stroke is meant for is hidden.
+    MeshHidden,
+    /// On a model, every mesh a stroke is meant for is hidden or locked.
+    MeshLocked,
 }
 
 /// What a drag of layer `id` takes along, and whether that is the chosen layers together: it with

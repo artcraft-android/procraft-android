@@ -470,8 +470,8 @@ private fun modelGroups(
     2 -> listOf(
         listOf(
             Heading("Share Model"),
-            // the native package doesn't hold a model yet
-            Act(CanvasViewModel.OWN_LABEL),
+            // ours comes back whole in another copy of the app; the other package holds no model yet
+            Act(CanvasViewModel.OWN_LABEL) { share(CanvasViewModel.Export.MODEL_ARTWORK, 100) },
             Act(CanvasViewModel.PACKAGE_LABEL),
             Act("USDZ") { share(CanvasViewModel.Export.MODEL_USDZ, 100) },
             Act("OBJ") { share(CanvasViewModel.Export.MODEL_OBJ, 100) },

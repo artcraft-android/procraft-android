@@ -250,9 +250,18 @@ fun CanvasInfo(vm: CanvasViewModel) {
                     val l = session.layerStats()
                     Rows(listOf("Maximum layers" to "${l.maximum}"))
                     Spacer(Modifier.height(21.dp))
-                    Rows(listOf("Layers used" to "${l.used}", "Layers available" to "${(l.maximum.toInt() - l.used.toInt()).coerceAtLeast(0)}"))
+                    // a model's layers are held by its texture sets, each up to the maximum
+                    val sets = session.textureSetStats()
+                    Rows(
+                        if (sets.isEmpty()) {
+                            listOf("Layers used" to "${l.used}", "Layers available" to "${(l.maximum.toInt() - l.used.toInt()).coerceAtLeast(0)}")
+                        } else {
+                            sets.map { it.name to "${it.used} of ${it.maximum}" }
+                        },
+                    )
                     Spacer(Modifier.height(21.dp))
-                    Rows(listOf("Assisted layers" to "${l.assisted}", "Clipping layers" to "${l.clipping}", "Layer masks" to "${l.masks}", "Layer groups" to "${l.groups}"))
+                    // a model has no drawing guide to assist with
+                    Rows((if (vm.modelOpen) emptyList() else listOf("Assisted layers" to "${l.assisted}")) + listOf("Clipping layers" to "${l.clipping}", "Layer masks" to "${l.masks}", "Layer groups" to "${l.groups}"))
                 }
                 3 -> {
                     Rows(listOf("Current color profile" to session.profile()), tall = 44)

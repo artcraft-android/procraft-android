@@ -532,6 +532,12 @@ impl CanvasSession {
         if !begun {
             return false;
         }
+        // these work on the texture, not through the camera; the others keep to the meshes picked
+        if matches!(adjustment, Adjustment::Liquify | Adjustment::Clone) {
+            self.shared.lock().scene_flat_for_tool();
+        } else {
+            self.shared.lock().scene_selection_for_adjustment();
+        }
         let up = self.shared.lock().canvas_angle(ARROW_UP);
         let redraw = self.adjusting(|a, _| {
             a.open = Some(adjustment);
@@ -576,6 +582,9 @@ impl CanvasSession {
         });
         if open {
             self.adjust_end(commit);
+            let mut st = self.shared.lock();
+            st.scene_selection_back();
+            st.scene_back_from_tool();
         }
         open
     }

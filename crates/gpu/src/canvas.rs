@@ -99,6 +99,9 @@ pub enum StrokeTool {
     Erase,
     /// Drags colour along: the layer itself changes as the stroke goes.
     Smudge,
+    /// The stroke's pixels take the layer's place where they reach (their alpha marked by 1): what
+    /// a change made elsewhere brings back to the layer. Drawn in, never stamped.
+    Laid,
 }
 
 /// How a stroke is drawn.
@@ -838,6 +841,7 @@ const STROKE_NONE: u32 = 0;
 const STROKE_PAINT: u32 = 1;
 const STROKE_ERASE: u32 = 2;
 const STROKE_PAINT_LOCKED: u32 = 3;
+const STROKE_LAID: u32 = 4;
 
 /// How much of what it carries a smudge brush keeps at each stamp.
 const DEFAULT_PULL: f32 = 0.93;
@@ -3290,6 +3294,32 @@ impl Canvas {
         self.set_selection(gpu, coverage);
     }
 
+    /// Layer `layer`'s pixels as they are on the GPU, if it has any there.
+    pub fn layer_view(&self, layer: LayerId) -> Option<&wgpu::TextureView> {
+        self.layers.get(&layer).map(|l| &l.view)
+    }
+
+    /// Replaces layer `layer`'s pixels with `source` (premultiplied, the layer's format and the
+    /// canvas's size), on the GPU, with no undo step. False if the layer has none there yet.
+    pub fn copy_to_layer(&mut self, gpu: &Gpu, layer: LayerId, source: &wgpu::Texture) -> bool {
+        let Some(target) = self.layers.get(&layer) else { return false };
+        let mut encoder =
+            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("to layer") });
+        encoder.copy_texture_to_texture(
+            source.as_image_copy(),
+            target.texture.as_image_copy(),
+            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        self.invalidate();
+        true
+    }
+
+    /// The selection's texture (coverage in its red), or none when nothing is selected.
+    pub fn selection_view(&self) -> Option<&wgpu::TextureView> {
+        self.selection.as_ref().map(|s| &s.view)
+    }
+
     /// The selection's coverage, one byte a canvas pixel, or none when nothing is selected.
     pub fn selection(&self) -> Option<&[u8]> {
         self.selection.as_ref().map(|s| s.coverage.as_slice())
@@ -5113,14 +5143,19 @@ impl Canvas {
                 let grain = self.grain_view_of(&stroke.style);
                 quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler)
             };
-            match (stroke.style.tool, locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
-                (StrokeTool::Paint, true) => {
+            let laid = stroke.style.tool == StrokeTool::Laid;
+            match (stroke.style.tool, laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
+                (StrokeTool::Paint | StrokeTool::Laid, true) => {
                     // recolour where the layer has alpha, or blend by a mode or burn edges (which
                     // read the layer): into scratch, then back
                     let offset = uniforms.push(
                         &LayerUniform {
                             opacity: 1.0,
-                            stroke_mode: if locked { STROKE_PAINT_LOCKED } else { STROKE_PAINT },
+                            stroke_mode: match (laid, locked) {
+                                (true, _) => STROKE_LAID,
+                                (_, true) => STROKE_PAINT_LOCKED,
+                                _ => STROKE_PAINT,
+                            },
                             stroke_opacity: opacity,
                             ..Default::default()
                         }
@@ -5155,7 +5190,7 @@ impl Canvas {
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let mut pass = render_pass(encoder, "commit", &layer.view, wgpu::LoadOp::Load);
                         pass.set_pipeline(match tool {
-                            StrokeTool::Paint | StrokeTool::Smudge => &self.pipelines.commit_paint,
+                            StrokeTool::Paint | StrokeTool::Smudge | StrokeTool::Laid => &self.pipelines.commit_paint,
                             StrokeTool::Erase => &self.pipelines.commit_erase,
                         });
                         scissor(&mut pass, rect);
@@ -6655,6 +6690,7 @@ impl Canvas {
                 Some(StrokeTool::Paint) if stroke.is_some_and(|s| s.style.preserve_alpha) => STROKE_PAINT_LOCKED,
                 Some(StrokeTool::Paint) => STROKE_PAINT,
                 Some(StrokeTool::Erase) => STROKE_ERASE,
+                Some(StrokeTool::Laid) => STROKE_LAID,
                 // the smudge changes the layer itself
                 Some(StrokeTool::Smudge) => STROKE_NONE,
             },

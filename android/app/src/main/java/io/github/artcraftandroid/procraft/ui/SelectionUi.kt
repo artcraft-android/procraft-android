@@ -88,6 +88,8 @@ fun SelectionToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
             vm.openSelectionPopup(SelectionPopup.SAVED)
         }
         ToolbarButton(PcIcons.ColorFill, "Color Fill", active = vm.colorFill, width = w, iconSize = 37.dp) { vm.toggleColorFill() }
+        // on a model: a selection reaches every surface under it
+        if (vm.modelOpen) ToolbarButton(PcIcons.XRay, "X-Ray", active = vm.selectionXRay, width = w, iconSize = 44.dp) { vm.toggleSelectionXRay() }
         ToolbarButton(PcIcons.ClearSelection, "Clear", enabled = has || drawing, width = w, iconSize = 44.dp) { vm.clearSelection() }
     }
 }

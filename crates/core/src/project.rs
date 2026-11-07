@@ -34,11 +34,12 @@ const PACKAGE_PREVIEW_SIDE: u32 = 1024;
 const FORMAT: &str = "procraft-artwork";
 const VERSION: u32 = 1;
 
-/// Whether the artwork in `dir` plays: Animation Assist or Page Assist on, from its file alone.
+/// Whether the artwork in `dir` plays: a model, which turns, or Animation Assist or Page Assist on, from its file alone.
 #[uniffi::export]
 pub fn artwork_plays(dir: String) -> bool {
     let text = fs::read_to_string(Path::new(&dir).join("artwork.json"));
-    text.ok().and_then(|t| serde_json::from_str::<ArtworkFile>(&t).ok()).is_some_and(|f| f.document.animation.is_some())
+    let file = text.ok().and_then(|t| serde_json::from_str::<ArtworkFile>(&t).ok());
+    file.is_some_and(|f| f.document.animation.is_some() || f.model.is_some())
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

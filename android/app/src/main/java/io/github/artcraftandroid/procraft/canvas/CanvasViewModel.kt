@@ -1422,6 +1422,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var openSubmesh by mutableStateOf<Int?>(null)
         private set
     var submeshesHidden by mutableStateOf<List<Boolean>>(emptyList())
+    var submeshesLocked by mutableStateOf<List<Boolean>>(emptyList())
+    /** The meshes picked, which alone take strokes (none: the whole texture set). */
+    var activeSubmeshes by mutableStateOf<List<Int>>(emptyList())
         private set
     val submeshThumbnails = androidx.compose.runtime.mutableStateMapOf<Int, ImageBitmap>()
 
@@ -1434,6 +1437,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val m = submeshes.getOrNull(index) ?: return
         openSubmesh = index
         chooseTextureSet(m.textureSet.toInt())
+        session?.pickSubmesh(index.toUInt())
+        readMeshes()
     }
 
     /** Hides submesh [index] (or shows it again), saying which. */
@@ -1441,9 +1446,58 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return
         val hide = submeshesHidden.getOrNull(index) != true
         s.setSubmeshHidden(index.toUInt(), hide)
-        submeshesHidden = s.submeshesHidden()
+        readMeshes()
         showNotice(if (hide) "Hide Submesh" else "Show Submesh")
     }
+
+    /** Locks submesh [index] (or unlocks it), saying which. */
+    fun toggleSubmeshLocked(index: Int) {
+        val s = session ?: return
+        val lock = submeshesLocked.getOrNull(index) != true
+        s.setSubmeshLocked(index.toUInt(), lock)
+        readMeshes()
+        showNotice(if (lock) "Lock mesh" else "Unlock mesh")
+    }
+
+    /** Adds submesh [index] to those picked, or takes it away; meshes picked share a texture set. */
+    fun pickMoreSubmeshes(index: Int) {
+        val s = session ?: return
+        if (s.pickMoreSubmeshes(index.toUInt())) readMeshes()
+        else showNotice("Those meshes aren't in the same texture set", warning = true)
+    }
+
+    /** What is hidden, locked and picked, as the core has it (after undo and redo too). */
+    private fun readMeshes() {
+        val s = session ?: return
+        submeshesHidden = s.submeshesHidden()
+        submeshesLocked = s.submeshesLocked()
+        activeSubmeshes = s.activeSubmeshes().map { it.toInt() }
+    }
+
+    /** The name a dialog about the meshes strokes are meant for gives them. */
+    fun meantMeshName(): String = session?.meantMeshName().orEmpty()
+
+    /** Whether a selection drawn on a model reaches every surface under it, kept between artworks. */
+    var selectionXRay by mutableStateOf(false)
+        private set
+
+    fun toggleSelectionXRay() {
+        selectionXRay = !selectionXRay
+        session?.setSelectionXRay(selectionXRay)
+        interfacePrefs.edit().putBoolean(SELECTION_X_RAY, selectionXRay).apply()
+    }
+
+    /** A layer the meshes of a texture set share, asked about before it goes. */
+    var deletingShared by mutableStateOf<LayerInfo?>(null)
+
+    /** Deletes [l], asking first when several meshes share it. */
+    fun deleteAsking(l: LayerInfo) {
+        val shared = modelOpen && submeshes.count { it.textureSet.toInt() == textureSet } > 1
+        if (shared) deletingShared = l else delete(l)
+    }
+
+    /** What a model newly opened warns of, while its dialog shows. */
+    var modelWarnings by mutableStateOf<List<String>>(emptyList())
 
     /** Draws each submesh's picture again, as the model is seen now. */
     fun refreshSubmeshThumbnails() {
@@ -1478,6 +1532,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (channel !in 0..2) return
         s.chooseChannelTile(channel.toUInt())
         followModelChannel()
+    }
+
+    /** Layer [l]'s content in [channel] replaced by the picture at [uri], stretched over the texture. */
+    fun replaceMaterialMap(l: LayerInfo, channel: Int, uri: android.net.Uri) {
+        val s = session ?: return
+        viewModelScope.launch {
+            val image = withContext(Dispatchers.IO) { decodePicture(uri, io.github.artcraftandroid.procraft.ui.CanvasSpace.p3) }
+            if (image == null) {
+                message = "This picture can't be opened."
+                return@launch
+            }
+            if (s.replaceMaterialMap(l.id, channel.toUInt(), image)) showNotice("Replace Material Map Content")
+            followModelChannel()
+            loadThumbnail(l.id)
+            refreshChannelThumbnails(l.id)
+            refreshSubmeshThumbnails()
+            refresh()
+        }
     }
 
     /** A layer's row tapped on a model: the layer itself (its colour) is painted, no tile chosen (an undo step). */
@@ -1520,6 +1592,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleChannelTray(id: ULong) {
         channelTrayFor = if (channelTrayFor == id) null else id
         if (channelTrayFor == id) refreshChannelThumbnails(id)
+    }
+
+    /** What undo or redo changed on a model, in the pictures the open Layers panel shows of it. */
+    private fun refreshModelThumbnails() {
+        if (!modelOpen || panel != Panel.LAYERS) return
+        channelTrayFor?.let { refreshChannelThumbnails(it) }
+        refreshSubmeshThumbnails()
     }
 
     private fun refreshChannelThumbnails(id: ULong) {
@@ -1565,6 +1644,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         title: String? = null,
     ) {
         val resolver = getApplication<Application>().contentResolver
+        var why: String? = null
         val s = withContext(Dispatchers.IO) {
             runCatching {
                 val file = bytes ?: resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
@@ -1574,10 +1654,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 val artwork = (title ?: name.substringBeforeLast('.')).ifBlank { "Untitled Artwork" }
                 CanvasSession.openModel(file, name, files, artwork, 0u)
                     .also(::loadModelTextures).also(::loadBrushes)
-            }.onFailure { android.util.Log.e("ProCraft", "opening a model", it) }.getOrNull()
+            }.onFailure {
+                android.util.Log.e("ProCraft", "opening a model", it)
+                why = (it as? io.github.artcraftandroid.procraft.core.MobileException.File)?.reason?.substringAfter(": ", "")
+            }.getOrNull()
         }
         if (s == null) {
-            message = "This model can't be opened."
+            message = why?.takeIf { it.isNotEmpty() }?.let { "This model can't be opened: $it." } ?: "This model can't be opened."
             return
         }
         start(s, store.newFolder(galleryDir), brushesLoaded = true)
@@ -1761,6 +1844,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = "This palette can't be read."
         } else if (name != null && isModelName(name)) {
             newFromModel(uri, name)
+        } else if (kind == io.github.artcraftandroid.procraft.core.ZipKind.ModelArtwork && zipFile != null) {
+            // a model's artwork, whole
+            val ok = withContext(Dispatchers.IO) {
+                val dir = importFolder()
+                io.github.artcraftandroid.procraft.core.unpackModelArtwork(zipFile.path, dir.path).also { if (!it) dir.deleteRecursively() }
+            }
+            if (ok) refreshGallery() else message = "This file can't be opened."
         } else if (kind is io.github.artcraftandroid.procraft.core.ZipKind.Model) {
             // a model zipped with its material file and images (as a folder of them)
             val title = kind.name.substringAfterLast('/').substringBeforeLast('.')
@@ -2424,9 +2514,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         modelFlat = s.modelFlat()
         paintThrough = s.paintThrough()
         submeshes = model?.submeshes ?: emptyList()
-        submeshesHidden = s.submeshesHidden()
+        readMeshes()
         openSubmesh = null
         submeshThumbnails.clear()
+        selectionXRay = interfacePrefs.getBoolean(SELECTION_X_RAY, false)
+        s.setSelectionXRay(selectionXRay)
+        modelWarnings = s.takeModelWarnings().map { io.github.artcraftandroid.procraft.core.modelWarningName(it) }
         modelChannel = s.modelChannel().toInt()
         channelTileChosen = false
         channelColors.fill(null)
@@ -2613,6 +2706,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun paste(private: Boolean = false) {
         val image = clipboard ?: return
         val s = session
+        // on a model it is placed on the surface, not in the texture
+        if (s != null && modelOpen && !modelFlat) {
+            closePanels()
+            if (s.modelPictureBegin(image, false)) readModelPicture() else message = noRoom()
+            refresh()
+            return
+        }
         // through a plugin it takes a moment on a big canvas: the screen doesn't wait for it
         if (!private && s?.pastesIntoMask() == true) {
             closePanels()
@@ -2633,6 +2733,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Layer Select at window point [at]: the top layer drawn there becomes current, the others listed. */
     fun layerSelectAt(at: Offset) {
+        // on a model, the mesh there is picked
+        if (modelOpen && !modelFlat) {
+            val said = session?.pickSubmeshAt(at.x, at.y) ?: return
+            readMeshes()
+            openSubmesh = activeSubmeshes.firstOrNull()
+            textureSet = session?.textureSet()?.toInt() ?: textureSet
+            refresh()
+            showNotice(said)
+            return
+        }
         val ids = session?.layersAt(at.x, at.y).orEmpty()
         if (ids.isEmpty()) {
             message = "Nothing is drawn there."
@@ -3042,6 +3152,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = "This picture can't be opened."
             return false
         }
+        // on a model it is placed on the surface, not in the texture
+        if (modelOpen && !modelFlat) {
+            if (!s.modelPictureBegin(image, true)) {
+                message = noRoom()
+                return false
+            }
+            readModelPicture()
+            refresh()
+            return true
+        }
         if (s.insertImage(image, private) == null) {
             message = noRoom()
             return false
@@ -3049,6 +3169,34 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
         if (transform) toggleTransform()
         return true
+    }
+
+    /** The corners of a picture being placed on a model, on the window (x, y pairs), while one is. */
+    var modelPictureBox by mutableStateOf<List<Float>?>(null)
+        private set
+
+    fun readModelPicture() {
+        modelPictureBox = session?.modelPictureBox()
+    }
+
+    fun flipModelPicture(horizontal: Boolean) {
+        session?.modelPictureFlip(horizontal)
+    }
+
+    /** Turns the picture being placed by an eighth of a turn. */
+    fun turnModelPicture() {
+        session?.modelPictureMove(0f, 0f, 1f, Math.PI.toFloat() / 4f)
+    }
+
+    fun resetModelPicture() {
+        session?.modelPictureReset()
+    }
+
+    /** Ends placing a picture on a model: it stays ([keep]) or goes, and its layer with it. */
+    fun endModelPicture(keep: Boolean) {
+        session?.modelPictureEnd(keep)
+        modelPictureBox = null
+        refresh()
     }
 
     /**
@@ -3512,7 +3660,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- the reference window ----
 
-    enum class ReferenceMode { CANVAS, IMAGE, FACE }
+    enum class ReferenceMode { CANVAS, IMAGE, FACE, MODEL }
 
     var referenceOn by mutableStateOf(false)
         private set
@@ -3586,6 +3734,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS -> ReferenceMode.CANVAS
             io.github.artcraftandroid.procraft.core.ReferenceShows.IMAGE -> ReferenceMode.IMAGE
             io.github.artcraftandroid.procraft.core.ReferenceShows.FACE -> ReferenceMode.FACE
+            io.github.artcraftandroid.procraft.core.ReferenceShows.MODEL -> ReferenceMode.MODEL
         }
         if (w.sized) referenceSize = DpSize(w.width.dp, w.height.dp)
         if (w.placed) referenceOffset = Offset(w.x * density, w.y * density)
@@ -3637,6 +3786,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     ReferenceMode.CANVAS -> io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS
                     ReferenceMode.IMAGE -> io.github.artcraftandroid.procraft.core.ReferenceShows.IMAGE
                     ReferenceMode.FACE -> io.github.artcraftandroid.procraft.core.ReferenceShows.FACE
+                    ReferenceMode.MODEL -> io.github.artcraftandroid.procraft.core.ReferenceShows.MODEL
                 },
                 sized = referenceSize != DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp),
                 width = referenceSize.width.value,
@@ -3752,6 +3902,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun pinchReference(sizes: io.github.artcraftandroid.procraft.core.ReferenceSizes, from: Offset, to: Offset, spread: Float) {
         val image = referenceMode == ReferenceMode.IMAGE
         val view = if (image) referenceImageView else referenceCanvasView
+        // the model turns under the finger, and doesn't move in the window
+        if (referenceMode == ReferenceMode.MODEL) {
+            session?.referenceModelTurn(to.x - from.x, to.y - from.y, sizes.windowWidth)
+            refreshReference()
+            return
+        }
         val next = io.github.artcraftandroid.procraft.core.referenceViewPinched(view, sizes, from.x, from.y, to.x, to.y, spread)
         if (image) referenceImageView = next else referenceCanvasView = next
         keepReference()
@@ -3774,7 +3930,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Reads the canvas again for the window, at most every so often while changes come. */
     fun refreshReference() {
-        if (!referenceOn || referenceMode != ReferenceMode.CANVAS) return
+        if (!referenceOn || (referenceMode != ReferenceMode.CANVAS && referenceMode != ReferenceMode.MODEL)) return
         if (referenceJob?.isActive == true) {
             referenceStale = true
             return
@@ -3784,7 +3940,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             do {
                 referenceStale = false
                 val made = withContext(Dispatchers.Default) {
-                    val t = s.canvasThumbnail(REFERENCE_PIXELS.toUInt()) ?: return@withContext null
+                    val model = referenceMode == ReferenceMode.MODEL
+                    val t = (if (model) s.referenceModelPicture(MODEL_REFERENCE_PIXELS.toUInt()) else s.canvasThumbnail(REFERENCE_PIXELS.toUInt()))
+                        ?: return@withContext null
                     val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
                     bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                     bitmap.asImageBitmap() to (t.width == s.info().width)
@@ -4016,7 +4174,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun currentIsText() = layers.firstOrNull { it.current }?.text == true
 
     /** Why the current layer turned a change away. */
-    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP }
+    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP, MESH_HIDDEN, MESH_LOCKED }
 
     /** The current layer turned a change away, and why: a dialog offers to unlock or show it, or open Layers. */
     var blocked by mutableStateOf<Pair<Blocked, LayerInfo>?>(null)
@@ -4034,6 +4192,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             io.github.artcraftandroid.procraft.core.Blocked.LOCKED -> Blocked.LOCKED
             io.github.artcraftandroid.procraft.core.Blocked.HIDDEN -> Blocked.HIDDEN
             io.github.artcraftandroid.procraft.core.Blocked.EMPTY_GROUP -> Blocked.EMPTY_GROUP
+            io.github.artcraftandroid.procraft.core.Blocked.MESH_HIDDEN -> Blocked.MESH_HIDDEN
+            io.github.artcraftandroid.procraft.core.Blocked.MESH_LOCKED -> Blocked.MESH_LOCKED
             null -> return true
         }
         blocked = why to l
@@ -4049,6 +4209,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 Blocked.LOCKED -> toggleLocked(l)
                 Blocked.HIDDEN -> toggleVisible(l)
                 Blocked.EMPTY_GROUP -> Unit
+                Blocked.MESH_HIDDEN, Blocked.MESH_LOCKED -> {
+                    session?.freeMeantMeshes()
+                    readMeshes()
+                }
             }
         }
         if (openLayers) panel = Panel.LAYERS
@@ -5091,6 +5255,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         LAYER_PNGS("png", "image/png"),
         /** A model: OBJ, its material file and its textures, zipped. */
         MODEL_OBJ("zip", "application/zip"),
+        MODEL_ARTWORK("procraft", "application/octet-stream"),
         /** A model as a USDZ package. */
         MODEL_USDZ("usdz", "model/vnd.usdz+zip"),
         /** A model's texture sets, a PNG each. */
@@ -5161,6 +5326,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     Export.TIFF -> s.exportTiff(file.path)
                     Export.MODEL_OBJ -> s.exportModelObj(file.path)
                     Export.MODEL_USDZ -> s.exportModelUsdz(file.path)
+                    Export.MODEL_ARTWORK -> s.exportModelArtwork(artworkDir?.path ?: return@withContext emptyList(), file.path)
                     Export.MODEL_RENDER -> s.exportModelRender(file.path, false)
                     Export.MODEL_JPEG -> s.exportModelJpeg(file.path)
                     Export.MODEL_TIFF -> s.exportModelTiff(file.path)
@@ -5607,12 +5773,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (could || name != null) showNotice("Undo" + name?.let { " $it" }.orEmpty())
         followQuickShape()
         // a model's tile chosen before comes back, with its channel's colour
-        if (modelOpen) followModelChannel()
+        if (modelOpen) {
+            followModelChannel()
+            readMeshes()
+        }
         // cloning, the core put the source back where it was before the stroke
         if (adjustment != null) readAdjust()
         refresh()
         // the thumbnails of the layers it put back (only those) read again
         if (panel == Panel.LAYERS) refreshThumbnails()
+        refreshModelThumbnails()
     }
 
     /**
@@ -5654,6 +5824,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (modelOpen) followModelChannel()
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()
+        refreshModelThumbnails()
         if (adjustment != null) readAdjust()
         text?.let { resumeText(it) }
     }
@@ -6596,6 +6767,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The transform button: opens transform on the current layer, or keeps it and closes. */
     fun toggleTransform() {
+        // a picture being placed on a model is kept
+        if (modelPictureBox != null) {
+            endModelPicture(keep = true)
+            return
+        }
         if (transforming) {
             switchModes(ModeButton.Transform)
             return
@@ -7344,6 +7520,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
          */
         const val OWN_EXTENSION = "procraft"
         const val OWN_LABEL = "ProCraft"
+        private const val MODEL_REFERENCE_PIXELS = 720
+        private const val SELECTION_X_RAY = "selection_x_ray"
         const val PACKAGE_EXTENSION = "procreate"
 
         /** Brush and brush set files, as other painting apps share them. */
