@@ -822,6 +822,31 @@ fn every_brush_draws_a_preview() {
 }
 
 #[test]
+fn a_preview_mixes_wet_only_where_the_brush_says_it_does() {
+    let Some(s) = session(100, 100) else { return };
+    let (set, index) = {
+        let st = s.shared.lock();
+        let found = st.library.iter().enumerate().find_map(|(set, l)| {
+            l.brushes.iter().position(procraft_engine::brush::Brush::mixes_wet).map(|index| (set, index))
+        });
+        found.unwrap()
+    };
+    let change = |key: &str, value: f32| {
+        let mut st = s.shared.lock();
+        st.library.get_mut(set).and_then(|l| l.brushes.get_mut(index)).unwrap().set_setting(key, value);
+    };
+    let preview = || s.brush_preview(set as u32, index as u32, 240, 60).unwrap().rgba;
+    // ours that mix wet say so, and show it
+    let wet = preview();
+    change("preview_wet_mix", 0.0);
+    let dry = preview();
+    assert_ne!(wet, dry);
+    // switched off, it is drawn as the brush would be with no wet mix at all
+    change("wet_dilution", 0.0);
+    assert_eq!(dry, preview());
+}
+
+#[test]
 fn brushes_keep_their_own_sliders() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.9);
