@@ -1,14 +1,15 @@
 //! The reference window, as the Android app's (ui/ReferenceUi.kt): the whole canvas as it is, or a
 //! picture to work from, floating over the canvas. Its grab line drags it; the round button closes
 //! it (Reference off); unseen handles over its bottom corners size it. Its bars lie over the
-//! picture, and a click on it slides them away and back.
+//! picture, and a click on it slides them away and back. Each artwork keeps its own window (the
+//! core saves it with the artwork): shown, what it shows, its size and place, and its picture.
 
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2, pos2, vec2};
 use procraft_core::{
-    CanvasSession, ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect,
-    reference_view_pinched,
+    CanvasSession, ReferenceShows, ReferenceSizes, ReferenceView, ReferenceWindowState, reference_picture_point,
+    reference_picture_rect, reference_view_pinched, reference_window_fitted,
 };
 
 use crate::icons;
@@ -132,6 +133,11 @@ pub struct Reference {
     /// The bars are slid out of the way; a click that may yet be the first of two came then.
     bars_hidden: bool,
     click: Option<Instant>,
+    /// The window as the artwork last had it; a place it brought back, to be fitted to this
+    /// screen when it next shows; and its picture (a PNG), to be shown then.
+    kept: Option<ReferenceWindowState>,
+    place_due: bool,
+    picture_due: Option<Vec<u8>>,
 }
 
 impl Default for Reference {
@@ -156,11 +162,78 @@ impl Default for Reference {
             picking: false,
             bars_hidden: false,
             click: None,
+            kept: None,
+            place_due: false,
+            picture_due: None,
         }
     }
 }
 
 impl Reference {
+    /// The window as artwork `session` left it, nothing of another's kept (none if it never had
+    /// one).
+    pub fn restore(&mut self, session: &CanvasSession) {
+        let w = session.reference_window();
+        *self = Reference {
+            on: w.shown,
+            mode: match w.shows {
+                ReferenceShows::Canvas => Mode::Canvas,
+                ReferenceShows::Image => Mode::Image,
+                ReferenceShows::Face => Mode::Face,
+            },
+            at: w.placed.then(|| pos2(w.x, w.y)),
+            size: if w.sized { vec2(w.width, w.height).clamp(Vec2::splat(LEAST), Vec2::splat(MOST)) } else { START },
+            canvas_view: w.canvas_view,
+            image_view: w.image_view,
+            kept: Some(w),
+            place_due: w.placed,
+            picture_due: session.reference_picture(),
+            ..Reference::default()
+        };
+    }
+
+    /// The window as it is now, as the artwork keeps it.
+    fn state(&self) -> ReferenceWindowState {
+        let at = self.at.unwrap_or_default();
+        ReferenceWindowState {
+            shown: self.on,
+            shows: match self.mode {
+                Mode::Canvas => ReferenceShows::Canvas,
+                Mode::Image => ReferenceShows::Image,
+                Mode::Face => ReferenceShows::Face,
+            },
+            sized: self.size != START,
+            width: self.size.x,
+            height: self.size.y,
+            placed: self.at.is_some(),
+            x: at.x,
+            y: at.y,
+            canvas_view: self.canvas_view,
+            image_view: self.image_view,
+        }
+    }
+
+    /// Tells the artwork of any change to the window since it last was.
+    pub fn keep(&mut self, session: &CanvasSession) {
+        let now = self.state();
+        if self.kept != Some(now) {
+            session.set_reference_window(now);
+            self.kept = Some(now);
+        }
+    }
+
+    /// `picture` is the window's picture now.
+    fn take_picture(&mut self, ctx: &egui::Context, picture: &image::DynamicImage) {
+        let rgba = picture.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+        let flat: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+        let glass = glass_of(size[0], size[1], &flat);
+        self.image_glass = Some(ctx.load_texture("reference picture glass", glass, egui::TextureOptions::LINEAR));
+        self.image = Some(ctx.load_texture("reference picture", image, egui::TextureOptions::LINEAR));
+        self.image_pixels = Some(Pixels { width: size[0], height: size[1], rgba: rgba.into_raw() });
+    }
+
     fn read_canvas(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let edits = session.edits();
         if self.canvas_edits == Some(edits) {
@@ -187,7 +260,7 @@ impl Reference {
         }
     }
 
-    fn import(&mut self, ctx: &egui::Context) {
+    fn import(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Import Image")
             .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"])
@@ -202,16 +275,13 @@ impl Reference {
                 } else {
                     picture
                 };
-                let rgba = picture.to_rgba8();
-                let size = [rgba.width() as usize, rgba.height() as usize];
-                let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                let flat: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
-                let glass = glass_of(size[0], size[1], &flat);
-                self.image_glass =
-                    Some(ctx.load_texture("reference picture glass", glass, egui::TextureOptions::LINEAR));
-                self.image = Some(ctx.load_texture("reference picture", image, egui::TextureOptions::LINEAR));
-                self.image_pixels = Some(Pixels { width: size[0], height: size[1], rgba: rgba.into_raw() });
+                self.take_picture(ctx, &picture);
                 self.image_view = ReferenceView::default();
+                // kept with the artwork as a PNG, whatever kind of file it came from
+                let mut png = std::io::Cursor::new(Vec::new());
+                if picture.to_rgba8().write_to(&mut png, image::ImageFormat::Png).is_ok() {
+                    session.set_reference_picture(png.into_inner());
+                }
             }
             Err(_) => crate::files::tell("Can't import it", "This picture can't be opened."),
         }
@@ -234,6 +304,20 @@ impl Reference {
         }
         let screen = ctx.content_rect();
         let tall = TOP_BAR + self.size.y + BOTTOM_BAR;
+        if let Some(png) = self.picture_due.take()
+            && let Ok(picture) = image::load_from_memory(&png)
+        {
+            self.take_picture(ctx, &picture);
+        }
+        // where the artwork left it, perhaps on a screen of another shape: where it can be reached
+        if std::mem::take(&mut self.place_due)
+            && let Some(at) = self.at
+        {
+            let o = screen.min;
+            let fitted =
+                reference_window_fitted(at.x - o.x, at.y - o.y, self.size.x, tall, screen.width(), screen.height());
+            self.at = Some(pos2(fitted.x + o.x, fitted.y + o.y));
+        }
         // the first time: in the middle near the bottom of the screen
         let at = *self.at.get_or_insert_with(|| {
             pos2(screen.center().x - self.size.x / 2.0, (screen.bottom() - ABOVE_BOTTOM - tall).max(screen.top()))
@@ -376,6 +460,7 @@ impl Reference {
                             } else {
                                 self.image = None;
                                 self.image_pixels = None;
+                                session.clear_reference_picture();
                                 self.image_glass = None;
                                 self.image_view = ReferenceView::default();
                             }
@@ -439,7 +524,7 @@ impl Reference {
             self.on = false;
         }
         if import {
-            self.import(ctx);
+            self.import(ctx, session);
         }
         picked
     }
