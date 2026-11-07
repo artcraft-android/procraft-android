@@ -178,7 +178,14 @@ pub fn configure(
     wide: bool,
 ) -> Option<wgpu::SurfaceConfiguration> {
     let caps = surface.get_capabilities(&gpu.adapter);
-    let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).or_else(|| caps.formats.first().copied())?;
+    // an 8-bit one first: a float surface (Rgba16Float, offered first on some Linux drivers) is
+    // read by the compositor as linear, so the sRGB-encoded colours drawn on it show washed out
+    let eight_bit = [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm];
+    let format = eight_bit
+        .into_iter()
+        .find(|f| caps.formats.contains(f))
+        .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
+        .or_else(|| caps.formats.first().copied())?;
 
     let mut config = surface.get_default_config(&gpu.adapter, size.0.max(1), size.1.max(1))?;
     config.format = format;
