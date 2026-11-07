@@ -887,6 +887,58 @@ fn dump_brush_previews() {
     std::fs::write(format!("{dir}/names.txt"), names).unwrap();
 }
 
+/// A brush set's own previews beside the engine's, to see where a set's brushes differ: for each
+/// brush, `thumbnail.png` (the file's), `engine.png` (drawn here at the same size) and a line of
+/// their alpha's mean and root-mean-square difference in `summary.txt`, worst first.
+/// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p procraft-core dump_brush_comparisons -- --ignored`
+#[test]
+#[ignore]
+fn dump_brush_comparisons() {
+    use procraft_engine::brushfile;
+    let Ok(path) = std::env::var("BRUSH_SET") else { return };
+    let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
+    let Some(s) = session(100, 100) else { return };
+    let set = s.import_brushes(std::fs::read(path).unwrap()).unwrap();
+    let brushes: Vec<(u32, String)> =
+        s.brush_library()[set as usize].brushes.iter().map(|b| (b.index, b.name.clone())).collect();
+    let mut rows = Vec::new();
+    for (index, name) in brushes {
+        // a set's folder entries aren't brushes
+        if name.starts_with('\u{1F4C2}') {
+            continue;
+        }
+        let file = brushfile::read(&s.brush_as_file(set, index).unwrap()).unwrap();
+        let Some((w, h, own)) = file.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) else {
+            continue;
+        };
+        assert!(s.select_brush(set, index));
+        // a setting written back as it was makes the engine draw the preview, not keep the file's
+        s.studio_begin();
+        let spacing = s.studio_settings(vec!["spacing".to_owned()])[0];
+        s.set_studio_setting("spacing".to_owned(), spacing);
+        let engine = s.brush_preview(set, index, w, h).unwrap();
+        s.studio_end(false);
+        let folder = format!("{root}/{}", name.replace(['/', '\\'], "-"));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(format!("{folder}/thumbnail.png"), crate::project::rgba_png(w, h, &own)).unwrap();
+        std::fs::write(format!("{folder}/engine.png"), crate::project::rgba_png(w, h, &engine.rgba)).unwrap();
+        let (mut sum, mut squares) = (0_u64, 0_u64);
+        for (a, b) in own.as_chunks::<4>().0.iter().zip(engine.rgba.as_chunks::<4>().0) {
+            let d = i64::from(a[3]) - i64::from(b[3]);
+            sum += d.unsigned_abs();
+            squares += d.unsigned_abs().pow(2);
+        }
+        let n = f64::from(w * h);
+        rows.push((name, sum as f64 / n / 255.0, (squares as f64 / n).sqrt() / 255.0));
+    }
+    rows.sort_by(|a, b| b.2.total_cmp(&a.2));
+    let mut summary = String::from("brush\tmean\trms\n");
+    for (name, mean, rms) in rows {
+        summary += &format!("{name}\t{mean:.4}\t{rms:.4}\n");
+    }
+    std::fs::write(format!("{root}/summary.txt"), summary).unwrap();
+}
+
 #[test]
 fn smudge_tool_moves_paint_and_is_one_undo_step() {
     let Some(s) = session(100, 100) else { return };
