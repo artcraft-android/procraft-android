@@ -170,7 +170,16 @@ final class CanvasModel {
     var pdfAsking: ShareKind?
     var saying: (title: String, message: String)?
     /// The size and opacity side bar shows.
-    var showSideBar = true
+    var showSideBar = true {
+        didSet { applyFitInsets() }
+    }
+    /// The single touch gestures companion shows, and what a lone finger on the canvas does with it.
+    private(set) var singleTouchCompanion = false
+    var companionMode: CompanionMode?
+    @ObservationIgnored var colorNames = false
+    @ObservationIgnored var feedbackSounds = false
+    @ObservationIgnored var naming: Task<Void, Never>?
+    @ObservationIgnored var namedAt = Date.distantPast
 
     /// The QuickMenu, open around this window point (in points); the Copy & Paste panel.
     var quickMenuAt: CGPoint?
@@ -305,6 +314,10 @@ final class CanvasModel {
         session.setSelectionVisibility(visibility: settings.selectionVisibility)
         applyPlugins()
         PluginsModel.shared.onChange = { [weak self] in self?.applyPlugins() }
+        if !SystemSettings.orientationMemory {
+            session.forgetSavedView()
+        }
+        readAppSettings()
         session.setBrushScaling(onScreen: settings.brushOnScreen)
         session.setLightInterface(on: settings.lightInterface)
         applyInput()
@@ -381,6 +394,7 @@ final class CanvasModel {
     }
 
     func select(_ next: ToolKind) {
+        feedback()
         session.setTool(tool: next)
         tool = next
         readSliders()
@@ -643,11 +657,12 @@ final class CanvasModel {
 
     /// A brush or set file from elsewhere: read off the main thread, it joins the library and its
     /// set is shown.
-    func importBrushes(from url: URL) {
+    func importBrushes(from url: URL, then: (() -> Void)? = nil) {
         let name = url.lastPathComponent
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let bytes = url.readPicked()
             let read = bytes.flatMap { readBrushes(bytes: $0, fileName: name) }
+            then?()
             DispatchQueue.main.async {
                 guard let self else { return }
                 if bytes == nil {
@@ -777,6 +792,7 @@ final class CanvasModel {
             swipedBrush = nil
             return
         }
+        feedback()
         _ = switchModes(.panel(colour: p == .color))
         // the colour button with the panel floating: it goes back in its place
         if p == .color, floatingColorsAt != nil {
@@ -1224,6 +1240,7 @@ final class CanvasModel {
     // MARK: undo and redo
 
     func undo() {
+        feedback()
         // a finished text's step goes back to editing that text first, as a step of its own
         if text.info == nil, !transforming, let id = session.textUndoLayer(), text.resume(id) {
             return
@@ -1257,6 +1274,7 @@ final class CanvasModel {
     }
 
     func redo() {
+        feedback()
         if transforming {
             return
         }
@@ -1562,6 +1580,9 @@ final class CanvasModel {
         let c = colorRgb()
         let channel = { (shift: UInt32) in Float((c >> shift) & 0xFF) / 255 }
         session.setColor(r: channel(16), g: channel(8), b: channel(0))
+        if colorNames {
+            nameColourSoon()
+        }
         // recoloring, the area under the reticle takes the new colour
         if recoloring {
             recolor.changeColour(r: channel(16), g: channel(8), b: channel(0))
@@ -1648,6 +1669,8 @@ final class CanvasModel {
     /// A touch is coming down on an idle canvas: the touches take the settings as they are now.
     func prepareTouches() {
         session.setTouchSettings(settings: Gestures.shared.touchSettings())
+        // the companion's Zoom or Move: a lone press zooms or moves the canvas
+        session.setTouchCompanion(mode: companionMode)
         // Continue filling: each touch fills where it lands; slid, it changes the threshold
         session.setTouchFilling(fill: drop.touchFill())
         // the selection tool's touch selects as the tool is set

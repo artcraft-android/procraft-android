@@ -34,6 +34,10 @@ targets:
       # the licences of what the core and the app are made with
       - path: ../android/app/src/main/assets/licenses.txt
         buildPhase: resources
+      # its page in the system's Settings
+      - path: Settings.bundle
+        type: folder
+        buildPhase: resources
       # the app's picture, for About
       - path: ../android/app/src/main/res/drawable-nodpi/procraft_mark.png
         buildPhase: resources
@@ -56,6 +60,43 @@ targets:
         UILaunchScreen: {}
         UIRequiresFullScreen: false
         NSCameraUsageDescription: A photo you take can become a palette of its colours.
+        # what other apps can open here: copied in for the gallery to bring in, as Import does
+        LSSupportsOpeningDocumentsInPlace: false
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: ProCraft artwork
+            LSHandlerRank: Owner
+            LSItemContentTypes: [io.github.artcraftandroid.procraft.artwork]
+          - CFBundleTypeName: Artwork, brushes and palettes
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - io.github.artcraftandroid.procraft.layered
+              - io.github.artcraftandroid.procraft.brushes
+              - io.github.artcraftandroid.procraft.palette
+          - CFBundleTypeName: Pictures
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.image, com.adobe.pdf, com.adobe.photoshop-image]
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: io.github.artcraftandroid.procraft.artwork
+            UTTypeDescription: ProCraft artwork
+            UTTypeConformsTo: [public.data, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: [procraft]
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: io.github.artcraftandroid.procraft.layered
+            UTTypeDescription: Layered artwork
+            UTTypeConformsTo: [public.data, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: ["procreate"]
+          - UTTypeIdentifier: io.github.artcraftandroid.procraft.brushes
+            UTTypeDescription: Brushes
+            UTTypeConformsTo: [public.data, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: [brush, brushset, abr, gbr, gih, vbr, kpp, sut]
+          - UTTypeIdentifier: io.github.artcraftandroid.procraft.palette
+            UTTypeDescription: Palette
+            UTTypeConformsTo: [public.data, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: [swatches, aco, ase]
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown

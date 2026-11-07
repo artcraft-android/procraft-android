@@ -167,6 +167,9 @@ struct CanvasScreen: View {
                     ReferenceWindow(model: model, screen: screen.size)
                         .transition(.opacity)
                 }
+                if model.singleTouchCompanion {
+                    TouchCompanion(model: model, screen: screen.size)
+                }
                 if model.timeLapse.replaying {
                     TimeLapseReplay(model: model)
                         .transition(.opacity)
@@ -429,6 +432,7 @@ private struct CanvasHost: UIViewControllerRepresentable {
 final class CanvasViewController: UIViewController, UIPencilInteractionDelegate {
     private let model: CanvasModel
     private let canvas: CanvasView
+    private lazy var dropper = CanvasDropper(model: model)
     private var observers: [NSObjectProtocol] = []
     /// Back to the gallery, once the artwork is kept.
     private let leave: () -> Void
@@ -458,11 +462,19 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         // a new artwork exists in the gallery from the start (an opened one is there already)
         if !FileManager.default.fileExists(atPath: (dir as NSString).appendingPathComponent("artwork.json")) {
             DispatchQueue.global(qos: .utility).async { try? session.save(dir: dir) }
+            model.startedNew()
         }
+        canvas.addInteraction(UIDropInteraction(delegate: dropper))
         // kept saved by the core a few seconds after it changes; a failure told
         session.startAutosave(dir: dir)
         canvas.onCommands = { [weak self] in self?.obey($0) }
-        canvas.beforeTouches = { [weak self] in self?.model.prepareTouches() }
+        canvas.beforeTouches = { [weak self] in
+            self?.model.prepareTouches()
+            // a field that had the keys let them go: they come back here
+            if self?.isFirstResponder == false, self?.model.text.info == nil {
+                self?.becomeFirstResponder()
+            }
+        }
         canvas.afterTouches = { [weak self] ended in self?.model.layerOpacityTouched(ended: ended) }
         let pencil = UIPencilInteraction()
         pencil.delegate = self
@@ -473,12 +485,64 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         ) { [weak self] _ in self?.saveInBackground() })
         observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.model.resumeTracking() })
+        ) { [weak self] _ in
+            self?.model.resumeTracking()
+            self?.model.readAppSettings()
+        })
+    }
+
+    override var canBecomeFirstResponder: Bool { true }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        becomeFirstResponder()
+    }
+
+    private static func isAlt(_ key: UIKey) -> Bool {
+        key.keyCode == .keyboardLeftAlt || key.keyCode == .keyboardRightAlt
+    }
+
+    /// A hardware keyboard's shortcuts on the canvas (keys no text field took); Alt held is □ held.
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var taken = false
+        for key in presses.compactMap(\.key) {
+            if Self.isAlt(key) {
+                model.modifyPressed()
+                taken = true
+            } else if model.keyPressed(key) {
+                taken = true
+            }
+        }
+        if !taken {
+            super.pressesBegan(presses, with: event)
+        }
+    }
+
+    private func altUp(_ presses: Set<UIPress>) -> Bool {
+        guard presses.compactMap(\.key).contains(where: Self.isAlt), model.modifyHeld else { return false }
+        model.modifyReleased(cancelled: true)
+        return true
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !altUp(presses) {
+            super.pressesEnded(presses, with: event)
+        }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !altUp(presses) {
+            super.pressesCancelled(presses, with: event)
+        }
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        let was = model.pixels
         model.pixels = (view.window?.screen.scale ?? view.traitCollection.displayScale) * Interface.shared.scale
+        if model.pixels != was {
+            model.applyFitInsets()
+        }
         model.screenCentre = CGPoint(x: view.bounds.midX * model.pixels, y: view.bounds.midY * model.pixels)
     }
 

@@ -123,8 +123,8 @@ extension CanvasModel {
     }
 
     /// The bytes of a picture on a new layer, fitted to the canvas (a moving GIF's frames on the
-    /// timeline instead), ready to transform; a message if it couldn't be.
-    func insertPicture(_ data: Data?, name: String?, isPrivate: Bool) {
+    /// timeline instead), with `transform` ready to transform; a message if it couldn't be.
+    func insertPicture(_ data: Data?, name: String?, isPrivate: Bool, transform: Bool = true) {
         closePanels()
         guard let data else {
             showNotice("This picture can't be opened.", warning: true)
@@ -152,7 +152,9 @@ extension CanvasModel {
             return
         }
         refresh()
-        toggleTransform()
+        if transform {
+            toggleTransform()
+        }
     }
 
     /// A file from the picker, read with the access it gave.

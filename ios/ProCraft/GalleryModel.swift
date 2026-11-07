@@ -356,6 +356,13 @@ final class GalleryModel {
         }
     }
 
+    /// A file another app opened here, brought in as Import's; the system's copy goes after it.
+    func importOpened(_ url: URL) {
+        importFiles([url])
+        guard url.pathComponents.contains("Inbox") else { return }
+        work.async { try? FileManager.default.removeItem(at: url) }
+    }
+
     /// Files dropped on the gallery, brought in as Import's; the copies in `folder` go after them.
     func importDropped(_ urls: [URL], from folder: URL) {
         importFiles(urls)

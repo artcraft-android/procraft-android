@@ -1,5 +1,11 @@
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
+
+/// Fingers tapped outside the text's box this quickly undo or redo, as on the canvas, moving no
+/// further than this.
+private let editTapSeconds = 0.3
+private let editTapSlop: CGFloat = 10
 import UniformTypeIdentifiers
 
 private func themed(_ dark: UInt32, _ light: UInt32) -> Color {
@@ -343,6 +349,31 @@ final class TextTool {
 /// The field the keyboard types into, out of sight; the bar above the keyboard rides on it.
 private struct TextInputHost: UIViewRepresentable {
     let tool: TextTool
+    let onUndo: () -> Void
+    let onRedo: () -> Void
+
+    /// Undo and redo are the app's, not the field's (a width change goes back a step at a time).
+    final class Field: UITextView {
+        var onUndo: () -> Void = {}
+        var onRedo: () -> Void = {}
+
+        override var keyCommands: [UIKeyCommand]? {
+            let commands = [
+                UIKeyCommand(input: "z", modifierFlags: .command, action: #selector(Field.undoAsked)),
+                UIKeyCommand(input: "z", modifierFlags: [.command, .shift], action: #selector(Field.redoAsked)),
+            ]
+            commands.forEach { $0.wantsPriorityOverSystemBehavior = true }
+            return commands
+        }
+
+        @objc func undoAsked() {
+            onUndo()
+        }
+
+        @objc func redoAsked() {
+            onRedo()
+        }
+    }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         let tool: TextTool
@@ -390,7 +421,9 @@ private struct TextInputHost: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UITextView {
-        let view = UITextView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        let view = Field(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        view.onUndo = onUndo
+        view.onRedo = onRedo
         view.alpha = 0.01
         view.autocorrectionType = .no
         view.delegate = context.coordinator
@@ -426,6 +459,8 @@ struct TextEditing: View {
     let model: CanvasModel
     let screen: CGSize
 
+    /// How many fingers came down, for what they do outside the box.
+    @State private var fingers = FingerCounter()
     /// What a touch took: a side's dot, the text, or nothing yet; how far it has gone.
     @State private var side: TextSide?
     @State private var touching = false
@@ -482,11 +517,22 @@ struct TextEditing: View {
                 // a tap on the dot is a tap on the text
                 tool.keyboard = true
             }
-        } else if outside {
+        } else if outside, fingers.most <= 1 {
             // one finger there ends the edit, keeping it
             tool.end(keep: true)
         }
         side = nil
+    }
+
+    /// Two fingers tapped outside the box undo and three redo inside it (a width changed goes back a
+    /// step at a time), as on the canvas.
+    private func tapped(_ most: Int, at: CGPoint, _ tool: TextTool, _ info: TextInfo) {
+        guard !windowBox(tool, info).contains(Interface.shared.point(at)) else { return }
+        if most == 2 {
+            model.undo()
+        } else if most >= 3 {
+            model.redo()
+        }
     }
 
     var body: some View {
@@ -501,7 +547,10 @@ struct TextEditing: View {
                             .onEnded { _ in letGo(tool) }
                     )
                 TextBox(model: model, tool: tool, info: info, corners: boxCorners(tool, info))
-                TextInputHost(tool: tool)
+                FingerCatcher(counter: fingers) { most, at in tapped(most, at: at, tool, info) }
+                    .frame(width: 1, height: 1)
+                    .allowsHitTesting(false)
+                TextInputHost(tool: tool, onUndo: { model.undo() }, onRedo: { model.redo() })
                     .frame(width: 1, height: 1)
                     .opacity(0.01)
                     .allowsHitTesting(false)
@@ -509,6 +558,103 @@ struct TextEditing: View {
                     TextStyleSheet(tool: tool, info: info, screen: screen)
                 }
             }
+        }
+    }
+}
+
+/// Counts the fingers of a touch over whatever it is on, taking nothing from it: SwiftUI's drags hear
+/// one. It never begins: all it does is say how many there were and whether they tapped.
+final class FingerCounter: UIGestureRecognizer {
+    /// The most fingers down in the touch under way, or the last.
+    private(set) var most = 0
+    private var down: [ObjectIdentifier: CGPoint] = [:]
+    private var moved = false
+    private var began = Date()
+    private var first = CGPoint.zero
+    /// All let go of a tap of `most` fingers, the first at this place on the window.
+    var onTap: (Int, CGPoint) -> Void = { _, _ in }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with _: UIEvent) {
+        if down.isEmpty {
+            most = 0
+            moved = false
+            began = Date()
+            first = touches.first?.location(in: nil) ?? .zero
+        }
+        for touch in touches {
+            down[ObjectIdentifier(touch)] = touch.location(in: nil)
+        }
+        most = max(most, down.count)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with _: UIEvent) {
+        for touch in touches {
+            if let from = down[ObjectIdentifier(touch)] {
+                let at = touch.location(in: nil)
+                moved = moved || hypot(at.x - from.x, at.y - from.y) > editTapSlop
+            }
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with _: UIEvent) {
+        touches.forEach { down[ObjectIdentifier($0)] = nil }
+        guard down.isEmpty else { return }
+        state = .failed
+        if !moved, Date().timeIntervalSince(began) <= editTapSeconds {
+            onTap(most, first)
+        }
+    }
+
+    override func touchesCancelled(_: Set<UITouch>, with _: UIEvent) {
+        down = [:]
+        state = .failed
+    }
+}
+
+/// Puts a `FingerCounter` on the window while it is shown.
+private struct FingerCatcher: UIViewRepresentable {
+    let counter: FingerCounter
+    let onTap: (Int, CGPoint) -> Void
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizer(_: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith _: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+
+    final class Host: UIView {
+        var counter: FingerCounter?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let counter else { return }
+            counter.view?.removeGestureRecognizer(counter)
+            window?.addGestureRecognizer(counter)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> Host {
+        let host = Host()
+        host.isUserInteractionEnabled = false
+        counter.cancelsTouchesInView = false
+        counter.delaysTouchesBegan = false
+        counter.delaysTouchesEnded = false
+        counter.delegate = context.coordinator
+        host.counter = counter
+        return host
+    }
+
+    func updateUIView(_: Host, context _: Context) {
+        counter.onTap = onTap
+    }
+
+    static func dismantleUIView(_ host: Host, coordinator _: Coordinator) {
+        if let counter = host.counter {
+            counter.view?.removeGestureRecognizer(counter)
         }
     }
 }

@@ -148,6 +148,8 @@ extension CanvasModel {
         case .paste: paste()
         case .copyPasteMenu: copyPasteOpen = true
         case .reference: reference.setOn(!reference.on)
+        case .companionMove: toggleCompanionMode(.move)
+        case .companionZoom: toggleCompanionMode(.zoom)
         case .flipHorizontal: flipCanvas(horizontal: true)
         case .flipVertical: flipCanvas(horizontal: false)
         case .undo: undo()

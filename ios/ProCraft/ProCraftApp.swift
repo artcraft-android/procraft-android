@@ -2,6 +2,7 @@ import AVFoundation
 import os
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// ProCraft on the iPad: the gallery, and an artwork open on the canvas the core draws, painted
 /// on with the Pencil and moved with fingers, the interface over it.
@@ -62,6 +63,12 @@ struct RootView: View {
                 .ignoresSafeArea()
             }
             .overlay { PluginAlerts() }
+            // a file opened with the app is brought into the gallery, which shows: an open artwork
+            // is saved and closed first
+            .onOpenURL { url in
+                open?.onClose()
+                GalleryModel.shared.importOpened(url)
+            }
         #if DEBUG
         .task { ScreenCapture.start { open = $0 } }
         #endif
@@ -369,6 +376,21 @@ enum ScreenCapture {
         case "colors-floating", "colors-floating-palettes", "colors-floating-harmony", "colors-floating-value":
             model.colorMode = ColorMode.allCases.first { name.hasSuffix($0.label.lowercased()) } ?? .disc
             model.floatingColorsAt = CGPoint(x: 300, y: 160)
+        case "companion":
+            UserDefaults.standard.set(true, forKey: "singleTouchCompanion")
+            model.readAppSettings()
+            model.companionMode = .move
+        case "key-layers":
+            _ = model.runShortcut("l", command: false, shift: false, alt: false)
+        case "settings-check":
+            UserDefaults.standard.set(false, forKey: "singleTouchCompanion")
+            model.readAppSettings()
+            let file = Bundle.main.url(forResource: "Root", withExtension: "plist", subdirectory: "Settings.bundle")
+            let page = file.flatMap { NSDictionary(contentsOf: $0) }
+            let rows = (page?["PreferenceSpecifiers"] as? [Any])?.count ?? 0
+            let types = ["procraft", "brushset", "abr", "swatches"].map { "\($0): \(UTType(filenameExtension: $0)?.identifier ?? "none")" }
+            let kinds = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDocumentTypes") as? [Any])?.count ?? 0
+            model.saying = ("Settings check", "Settings page: \(rows) rows. Document kinds: \(kinds).\n" + types.joined(separator: "\n"))
         case "timelapse-tab":
             recordFrames(model) {
                 model.refresh()

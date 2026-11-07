@@ -15,9 +15,22 @@ private let dragScrollStep: CGFloat = 12
 /// How opaque a dragged artwork's (or stack's) picture is, and how much larger than in its place.
 private let dragPictureAlpha: CGFloat = 204 / 255
 private let artworkLifted: CGFloat = 1.07
-/// What an artwork dragged out to another app becomes: the file, and a picture for those that can't
-/// read it.
-private let dragFormats = ["ProCraft", "JPEG"]
+/// What an artwork dragged out to another app becomes, as Settings says: the file, and a picture for
+/// those that can't read it.
+private var dragFormats: [String] {
+    let file = SystemSettings.dragFormat
+    return ["JPEG", "PNG", "TIFF"].contains(file) ? [file] : [file, SystemSettings.dragImageFormat]
+}
+
+private func type(of format: String) -> UTType {
+    switch format {
+    case "PSD": UTType("com.adobe.photoshop-image") ?? .data
+    case "JPEG": .jpeg
+    case "PNG": .png
+    case "TIFF": .tiff
+    default: UTType(filenameExtension: "procraft") ?? .data
+    }
+}
 
 /// What a drag shows on the gallery's cells.
 @Observable
@@ -74,6 +87,29 @@ private final class Dropped {
     var urls: [URL] = []
 }
 
+/// What `session` holds copied while it lasts, then `done` with the copies and the folder they are in.
+func loadDropped(_ session: any UIDropSession, done: @escaping ([URL], URL) -> Void) {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("drop-\(UUID().uuidString)")
+    let dropped = Dropped()
+    let group = DispatchGroup()
+    for item in session.items {
+        guard let type = item.itemProvider.registeredTypeIdentifiers.first else { continue }
+        group.enter()
+        _ = item.itemProvider.loadFileRepresentation(forTypeIdentifier: type) { url, _ in
+            let kept = url.flatMap { keepDropped($0, in: folder) }
+            DispatchQueue.main.async {
+                if let kept {
+                    dropped.urls.append(kept)
+                }
+                group.leave()
+            }
+        }
+    }
+    group.notify(queue: .main) {
+        done(dropped.urls, folder)
+    }
+}
+
 /// The gallery's drags. Held and moved, an artwork goes out to other apps as a file made when they
 /// ask for it, and within the gallery: let go over another artwork's picture (or a stack's) it is
 /// stacked with it, anywhere else on the grid it goes where it is let go. A stack moves within the
@@ -106,8 +142,7 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
         let provider = NSItemProvider()
         provider.suggestedName = exportFileName(name: artwork.name, package: false)
         for format in dragFormats {
-            let type: UTType = format == "JPEG" ? .jpeg : UTType(filenameExtension: "procraft") ?? .data
-            provider.registerFileRepresentation(forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all) { [model] done in
+            provider.registerFileRepresentation(forTypeIdentifier: type(of: format).identifier, fileOptions: [], visibility: .all) { [model] done in
                 model.fileForDrag(artwork, format: format) { url in
                     done(url, false, url == nil ? CocoaError(.fileWriteUnknown) : nil)
                 }
@@ -333,24 +368,8 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
 
     /// Files from another app: each copied while it lasts, then brought in as Import's.
     private func bringIn(_ session: any UIDropSession) {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("drop-\(UUID().uuidString)")
-        let dropped = Dropped()
-        let group = DispatchGroup()
-        for item in session.items {
-            guard let type = item.itemProvider.registeredTypeIdentifiers.first else { continue }
-            group.enter()
-            _ = item.itemProvider.loadFileRepresentation(forTypeIdentifier: type) { url, _ in
-                let kept = url.flatMap { keepDropped($0, in: folder) }
-                DispatchQueue.main.async {
-                    if let kept {
-                        dropped.urls.append(kept)
-                    }
-                    group.leave()
-                }
-            }
-        }
-        group.notify(queue: .main) { [model] in
-            model.importDropped(dropped.urls, from: folder)
+        loadDropped(session) { [model] urls, folder in
+            model.importDropped(urls, from: folder)
         }
     }
 }

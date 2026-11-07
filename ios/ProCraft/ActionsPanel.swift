@@ -230,7 +230,10 @@ struct ActionsPanel: View {
             return [
                 [
                     .toggle("Light interface", on: AppSettings.shared.lightInterface, change: { model.changeLightInterface($0) }),
-                    .toggle("Right-hand interface", on: AppSettings.shared.rightHanded, change: { AppSettings.shared.rightHanded = $0 }),
+                    .toggle("Right-hand interface", on: AppSettings.shared.rightHanded, change: {
+                        AppSettings.shared.rightHanded = $0
+                        model.applyFitInsets()
+                    }),
                     .act("Brush scaling", value: AppSettings.shared.brushOnScreen ? "Screen" : "Canvas", action: { scalingMenu = true }),
                     .toggle("Project canvas", on: false, change: nil),
                     .toggle("Brush cursor", on: AppSettings.shared.brushCursorOn, change: { AppSettings.shared.brushCursorOn = $0 }),
