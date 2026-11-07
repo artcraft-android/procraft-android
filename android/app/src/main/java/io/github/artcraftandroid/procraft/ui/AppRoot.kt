@@ -159,6 +159,17 @@ fun AppRoot(vm: CanvasViewModel) {
                 val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
                     vm.animatedExport != null || vm.modelAnimatedExport != null
                 if (!vm.barsHidden && !pageOver) AnimationBar(vm)
+                // the bottom toolbars rise from below the screen, and drop away
+                androidx.compose.animation.AnimatedVisibility(
+                    vm.transforming && !vm.barsHidden,
+                    Modifier.align(Alignment.BottomCenter),
+                    enter = Motion.toolbarIn(),
+                    exit = Motion.toolbarOut(),
+                ) { TransformToolbar(vm, maxWidth) }
+                BrushCursor(vm)
+                // the Reference window floats over the bars and the canvas's own marks; the panels,
+                // menus and pages opened later come over it
+                ReferenceWindow(vm)
                 // each panel hangs from its button: colour, layers, then the tool that opened the library;
                 // it grows out of its arrow as it opens and fades as it closes
                 PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
@@ -208,19 +219,10 @@ fun AppRoot(vm: CanvasViewModel) {
                 }
                 // the colour panel dragged out by its grabber: a window over the canvas until closed
                 FloatingColors(vm, maxWidth, maxHeight)
-                // the bottom toolbars rise from below the screen, and drop away
-                androidx.compose.animation.AnimatedVisibility(
-                    vm.transforming && !vm.barsHidden,
-                    Modifier.align(Alignment.BottomCenter),
-                    enter = Motion.toolbarIn(),
-                    exit = Motion.toolbarOut(),
-                ) { TransformToolbar(vm, maxWidth) }
                 if (vm.transforming && !vm.barsHidden) {
                     TransformPopover(vm, maxWidth, maxHeight)
                     TransformNumeric(vm)
                 }
-                BrushCursor(vm)
-                ReferenceWindow(vm)
                 TouchCompanion(vm)
                 CropOverlay(vm)
                 if (vm.textInfo != null) TextEditor(vm)
