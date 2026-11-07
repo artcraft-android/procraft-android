@@ -64,10 +64,9 @@ pub enum KeyShortcut {
     },
 }
 
-/// The shortcut on `key`, if any: a letter or digit (either case), "[", "]", ";", "space",
-/// "delete", "backspace", or an arrow ("left", "right", "up", "down"); `command` is Ctrl (⌘), and
-/// the arrows nudge only while `transforming`. Ctrl and Alt together are AltGr typing a key, so
-/// they count as neither.
+/// The shortcut on `key` with the presses the app starts with (see [`KeyBindings`]): a letter or
+/// digit (either case), "[", "]", ";", "space", "delete", "backspace", or an arrow ("left",
+/// "right", "up", "down"); `command` is Ctrl (⌘), and the arrows nudge only while `transforming`.
 ///
 /// With the command key: Z undoes (with Shift redoes), C, X and V copy, cut and paste the layer,
 /// A copies the canvas, B opens Color Balance, U Hue, Saturation, Brightness, D deselects, J
@@ -78,47 +77,48 @@ pub enum KeyShortcut {
 /// brush's size by 5% (with Shift 10%); U, D, J, K and 0 as with the command key.
 #[uniffi::export]
 pub fn key_shortcut(key: String, command: bool, shift: bool, alt: bool, transforming: bool) -> Option<KeyShortcut> {
+    key_shortcut_with(KeyBindings::default(), key, command, shift, alt, transforming)
+}
+
+/// The shortcut on `key` with `bindings` in place: a press a binding names exactly, or else the
+/// key alone (so Shift with D deselects where only D is bound, and AltGr typing a bracket is the
+/// bracket alone); then the presses that take a step from the modifiers: the brush's size and an
+/// arrow nudging a transform. `command` is Ctrl (⌘), and Ctrl with Alt is AltGr typing a key.
+#[uniffi::export]
+pub fn key_shortcut_with(
+    bindings: KeyBindings,
+    key: String,
+    command: bool,
+    shift: bool,
+    alt: bool,
+    transforming: bool,
+) -> Option<KeyShortcut> {
+    key_shortcut_bound(&bindings, &key, command, shift, alt, transforming)
+}
+
+/// [`key_shortcut_with`], with the bindings seen rather than taken.
+pub fn key_shortcut_bound(
+    bindings: &KeyBindings,
+    key: &str,
+    command: bool,
+    shift: bool,
+    alt: bool,
+    transforming: bool,
+) -> Option<KeyShortcut> {
     use KeyShortcut::*;
     let key = key.to_lowercase();
-    if command && !alt {
-        return match key.as_str() {
-            "z" if shift => Some(Redo),
-            "z" => Some(Undo),
-            "c" => Some(CopyLayer),
-            "x" => Some(CutLayer),
-            "v" => Some(Paste),
-            "a" => Some(CopyCanvas),
-            "b" => Some(ColourBalance),
-            "u" => Some(HueSaturationBrightness),
-            "d" => Some(Deselect),
-            "j" => Some(DuplicateLayer),
-            "k" => Some(Actions),
-            "0" => Some(Interface),
-            ";" => Some(PerspectiveGuide),
-            "delete" | "backspace" => Some(ClearLayer),
-            "g" => Some(GreyView),
-            "[" => Some(BrushSize { by: -0.01 }),
-            "]" => Some(BrushSize { by: 0.01 }),
-            _ => None,
-        };
+    if let Some(action) = bindings.lookup(&key, command, shift, alt) {
+        return Some(action.shortcut());
     }
-    let step = if shift { 0.10 } else { 0.05 };
+    let step = if command && !alt {
+        0.01
+    } else if shift {
+        0.10
+    } else {
+        0.05
+    };
     let nudge = |dx: f32, dy: f32| transforming.then_some(Nudge { dx, dy });
     match key.as_str() {
-        "b" => Some(Paint),
-        "e" => Some(Erase),
-        "m" => Some(Eyedropper),
-        "s" => Some(Selection),
-        "v" => Some(Transform),
-        "u" => Some(HueSaturationBrightness),
-        "c" => Some(Colours),
-        "x" => Some(SwapColours),
-        "d" => Some(Deselect),
-        "j" => Some(DuplicateLayer),
-        "k" => Some(Actions),
-        "l" => Some(Layers),
-        "0" => Some(Interface),
-        "space" => Some(QuickMenu),
         "[" => Some(BrushSize { by: -step }),
         "]" => Some(BrushSize { by: step }),
         "left" => nudge(-1.0, 0.0),
@@ -126,6 +126,240 @@ pub fn key_shortcut(key: String, command: bool, shift: bool, alt: bool, transfor
         "up" => nudge(0.0, -1.0),
         "down" => nudge(0.0, 1.0),
         _ => None,
+    }
+}
+
+/// Something a key does that a press can be bound to: the shortcuts' list's commands. What takes a
+/// step from the press itself (the brush's size, an arrow nudging a transform) is not among them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum KeyAction {
+    Undo,
+    Redo,
+    CopyLayer,
+    CutLayer,
+    Paste,
+    Paint,
+    Erase,
+    Eyedropper,
+    Selection,
+    Transform,
+    HueSaturationBrightness,
+    Colours,
+    Actions,
+    Layers,
+    SwapColours,
+    Deselect,
+    DuplicateLayer,
+    Interface,
+    ClearLayer,
+    CopyCanvas,
+    ColourBalance,
+    PerspectiveGuide,
+    QuickMenu,
+    GreyView,
+}
+
+impl KeyAction {
+    /// Every action, in the list's order.
+    pub const ALL: [KeyAction; 24] = [
+        KeyAction::Undo,
+        KeyAction::Redo,
+        KeyAction::CopyLayer,
+        KeyAction::CutLayer,
+        KeyAction::Paste,
+        KeyAction::Paint,
+        KeyAction::Erase,
+        KeyAction::Eyedropper,
+        KeyAction::Selection,
+        KeyAction::Transform,
+        KeyAction::HueSaturationBrightness,
+        KeyAction::Colours,
+        KeyAction::Actions,
+        KeyAction::Layers,
+        KeyAction::SwapColours,
+        KeyAction::Deselect,
+        KeyAction::DuplicateLayer,
+        KeyAction::Interface,
+        KeyAction::ClearLayer,
+        KeyAction::CopyCanvas,
+        KeyAction::ColourBalance,
+        KeyAction::PerspectiveGuide,
+        KeyAction::QuickMenu,
+        KeyAction::GreyView,
+    ];
+
+    /// The name the settings file knows it by (`key_undo`'s "undo").
+    pub fn key(self) -> &'static str {
+        match self {
+            KeyAction::Undo => "undo",
+            KeyAction::Redo => "redo",
+            KeyAction::CopyLayer => "copy_layer",
+            KeyAction::CutLayer => "cut_layer",
+            KeyAction::Paste => "paste",
+            KeyAction::Paint => "paint",
+            KeyAction::Erase => "erase",
+            KeyAction::Eyedropper => "eyedropper",
+            KeyAction::Selection => "selection",
+            KeyAction::Transform => "transform",
+            KeyAction::HueSaturationBrightness => "hue_saturation_brightness",
+            KeyAction::Colours => "colours",
+            KeyAction::Actions => "actions",
+            KeyAction::Layers => "layers",
+            KeyAction::SwapColours => "swap_colours",
+            KeyAction::Deselect => "deselect",
+            KeyAction::DuplicateLayer => "duplicate_layer",
+            KeyAction::Interface => "interface",
+            KeyAction::ClearLayer => "clear_layer",
+            KeyAction::CopyCanvas => "copy_canvas",
+            KeyAction::ColourBalance => "colour_balance",
+            KeyAction::PerspectiveGuide => "perspective_guide",
+            KeyAction::QuickMenu => "quick_menu",
+            KeyAction::GreyView => "grey_view",
+        }
+    }
+
+    /// The action a settings file's name is, if it is one.
+    pub fn from_key(name: &str) -> Option<KeyAction> {
+        KeyAction::ALL.into_iter().find(|action| action.key() == name)
+    }
+
+    /// What pressing a key bound to it does.
+    pub fn shortcut(self) -> KeyShortcut {
+        match self {
+            KeyAction::Undo => KeyShortcut::Undo,
+            KeyAction::Redo => KeyShortcut::Redo,
+            KeyAction::CopyLayer => KeyShortcut::CopyLayer,
+            KeyAction::CutLayer => KeyShortcut::CutLayer,
+            KeyAction::Paste => KeyShortcut::Paste,
+            KeyAction::Paint => KeyShortcut::Paint,
+            KeyAction::Erase => KeyShortcut::Erase,
+            KeyAction::Eyedropper => KeyShortcut::Eyedropper,
+            KeyAction::Selection => KeyShortcut::Selection,
+            KeyAction::Transform => KeyShortcut::Transform,
+            KeyAction::HueSaturationBrightness => KeyShortcut::HueSaturationBrightness,
+            KeyAction::Colours => KeyShortcut::Colours,
+            KeyAction::Actions => KeyShortcut::Actions,
+            KeyAction::Layers => KeyShortcut::Layers,
+            KeyAction::SwapColours => KeyShortcut::SwapColours,
+            KeyAction::Deselect => KeyShortcut::Deselect,
+            KeyAction::DuplicateLayer => KeyShortcut::DuplicateLayer,
+            KeyAction::Interface => KeyShortcut::Interface,
+            KeyAction::ClearLayer => KeyShortcut::ClearLayer,
+            KeyAction::CopyCanvas => KeyShortcut::CopyCanvas,
+            KeyAction::ColourBalance => KeyShortcut::ColourBalance,
+            KeyAction::PerspectiveGuide => KeyShortcut::PerspectiveGuide,
+            KeyAction::QuickMenu => KeyShortcut::QuickMenu,
+            KeyAction::GreyView => KeyShortcut::GreyView,
+        }
+    }
+}
+
+/// Whether a key can be bound: a letter, a digit, or one of the keys the list names around them.
+pub fn bindable_key(key: &str) -> bool {
+    matches!(key, "space" | "delete" | "backspace" | "left" | "right" | "up" | "down" | "[" | "]" | ";" | "=" | "-")
+        || (key.len() == 1 && key.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// A press bound to an action: the key's name ([`KeyCombo`]) and the modifiers held with it.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct KeyBinding {
+    pub action: KeyAction,
+    /// The presses that do it, any of them; none once it has been unbound.
+    pub combos: Vec<KeyCombo>,
+}
+
+/// Every action's presses: what the shortcuts do now, as the list shows them and the keys do them.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct KeyBindings {
+    pub bindings: Vec<KeyBinding>,
+}
+
+impl Default for KeyBindings {
+    fn default() -> KeyBindings {
+        KeyBindings::starting()
+    }
+}
+
+impl KeyBindings {
+    /// The presses the app starts with.
+    pub fn starting() -> KeyBindings {
+        let mut bindings: Vec<KeyBinding> = Vec::new();
+        for entry in SHORTCUTS.iter().flat_map(|(_, entries)| *entries) {
+            let Some(action) = entry.action else { continue };
+            if bindings.iter().any(|b| b.action == action) {
+                continue;
+            }
+            let combos = entry
+                .presses
+                .iter()
+                .map(|&(command, shift, alt, key)| KeyCombo { key: key.to_lowercase(), command, shift, alt })
+                .collect();
+            bindings.push(KeyBinding { action, combos });
+        }
+        KeyBindings { bindings }
+    }
+
+    /// The action a press does, as the keys have always been read: a binding that names it
+    /// exactly; with the command key, the same without Shift (so Ctrl+Shift+D deselects, as Ctrl+D
+    /// does, while Ctrl+Shift+Z redoes, which is bound); otherwise the key alone (so Shift with D
+    /// deselects too, and AltGr typing B paints). With the command key and no Alt, nothing falls
+    /// back to the key alone: Ctrl+Space has never opened the QuickMenu.
+    pub fn lookup(&self, key: &str, command: bool, shift: bool, alt: bool) -> Option<KeyAction> {
+        let action = |command: bool, shift: bool, alt: bool| {
+            self.bindings.iter().find(|b| b.combos.iter().any(|c| c.is(key, command, shift, alt))).map(|b| b.action)
+        };
+        action(command, shift, alt)
+            .or_else(|| if command && !alt { action(true, false, alt) } else { action(false, false, false) })
+    }
+
+    /// The presses that do `action`.
+    pub fn combos_for(&self, action: KeyAction) -> &[KeyCombo] {
+        self.bindings.iter().find(|b| b.action == action).map_or(&[], |b| b.combos.as_slice())
+    }
+
+    /// Binds `combo` to `action`, taking it from whatever did it before.
+    pub fn bind(&mut self, action: KeyAction, combo: KeyCombo) {
+        for binding in &mut self.bindings {
+            binding.combos.retain(|c| !c.same(&combo));
+        }
+        if let Some(binding) = self.bindings.iter_mut().find(|b| b.action == action) {
+            binding.combos.push(combo);
+        }
+    }
+
+    /// Takes every press that does `action` away from it.
+    pub fn unbind(&mut self, action: KeyAction) {
+        if let Some(binding) = self.bindings.iter_mut().find(|b| b.action == action) {
+            binding.combos.clear();
+        }
+    }
+
+    /// Back to the presses the app starts with.
+    pub fn reset(&mut self) {
+        *self = KeyBindings::starting();
+    }
+
+    /// A line of the settings file: "key_undo ctrl+z,ctrl+shift+z" (an action with no presses has
+    /// an empty value). True if `name` was one.
+    pub fn read_line(&mut self, name: &str, value: &str) -> bool {
+        let Some(action) = name.strip_prefix("key_").and_then(KeyAction::from_key) else { return false };
+        let combos: Vec<KeyCombo> =
+            value.split(',').filter(|press| !press.is_empty()).filter_map(KeyCombo::parse).collect();
+        if let Some(binding) = self.bindings.iter_mut().find(|b| b.action == action) {
+            binding.combos = combos;
+        }
+        true
+    }
+
+    /// The settings file's lines, one an action.
+    pub fn kept_lines(&self) -> Vec<String> {
+        KeyAction::ALL
+            .iter()
+            .map(|&action| {
+                let combos: Vec<String> = self.combos_for(action).iter().map(KeyCombo::text).collect();
+                format!("key_{} {}", action.key(), combos.join(","))
+            })
+            .collect()
     }
 }
 
@@ -244,13 +478,60 @@ pub struct KeyCombo {
     pub alt: bool,
 }
 
+impl KeyCombo {
+    /// Whether this is the press of `key` (either case) with exactly `command`, `shift` and `alt`.
+    pub fn is(&self, key: &str, command: bool, shift: bool, alt: bool) -> bool {
+        self.command == command && self.shift == shift && self.alt == alt && self.key.eq_ignore_ascii_case(key)
+    }
+
+    /// Whether this is the same press as `other`, in whatever case its key was written.
+    pub fn same(&self, other: &KeyCombo) -> bool {
+        self.is(&other.key, other.command, other.shift, other.alt)
+    }
+
+    /// The press for the settings file: "ctrl+shift+z", "space", "[", "ctrl+[".
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for (on, name) in [(self.command, "ctrl"), (self.alt, "alt"), (self.shift, "shift")] {
+            if on {
+                out.push_str(name);
+                out.push('+');
+            }
+        }
+        out.push_str(&self.key);
+        out
+    }
+
+    /// The press `text` names, if it names one: a key that can be bound, with "ctrl", "alt" and
+    /// "shift" in front of it.
+    pub fn parse(text: &str) -> Option<KeyCombo> {
+        let mut parts: Vec<&str> = text.split('+').collect();
+        let key = parts.pop()?.to_lowercase();
+        if !bindable_key(&key) {
+            return None;
+        }
+        let (mut command, mut shift, mut alt) = (false, false, false);
+        for modifier in parts {
+            match modifier {
+                "ctrl" | "command" => command = true,
+                "shift" => shift = true,
+                "alt" => alt = true,
+                _ => return None,
+            }
+        }
+        Some(KeyCombo { key, command, shift, alt })
+    }
+}
+
 /// A row of the keyboard shortcuts' list: its keys written out for the platform (`keys`), the
-/// presses that do it (`combos`, none for a drag), and what it does.
+/// presses that do it (`combos`, none for a drag), what it does, and the action its keys can be
+/// bound to again (`None` where the platform keeps them, as it does a drag).
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct ShortcutRow {
     pub keys: String,
     pub combos: Vec<KeyCombo>,
     pub does: String,
+    pub action: Option<KeyAction>,
 }
 
 /// A group of the keyboard shortcuts' list, under its heading.
@@ -271,66 +552,75 @@ const fn command(key: &'static str) -> Press {
     (true, false, false, key)
 }
 
-/// A row of the list's table: the presses (none for a drag, written as `drag`), what they do, and
-/// whether only the desktop has them.
+/// A row of the list's table: the presses it starts with (none for a drag, written as `drag`),
+/// the action a press can be bound to (`None` where the platform keeps the presses), what it does,
+/// and whether only the desktop has it.
 struct Entry {
+    action: Option<KeyAction>,
     presses: &'static [Press],
     drag: &'static str,
     does: &'static str,
     desktop: bool,
 }
 
+/// A row of a command a key can be bound to, with the presses it starts with.
+const fn binding(action: KeyAction, presses: &'static [Press], does: &'static str) -> Entry {
+    Entry { action: Some(action), presses, drag: "", does, desktop: false }
+}
+
+/// A row the platform keeps as it is.
 const fn entry(presses: &'static [Press], does: &'static str) -> Entry {
-    Entry { presses, drag: "", does, desktop: false }
+    Entry { action: None, presses, drag: "", does, desktop: false }
 }
 
 const fn desktop(presses: &'static [Press], does: &'static str) -> Entry {
-    Entry { presses, drag: "", does, desktop: true }
+    Entry { action: None, presses, drag: "", does, desktop: true }
 }
 
 const fn drag(keys: &'static str, does: &'static str) -> Entry {
-    Entry { presses: &[], drag: keys, does, desktop: true }
+    Entry { action: None, presses: &[], drag: keys, does, desktop: true }
 }
 
-/// The list, by group ("{command}" in a drag's keys: the platform's command key).
+/// The list, by group ("{command}" in a drag's keys: the platform's command key). A row's presses
+/// are the ones it starts with; a row with an action is the ones it has now.
 const SHORTCUTS: &[(&str, &[Entry])] = &[
     (
         "Edit",
         &[
-            entry(&[command("z")], "Undo"),
-            entry(&[(true, true, false, "z")], "Redo"),
-            entry(&[command("c")], "Copy the layer"),
-            entry(&[command("x")], "Cut the layer"),
-            entry(&[command("v")], "Paste"),
-            entry(&[command("a")], "Copy the canvas"),
-            entry(&[alone("j"), command("j")], "Duplicate the layer"),
-            entry(&[command("delete"), command("backspace")], "Clear the layer"),
-            entry(&[alone("d"), command("d")], "Deselect"),
+            binding(KeyAction::Undo, &[command("z")], "Undo"),
+            binding(KeyAction::Redo, &[(true, true, false, "z")], "Redo"),
+            binding(KeyAction::CopyLayer, &[command("c")], "Copy the layer"),
+            binding(KeyAction::CutLayer, &[command("x")], "Cut the layer"),
+            binding(KeyAction::Paste, &[command("v")], "Paste"),
+            binding(KeyAction::CopyCanvas, &[command("a")], "Copy the canvas"),
+            binding(KeyAction::DuplicateLayer, &[alone("j"), command("j")], "Duplicate the layer"),
+            binding(KeyAction::ClearLayer, &[command("delete"), command("backspace")], "Clear the layer"),
+            binding(KeyAction::Deselect, &[alone("d"), command("d")], "Deselect"),
         ],
     ),
     (
         "Tools",
         &[
-            entry(&[alone("b")], "Paint"),
-            entry(&[alone("e")], "Erase"),
-            entry(&[alone("m")], "Eyedropper: the next touch picks a colour"),
-            entry(&[alone("s")], "Selection"),
-            entry(&[alone("v")], "Transform"),
-            entry(&[alone("u"), command("u")], "Hue, Saturation, Brightness"),
-            entry(&[command("b")], "Color Balance"),
-            entry(&[command(";")], "Perspective guide on or off"),
-            entry(&[alone("x")], "Swap the colours"),
+            binding(KeyAction::Paint, &[alone("b")], "Paint"),
+            binding(KeyAction::Erase, &[alone("e")], "Erase"),
+            binding(KeyAction::Eyedropper, &[alone("m")], "Eyedropper: the next touch picks a colour"),
+            binding(KeyAction::Selection, &[alone("s")], "Selection"),
+            binding(KeyAction::Transform, &[alone("v")], "Transform"),
+            binding(KeyAction::HueSaturationBrightness, &[alone("u"), command("u")], "Hue, Saturation, Brightness"),
+            binding(KeyAction::ColourBalance, &[command("b")], "Color Balance"),
+            binding(KeyAction::PerspectiveGuide, &[command(";")], "Perspective guide on or off"),
+            binding(KeyAction::SwapColours, &[alone("x")], "Swap the colours"),
             entry(&[alone("left"), alone("right"), alone("up"), alone("down")], "Transforming: move it a pixel"),
         ],
     ),
     (
         "Panels",
         &[
-            entry(&[alone("c")], "Colours"),
-            entry(&[alone("k"), command("k")], "Actions"),
-            entry(&[alone("l")], "Layers"),
-            entry(&[alone("space")], "QuickMenu"),
-            entry(&[alone("0")], "Hide or show the interface"),
+            binding(KeyAction::Colours, &[alone("c")], "Colours"),
+            binding(KeyAction::Actions, &[alone("k"), command("k")], "Actions"),
+            binding(KeyAction::Layers, &[alone("l")], "Layers"),
+            binding(KeyAction::QuickMenu, &[alone("space")], "QuickMenu"),
+            binding(KeyAction::Interface, &[alone("0"), command("0")], "Hide or show the interface"),
         ],
     ),
     (
@@ -344,7 +634,7 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
     (
         "View",
         &[
-            entry(&[command("g")], "Grey view, to check values"),
+            binding(KeyAction::GreyView, &[command("g")], "Grey view, to check values"),
             desktop(&[command("="), command("-")], "Zoom in or out"),
             desktop(&[command("0")], "Fit the canvas"),
             drag("{command}Space and drag", "Zoom"),
@@ -385,7 +675,7 @@ fn key_label(key: &str, mac: bool) -> String {
 }
 
 /// A press written out: "Ctrl+Shift+Z", or on a Mac "⇧⌘Z" (its modifiers in its own order).
-fn press_label(&(command, shift, alt, key): &Press, mac: bool) -> String {
+fn press_label(command: bool, shift: bool, alt: bool, key: &str, mac: bool) -> String {
     let key = key_label(key, mac);
     if mac {
         let mods = [(alt, "⌥"), (shift, "⇧"), (command, "⌘")];
@@ -400,11 +690,23 @@ fn press_label(&(command, shift, alt, key): &Press, mac: bool) -> String {
     }
 }
 
-/// The keyboard shortcuts, grouped, as a list to show: the canvas's (as [`key_shortcut`] has
-/// them), with the desktop's own too (its files, zooming and turning the view) if `desktop`; the
-/// keys written as a Mac's (⌘, ⇧, ⌥) if `mac`, else "Ctrl+", "Shift+", "Alt+".
+/// The keyboard shortcuts, grouped, as a list to show with the presses the app starts with.
 #[uniffi::export]
 pub fn key_shortcut_list(desktop: bool, mac: bool) -> Vec<ShortcutGroup> {
+    key_shortcut_list_with(desktop, mac, KeyBindings::default())
+}
+
+/// The keyboard shortcuts, grouped, as a list to show: each row's presses as `bindings` has them
+/// where a key can be bound to it (and "Unbound" where it has none); with the desktop's own too
+/// (its files, zooming and turning the view) if `desktop`; the keys written as a Mac's (⌘, ⇧, ⌥)
+/// if `mac`, else "Ctrl+", "Shift+", "Alt+".
+#[uniffi::export]
+pub fn key_shortcut_list_with(desktop: bool, mac: bool, bindings: KeyBindings) -> Vec<ShortcutGroup> {
+    key_shortcut_list_bound(desktop, mac, &bindings)
+}
+
+/// [`key_shortcut_list_with`], with the bindings seen rather than taken.
+pub fn key_shortcut_list_bound(desktop: bool, mac: bool, bindings: &KeyBindings) -> Vec<ShortcutGroup> {
     SHORTCUTS
         .iter()
         .filter_map(|(heading, entries)| {
@@ -412,17 +714,32 @@ pub fn key_shortcut_list(desktop: bool, mac: bool) -> Vec<ShortcutGroup> {
                 .iter()
                 .filter(|e| desktop || !e.desktop)
                 .map(|e| {
-                    let keys = if e.presses.is_empty() {
-                        e.drag.replace("{command}", if mac { "⌘" } else { "Ctrl+" })
-                    } else {
-                        e.presses.iter().map(|p| press_label(p, mac)).collect::<Vec<_>>().join("  ")
+                    let presses: Vec<(bool, bool, bool, &str)> = match e.action {
+                        Some(action) => bindings
+                            .combos_for(action)
+                            .iter()
+                            .map(|c| (c.command, c.shift, c.alt, c.key.as_str()))
+                            .collect(),
+                        None => e.presses.to_vec(),
                     };
-                    let combos = e
-                        .presses
+                    let keys = if presses.is_empty() {
+                        if e.drag.is_empty() {
+                            "Unbound".to_string()
+                        } else {
+                            e.drag.replace("{command}", if mac { "⌘" } else { "Ctrl+" })
+                        }
+                    } else {
+                        presses
+                            .iter()
+                            .map(|&(command, shift, alt, key)| press_label(command, shift, alt, key, mac))
+                            .collect::<Vec<_>>()
+                            .join("  ")
+                    };
+                    let combos = presses
                         .iter()
-                        .map(|&(command, shift, alt, key)| KeyCombo { key: key.into(), command, shift, alt })
+                        .map(|&(command, shift, alt, key)| KeyCombo { key: key.to_lowercase(), command, shift, alt })
                         .collect();
-                    ShortcutRow { keys, combos, does: e.does.into() }
+                    ShortcutRow { keys, combos, does: e.does.into(), action: e.action }
                 })
                 .collect();
             (!rows.is_empty()).then(|| ShortcutGroup { heading: (*heading).into(), rows })
@@ -437,6 +754,137 @@ mod tests {
 
     fn key(k: &str, command: bool, shift: bool, alt: bool) -> Option<KeyShortcut> {
         key_shortcut(k.into(), command, shift, alt, false)
+    }
+
+    /// The press `text` names, as the settings file writes it.
+    fn press(text: &str) -> KeyCombo {
+        KeyCombo::parse(text).unwrap_or_else(|| panic!("{text} is no press"))
+    }
+
+    #[test]
+    fn the_presses_bound_do_what_they_did_before_they_could_be_bound() {
+        let bindings = KeyBindings::default();
+        let at = |k: &str, command: bool, shift: bool, alt: bool| {
+            key_shortcut_bound(&bindings, k, command, shift, alt, false)
+        };
+        // with the command key
+        for (k, does) in [
+            ("z", Undo),
+            ("c", CopyLayer),
+            ("x", CutLayer),
+            ("v", Paste),
+            ("a", CopyCanvas),
+            ("b", ColourBalance),
+            ("u", HueSaturationBrightness),
+            ("d", Deselect),
+            ("j", DuplicateLayer),
+            ("k", Actions),
+            ("0", Interface),
+            (";", PerspectiveGuide),
+            ("g", GreyView),
+        ] {
+            assert_eq!(at(k, true, false, false), Some(does), "{k}");
+        }
+        assert_eq!(at("z", true, true, false), Some(Redo));
+        for k in ["delete", "backspace"] {
+            assert_eq!(at(k, true, false, false), Some(ClearLayer), "{k}");
+        }
+        // alone
+        for (k, does) in [
+            ("b", Paint),
+            ("e", Erase),
+            ("m", Eyedropper),
+            ("s", Selection),
+            ("v", Transform),
+            ("c", Colours),
+            ("x", SwapColours),
+            ("l", Layers),
+            ("space", QuickMenu),
+            ("0", Interface),
+        ] {
+            assert_eq!(at(k, false, false, false), Some(does), "{k}");
+        }
+        // a modifier no binding names narrows nothing: Shift with D still deselects, and AltGr
+        // typing B still paints
+        assert_eq!(at("d", false, true, false), Some(Deselect));
+        assert_eq!(at("d", true, true, false), Some(Deselect));
+        assert_eq!(at("b", true, false, true), Some(Paint));
+        // and with the command key nothing falls back to the key alone
+        assert_eq!(at("space", true, false, false), None);
+        assert_eq!(at("e", true, false, false), None);
+        assert_eq!(at("q", false, false, false), None);
+    }
+
+    #[test]
+    fn a_key_bound_again_does_what_it_was_bound_to_and_the_list_says_so() {
+        let mut bindings = KeyBindings::default();
+        bindings.bind(KeyAction::Paint, press("p"));
+        assert_eq!(key_shortcut_bound(&bindings, "p", false, false, false, false), Some(Paint));
+        // P was nothing before: it is Paint's now, and B is still the one it started as
+        assert_eq!(key_shortcut_bound(&bindings, "b", false, false, false, false), Some(Paint));
+        let row = key_shortcut_list_with(true, false, bindings)
+            .iter()
+            .flat_map(|g| &g.rows)
+            .find(|r| r.does == "Paint")
+            .cloned()
+            .unwrap();
+        assert_eq!(row.keys, "B  P");
+        assert_eq!(row.combos, vec![press("b"), press("p")]);
+        assert_eq!(row.action, Some(KeyAction::Paint));
+    }
+
+    #[test]
+    fn binding_a_press_takes_it_from_what_did_it_before() {
+        let mut bindings = KeyBindings::default();
+        bindings.bind(KeyAction::Erase, press("ctrl+z"));
+        assert!(bindings.combos_for(KeyAction::Undo).is_empty(), "Ctrl+Z is Erase's now");
+        assert_eq!(bindings.lookup("z", true, false, false), Some(KeyAction::Erase));
+        // given back, Undo has it again and Erase has not
+        bindings.reset();
+        assert_eq!(bindings.lookup("z", true, false, false), Some(KeyAction::Undo));
+        assert_eq!(bindings.lookup("e", false, false, false), Some(KeyAction::Erase));
+    }
+
+    #[test]
+    fn a_command_unbound_has_no_keys_and_does_nothing() {
+        let mut bindings = KeyBindings::default();
+        bindings.unbind(KeyAction::Layers);
+        assert_eq!(key_shortcut_bound(&bindings, "l", false, false, false, false), None);
+        let row = key_shortcut_list_with(false, false, bindings)
+            .iter()
+            .flat_map(|g| &g.rows)
+            .find(|r| r.does == "Layers")
+            .cloned()
+            .unwrap();
+        assert_eq!(row.keys, "Unbound");
+        assert!(row.combos.is_empty());
+    }
+
+    #[test]
+    fn the_bindings_keep_and_come_back_as_they_were() {
+        let mut bindings = KeyBindings::default();
+        bindings.bind(KeyAction::Erase, press("ctrl+shift+e"));
+        bindings.unbind(KeyAction::QuickMenu);
+        let mut read = KeyBindings::default();
+        for line in bindings.kept_lines() {
+            let (name, value) = line.split_once(' ').unwrap();
+            assert!(read.read_line(name, value), "{name}");
+        }
+        assert_eq!(read, bindings);
+        // what is not a binding is left for the plugins, as before
+        assert!(!read.read_line("something_else", "x"));
+        assert!(read.read_line("key_undo", ""));
+        assert!(read.combos_for(KeyAction::Undo).is_empty());
+    }
+
+    #[test]
+    fn a_press_is_written_and_read_back_as_it_is() {
+        for text in ["ctrl+shift+z", "space", "[", "ctrl+[", "alt+m", "ctrl+alt+0", "left"] {
+            assert_eq!(press(text).text(), text, "{text}");
+        }
+        for text in ["", "ctrl+", "hyper+z", "ctrl+,", "z z"] {
+            assert_eq!(KeyCombo::parse(text), None, "{text:?}");
+        }
     }
 
     #[test]

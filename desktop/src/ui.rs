@@ -808,7 +808,9 @@ impl Interface {
             self.licences = false;
         }
         let keys_to_canvas = self.canvas_shown() && !ctx.egui_wants_keyboard_input() && !self.keys_taken();
-        self.shortcut_list.show(&ctx, keys_to_canvas);
+        if self.shortcut_list.show(&ctx, keys_to_canvas, &mut self.prefs) {
+            self.prefs.keep();
+        }
         self.name_colour(&ctx);
         self.place_canvas(session, ctx.pixels_per_point());
         session.set_glass(backdrops, windows);
@@ -2328,8 +2330,9 @@ impl Interface {
     /// A hardware keyboard's shortcuts: the core's (keys.rs), and the desktop's files: Ctrl (⌘)
     /// with N, O, S (and Shift).
     fn shortcuts(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo) {
-        // a text field, or the hex keypad, takes the keys; text being edited takes them all
-        if ctx.egui_wants_keyboard_input() || self.keys_taken() {
+        // a text field, or the hex keypad, takes the keys; text being edited takes them all, and
+        // the shortcuts' list (open, or waiting for a key to bind) takes them first of all
+        if ctx.egui_wants_keyboard_input() || self.keys_taken() || self.shortcut_list.takes_keys() {
             return;
         }
         let pressed = |modifiers: Modifiers, key: Key| {
@@ -2378,8 +2381,9 @@ impl Interface {
             }
             let Some(name) = key_name(key) else { continue };
             let transforming = self.transform.on;
-            let Some(shortcut) = procraft_core::key_shortcut(
-                name.into(),
+            let Some(shortcut) = procraft_core::key_shortcut_bound(
+                &self.prefs.keys,
+                name,
                 modifiers.command,
                 modifiers.shift,
                 modifiers.alt,
@@ -2459,7 +2463,7 @@ fn escape_id() -> egui::Id {
 }
 
 /// The name the core's shortcuts know `key` by (keys.rs), if it has one.
-fn key_name(key: Key) -> Option<&'static str> {
+pub(crate) fn key_name(key: Key) -> Option<&'static str> {
     Some(match key {
         Key::OpenBracket | Key::OpenCurlyBracket => "[",
         Key::CloseBracket | Key::CloseCurlyBracket => "]",

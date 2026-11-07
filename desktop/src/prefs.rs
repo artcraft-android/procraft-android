@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use procraft_core::{CanvasSession, Plugins};
+use procraft_core::{CanvasSession, KeyBindings, Plugins};
 
 /// When the brush cursor shows: while the pointer hovers, while painting, or both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +88,8 @@ pub struct Prefs {
     pub drag_image_format: usize,
     /// Recolor's Flood, kept from one time to the next.
     pub recolor_threshold: f32,
+    /// The keys the canvas's shortcuts answer to: as they start, until one is bound again.
+    pub keys: KeyBindings,
 }
 
 impl Default for Prefs {
@@ -126,6 +128,7 @@ impl Default for Prefs {
             drag_format: 0,
             drag_image_format: 0,
             recolor_threshold: 0.0,
+            keys: KeyBindings::default(),
         }
     }
 }
@@ -196,6 +199,9 @@ impl Prefs {
                         p.curve = points;
                     }
                 }
+                name if name.starts_with("key_") => {
+                    p.keys.read_line(name, value);
+                }
                 _ => p.plugins.read_kept(name.to_owned(), value.to_owned()),
             }
         }
@@ -240,7 +246,8 @@ impl Prefs {
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
         ];
-        let lines: Vec<String> = lines.into_iter().chain(self.plugins.kept_lines()).collect();
+        let lines: Vec<String> =
+            lines.into_iter().chain(self.keys.kept_lines()).chain(self.plugins.kept_lines()).collect();
         crate::files::keep_text("interface", &(lines.join("\n") + "\n"));
     }
 

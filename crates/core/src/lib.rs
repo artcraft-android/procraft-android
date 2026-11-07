@@ -120,7 +120,11 @@ pub use gradients::{GradientInfo, GradientStop, Gradients};
 pub use guide::{GuideInfo, GuideType, GuideUnit, SymmetryType};
 pub use history::ColourHistory;
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
-pub use keys::{KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
+pub use keys::{
+    KeyAction, KeyBinding, KeyBindings, KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, bindable_key,
+    key_shortcut, key_shortcut_bound, key_shortcut_list, key_shortcut_list_bound, key_shortcut_list_with,
+    key_shortcut_with,
+};
 pub use layers::{
     BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
     brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for, set_resident_budget,
