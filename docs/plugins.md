@@ -1,8 +1,10 @@
 # Writing a plugin
 
 A plugin is a `.procraft-plugin` file. Someone imports it on the Plugins page, and it has a card there
-with Turn on, Turn off and Remove. None of a plugin's code is in the app, so with none on, the app is
-as it always was.
+with Turn on, Turn off and Remove. With none on, the app is as it always was.
+
+For now the samples in [`plugins/`](../plugins) also come inside the app, packed: see
+[The plugins that come with the app](#the-plugins-that-come-with-the-app).
 
 A plugin holds one or both of these:
 
@@ -52,7 +54,7 @@ plugin do.
 `permissions` has to be empty, as there are none to give.
 
 A plugin that only holds a filter starts on, as that changes nothing already in the app. Any other
-starts off, until someone taps Turn on.
+starts off, until someone taps Turn on. One the app adds by itself starts off, whatever it holds.
 
 ## Controls
 
@@ -304,7 +306,38 @@ python tools/pack_plugin.py nudge --out somewhere
 ```
 
 That writes `nudge.procraft-plugin`. Only code needs the `rustup` line. To try it, import it through
-the Plugins page, and tap Turn on if it starts off.
+the Plugins page, and tap Turn on if it starts off. A file packed again from the same folder comes out
+the same, byte for byte.
+
+## The plugins that come with the app
+
+Every plugin under `plugins/` comes inside the app, packed, in `crates/core/bundled-plugins/`, and
+`crates/core/src/bundled.rs` lists them. The first time the app comes with one, it adds it as if
+someone had imported the file, but off, whatever it holds. From then on it's a plugin like any
+other, with the same card, Turn on and Remove.
+
+- The app writes down in its plugin folder (`added`) each one it added, so one that's removed stays
+  removed, through restarts and updates. Importing its file brings it back, as any import.
+- A later version of the app adds any it never added before, and puts a newer file in place of an
+  older one that's there, keeping what was set, as an import of it would.
+- One imported before the app came with it is left as it is, but for a newer file.
+- A setting the app used to have and a plugin now `keeps` (ColorDrop gap closing's gap, Interface
+  size, Eyedropper picks from layer, Paste into masks) starts the plugin the app added on with it, if
+  someone had changed it. Once the plugin is turned on or off, that is what's kept.
+
+The packed files are committed, so building the app needs no WebAssembly target. Whenever anything
+under `plugins/` changes, pack them again and commit what changed:
+
+```
+python tools/pack_plugin.py --bundle
+```
+
+That also writes `sources.txt` beside them, a digest of each folder as it was packed. The core's
+tests (`cargo test -p procraft-core bundled`) check each packed file against its folder, the digest
+too, so a change not packed again fails them. A new plugin needs its line in `bundled.rs` as well.
+
+To ship the app without them, take out `bundled.rs` (its test with it), its `mod` line and the folder,
+and have `Plugins::with_bundled` add none. What was added stays, as if imported.
 
 ## When the app changes
 

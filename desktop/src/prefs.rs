@@ -142,7 +142,7 @@ impl Prefs {
     /// As kept (anything missing or unreadable as it starts).
     pub fn kept() -> Prefs {
         let store = crate::files::app_dir().join("plugins").to_string_lossy().into_owned();
-        let mut p = Prefs { plugins: Plugins::with_store(store), ..Prefs::default() };
+        let mut p = Prefs { plugins: Plugins::with_bundled(store), ..Prefs::default() };
         let text = std::fs::read_to_string(crate::files::app_dir().join("interface")).unwrap_or_default();
         for line in text.lines() {
             let Some((name, value)) = line.split_once(' ') else { continue };
