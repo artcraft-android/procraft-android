@@ -358,7 +358,25 @@ impl CanvasSession {
         canvas.wipe_layer(layer);
         let mut style = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
         style.preview = true;
+        // a brush's preview mixes wet only if it says so (Procreate's Preview > Wet Mix)
+        if brush.setting("preview_wet_mix") < 0.5 {
+            style.wet_pull = None;
+            style.wet_from_before = false;
+            style.load = 0.0;
+            style.dilution = 0.0;
+            style.attack = 0.0;
+            style.grade = 0.0;
+            style.blur = 0.0;
+            style.wet_jitter = 0.0;
+            style.blur_jitter = 0.0;
+        }
         canvas.use_sources(&gpu, &mut style, &brush);
+        // a brush file's grain at its own size, as a stroke reads it
+        if let Some(full) = brush.grain_file_now().and_then(|f| f.full.as_ref())
+            && let Some(pixels) = self.shared.lock().grain_store.pixels(full)
+        {
+            canvas.use_full_grain(&gpu, &mut style, full.id, full.side, &pixels);
+        }
         // a dual brush's second, drawn along the same sample stroke at its size beside the first's
         let stamp_only = brush.setting("preview_stamp") >= 0.5;
         let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
@@ -367,6 +385,11 @@ impl CanvasSession {
                 StrokeStyle::for_brush(&second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false).as_second();
             second_style.preview = true;
             canvas.use_sources(&gpu, &mut second_style, &second);
+            if let Some(full) = second.grain_file_now().and_then(|f| f.full.as_ref())
+                && let Some(pixels) = self.shared.lock().grain_store.pixels(full)
+            {
+                canvas.use_full_grain(&gpu, &mut second_style, full.id, full.side, &pixels);
+            }
             let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
             let mode = brush.setting("dual_blend").round().max(0.0) as u32;
             (!second_style.in_place()).then(|| {
