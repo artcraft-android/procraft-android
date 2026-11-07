@@ -594,7 +594,7 @@ mod tests {
         let s = CanvasSession::new(64, 64);
         s.save_brush_library_file(dir.join("library.json").to_string_lossy().into_owned());
         s.import_brushes(brush_file()).unwrap();
-        let tile = 1500.0 * 0.75 / std::f32::consts::SQRT_2;
+        let tile = 1500.0 * 0.75 / (2.0 * std::f32::consts::SQRT_2);
         let brought = imported(&s);
         assert!((brought.grain_tile() - tile).abs() < 0.5, "{}", brought.grain_tile());
         let full = brought.grain_file.as_ref().and_then(|f| f.full.clone()).unwrap();
