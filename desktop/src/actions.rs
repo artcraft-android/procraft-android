@@ -114,6 +114,8 @@ pub enum Act {
     ScalingMenu,
     LightInterface,
     RightHanded,
+    /// Ctrl (⌘) held alone shows the keyboard shortcuts' list, or doesn't.
+    HoldShortcuts,
     BrushCursor,
     ProjectCanvas,
     ResetInput,
@@ -348,6 +350,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 vec![
                     Switch("Light interface", prefs.light_interface, Some(Act::LightInterface)),
                     Switch("Right-hand interface", prefs.right_handed, Some(Act::RightHanded)),
+                    Switch("Shortcut list on Ctrl held", prefs.shortcuts_on_ctrl, Some(Act::HoldShortcuts)),
                     Button(
                         "Brush scaling",
                         Some(if prefs.brush_on_screen { "Screen" } else { "Canvas" }),
@@ -622,6 +625,10 @@ impl Actions {
             }
             Some(Tapped::Act(Act::RightHanded)) => {
                 prefs.right_handed = !prefs.right_handed;
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::HoldShortcuts)) => {
+                prefs.shortcuts_on_ctrl = !prefs.shortcuts_on_ctrl;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::BrushCursor)) => {

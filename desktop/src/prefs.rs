@@ -90,6 +90,8 @@ pub struct Prefs {
     pub recolor_threshold: f32,
     /// The keys the canvas's shortcuts answer to: as they start, until one is bound again.
     pub keys: KeyBindings,
+    /// Ctrl (⌘) held alone a moment shows the keyboard shortcuts' list.
+    pub shortcuts_on_ctrl: bool,
 }
 
 impl Default for Prefs {
@@ -129,6 +131,7 @@ impl Default for Prefs {
             drag_image_format: 0,
             recolor_threshold: 0.0,
             keys: KeyBindings::default(),
+            shortcuts_on_ctrl: true,
         }
     }
 }
@@ -191,6 +194,7 @@ impl Prefs {
                     p.drag_image_format = value.parse::<usize>().map_or(0, |t| t.min(DRAG_IMAGE_FORMATS.len() - 1))
                 }
                 "recolor_threshold" => p.recolor_threshold = unit.unwrap_or(0.0),
+                "shortcuts_on_ctrl" => p.shortcuts_on_ctrl = on,
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
                 "curve" => {
                     let numbers: Vec<f32> = value.split(',').filter_map(|v| v.parse().ok()).collect();
@@ -245,6 +249,7 @@ impl Prefs {
             format!("drag_format {}", self.drag_format),
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
+            format!("shortcuts_on_ctrl {}", self.shortcuts_on_ctrl),
         ];
         let lines: Vec<String> =
             lines.into_iter().chain(self.keys.kept_lines()).chain(self.plugins.kept_lines()).collect();

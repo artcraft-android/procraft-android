@@ -2269,6 +2269,7 @@ impl Interface {
                         | Act::TipAttachment
                         | Act::LightInterface
                         | Act::RightHanded
+                        | Act::HoldShortcuts
                         | Act::BrushCursor
                         | Act::ProjectCanvas
                         | Act::ResetInput,

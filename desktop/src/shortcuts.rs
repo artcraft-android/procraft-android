@@ -54,19 +54,24 @@ impl Shortcuts {
     }
 
     /// Shows the list if it is open, or Ctrl (⌘) has been held alone long enough while `keys` go
-    /// to the canvas (no text being typed). A shortcut's keys clicked are bound again, and the
-    /// bindings kept: true if one changed.
+    /// to the canvas (no text being typed) and the setting for it is on. A shortcut's keys clicked
+    /// are bound again, and the bindings kept: true if one changed.
     pub fn show(&mut self, ctx: &egui::Context, keys: bool, prefs: &mut Prefs) -> bool {
         let (alone, other) = ctx.input(|i| {
             let m = i.modifiers;
             let alone = m.command && !m.shift && !m.alt && (!m.ctrl || m.mac_cmd || !cfg!(target_os = "macos"));
-            let other = !i.keys_down.is_empty() || i.pointer.any_down() || i.smooth_scroll_delta != egui::Vec2::ZERO;
+            // the modifiers held are not presses that spoil the hold: Ctrl itself is the ask
+            let other = spoiled(&i.keys_down, i.pointer.any_down(), i.smooth_scroll_delta != egui::Vec2::ZERO);
             (alone, other)
         });
         let mut held = false;
         if self.capturing.is_some() {
             // the list stays, however Ctrl is held, while a key is being chosen
             self.held_since = None;
+        } else if !prefs.shortcuts_on_ctrl {
+            // the list is asked for from Help alone
+            self.held_since = None;
+            self.spoiled = false;
         } else if !alone || !keys {
             self.held_since = None;
             self.spoiled = false;
@@ -96,6 +101,28 @@ impl Shortcuts {
         }
         changed
     }
+}
+
+/// Whether `key` is a modifier itself (Shift, Ctrl, Alt, Super: either side). Holding Ctrl is how
+/// the list is asked for, so it must not count as another key pressed.
+fn is_modifier(key: egui::Key) -> bool {
+    matches!(
+        key,
+        egui::Key::ShiftLeft
+            | egui::Key::ShiftRight
+            | egui::Key::ControlLeft
+            | egui::Key::ControlRight
+            | egui::Key::AltLeft
+            | egui::Key::AltRight
+            | egui::Key::SuperLeft
+            | egui::Key::SuperRight
+    )
+}
+
+/// Whether something else was pressed, scrolled or clicked since: the list is only for Ctrl (⌘)
+/// held on its own, so a key (not a modifier), a pointer press or a scroll spoils it.
+fn spoiled(keys: &std::collections::HashSet<egui::Key>, pointer_down: bool, scrolled: bool) -> bool {
+    pointer_down || scrolled || keys.iter().any(|key| !is_modifier(*key))
 }
 
 /// One row of the list laid out: its keys and what it does as galleys, and the action the keys can
@@ -346,5 +373,32 @@ mod tests {
         // 420 and 470 tall
         assert_eq!(heights(2), vec![vec![200.0, 220.0], vec![100.0, 80.0, 180.0, 110.0]]);
         assert_eq!(heights(3), vec![vec![200.0], vec![220.0, 100.0], vec![80.0, 180.0, 110.0]]);
+    }
+
+    #[test]
+    fn ctrl_held_alone_is_not_spoiled_by_the_modifier_itself() {
+        let mut keys = std::collections::HashSet::new();
+        keys.insert(Key::ControlLeft);
+        assert!(!spoiled(&keys, false, false), "Ctrl is how the list is asked for");
+        // either Ctrl, Shift, Alt or Super, either side
+        for modifier in [
+            Key::ShiftLeft,
+            Key::ShiftRight,
+            Key::ControlLeft,
+            Key::ControlRight,
+            Key::AltLeft,
+            Key::AltRight,
+            Key::SuperLeft,
+            Key::SuperRight,
+        ] {
+            let one: std::collections::HashSet<Key> = [modifier].into_iter().collect();
+            assert!(!spoiled(&one, false, false), "{modifier:?}");
+        }
+        // another key, a click or a scroll spoils it
+        keys.insert(Key::Z);
+        assert!(spoiled(&keys, false, false), "Z is another key");
+        keys.remove(&Key::Z);
+        assert!(spoiled(&keys, true, false), "a pointer press");
+        assert!(spoiled(&keys, false, true), "a scroll");
     }
 }
