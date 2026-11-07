@@ -112,11 +112,11 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
     val density = LocalDensity.current
     val config = LocalConfiguration.current
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let(vm::importReference) }
-    val picture = vm.referenceSize
+    val picture = vm.referenceShown
     val tall = TopBarHeight + picture.height + BottomBarHeight
-    // the first time: in the middle near the bottom of the screen
+    // the first time in the middle near the bottom of the screen; then kept on it, and no bigger
     SideEffect {
-        with(density) { vm.placeReference(config.screenWidthDp.dp.toPx(), config.screenHeightDp.dp.toPx(), tall.toPx()) }
+        with(density) { vm.placeReference(config.screenWidthDp.dp.toPx(), config.screenHeightDp.dp.toPx(), (TopBarHeight + BottomBarHeight).toPx()) }
     }
     val at = vm.referenceOffset.takeIf { it != Offset.Unspecified } ?: Offset.Zero
     // room around the window for the handles, which reach past its corners (touches outside a

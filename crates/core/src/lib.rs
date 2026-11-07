@@ -155,7 +155,9 @@ pub use quickshape::{QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{
     ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect, reference_view_pinched,
 };
-pub use reference_window::{ReferencePlace, ReferenceShows, ReferenceWindowState, reference_window_fitted};
+pub use reference_window::{
+    ReferencePlace, ReferenceShows, ReferenceSize, ReferenceWindowState, reference_window_fitted, reference_window_size,
+};
 pub use scene3d::{ModelFile, ModelInfo, ModelLight, ModelTextureFile, SubmeshInfo, Turntable, zip_model_name};
 pub use selection::{SelectionDisplay, SelectionJoin};
 pub use studio::{
