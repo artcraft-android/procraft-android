@@ -174,7 +174,7 @@ final class CanvasModel {
         didSet { applyFitInsets() }
     }
     /// The single touch gestures companion shows, and what a lone finger on the canvas does with it.
-    private(set) var singleTouchCompanion = false
+    var singleTouchCompanion = false
     var companionMode: CompanionMode?
     @ObservationIgnored var colorNames = false
     @ObservationIgnored var feedbackSounds = false
