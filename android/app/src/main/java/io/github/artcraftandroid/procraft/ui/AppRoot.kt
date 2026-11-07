@@ -371,7 +371,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
         message = { (w, l) ->
             when (w) {
                 CanvasViewModel.Blocked.LOCKED -> "“${l.name}” can't be changed while it is locked."
-                CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> hiddenMessage(l)
+                CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> hiddenMessage(l.name, vm.blockedBy)
                 CanvasViewModel.Blocked.EMPTY_GROUP -> "“${l.name}” holds no layers to change."
                 CanvasViewModel.Blocked.GROUP -> "“${l.name}” is a group: choose one of its layers to paint on."
                 CanvasViewModel.Blocked.MESH_HIDDEN -> "“${vm.meantMeshName()}” can't be painted while it is hidden."
@@ -396,13 +396,15 @@ private fun BlockedDialog(vm: CanvasViewModel) {
     )
 }
 
-/** Why a layer or group that doesn't show takes no change: hidden itself, left out by solo, or in what is hidden. */
-private fun hiddenMessage(l: LayerInfo): String = when {
-    !l.visible -> "“${l.name}” can't be changed while it is hidden."
-    l.soloedOut -> "“${l.name}” can't be changed while another layer is shown alone."
-    l.kind == io.github.artcraftandroid.procraft.core.LayerType.MASK -> "“${l.name}” can't be changed while its layer is hidden."
-    else -> "“${l.name}” can't be changed while its group is hidden."
-}
+/** Why layer or group [name], which would hide a change, takes none, by what hides it ([by]). */
+private fun hiddenMessage(name: String, by: io.github.artcraftandroid.procraft.core.HiddenBy?): String =
+    "“$name” can't be changed while " + when (by) {
+        io.github.artcraftandroid.procraft.core.HiddenBy.MASK_LAYER -> "its layer is hidden."
+        io.github.artcraftandroid.procraft.core.HiddenBy.GROUP -> "its group is hidden."
+        io.github.artcraftandroid.procraft.core.HiddenBy.INSIDE -> "a layer in it is hidden."
+        io.github.artcraftandroid.procraft.core.HiddenBy.SOLO -> "another layer is shown alone."
+        io.github.artcraftandroid.procraft.core.HiddenBy.ITSELF, null -> "it is hidden."
+    }
 
 /** A layer a texture set's meshes share is about to go from all of them. */
 @Composable

@@ -123,7 +123,7 @@ pub use history::ColourHistory;
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
 pub use keys::{KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
 pub use layers::{
-    BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
+    BlendModeInfo, Blocked, HiddenBy, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
     brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for, set_resident_budget,
 };
 pub use liquify::liquify_reach;
@@ -1481,7 +1481,7 @@ impl CanvasSession {
         // locked layers, those that don't show (hidden themselves or by a group, or left out
         // while another is shown alone), groups and text layers take no paint
         if st.doc.is_locked(current)
-            || !st.doc.in_picture(current)
+            || st.doc.unseen(current).is_some()
             || st
                 .doc
                 .layer(current)

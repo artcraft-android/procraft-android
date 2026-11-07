@@ -4180,6 +4180,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var blocked by mutableStateOf<Pair<Blocked, LayerInfo>?>(null)
         private set
 
+    /** What hides the current layer, while [blocked] says it is hidden. */
+    var blockedBy by mutableStateOf<io.github.artcraftandroid.procraft.core.HiddenBy?>(null)
+        private set
+
     /**
      * Whether the current layer takes a change (a stroke, a transform, an adjustment, clearing,
      * cutting); if not (locked, hidden, or an empty group), a dialog says why. What was tried is
@@ -4198,6 +4202,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             io.github.artcraftandroid.procraft.core.Blocked.GROUP -> Blocked.GROUP
             null -> return true
         }
+        blockedBy = session?.hiddenBy()
         blocked = why to l
         return false
     }
@@ -4209,8 +4214,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (fix) {
             when (why) {
                 Blocked.LOCKED -> toggleLocked(l)
-                // shown, whatever hid it (its box, a group's, another layer shown alone)
-                Blocked.HIDDEN, Blocked.GROUP_HIDDEN -> layerChange { it.showLayer(l.id) }
+                // its own box ticked (what else hides it stays)
+                Blocked.HIDDEN, Blocked.GROUP_HIDDEN -> {
+                    var said: String? = null
+                    layerChange { said = it.showLayer(l.id) }
+                    said?.let { showNotice(it) }
+                }
                 Blocked.EMPTY_GROUP, Blocked.GROUP -> Unit
                 Blocked.MESH_HIDDEN, Blocked.MESH_LOCKED -> {
                     session?.freeMeantMeshes()
