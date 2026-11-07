@@ -19,6 +19,7 @@ mod animation;
 mod brush_files;
 mod brush_library;
 mod brushes;
+mod bundled;
 mod clipboard;
 mod colour;
 mod colour_drag;

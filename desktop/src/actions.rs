@@ -1621,6 +1621,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn what_the_app_comes_with_has_a_card_each_off_as_any_import_and_removed_stays_removed() {
+        let (mut page, dir) = with_store("bundled");
+        let store = dir.to_string_lossy().into_owned();
+        page.prefs.plugins = Plugins::with_bundled(store.clone());
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        let list = page.list();
+        assert!(list.len() >= 8, "{list:?}");
+        for plugin in &list {
+            assert!(plugin.source == PluginSource::File && !plugin.on, "{plugin:?}");
+            assert!(matches!(card_rows(plugin)[..], [CardRow::TurnOn, CardRow::Remove]), "{}", plugin.name);
+        }
+        // its first row turns it on, and off again
+        let at = page.on_row(0, 1.0);
+        assert!(page.tap(at));
+        assert!(page.list()[0].on);
+        let at = page.on_row(0, 1.0);
+        assert!(page.tap(at));
+        assert!(!page.list()[0].on);
+        // its last removes it, and it isn't added again on the next start
+        let at = page.on_row(0, 0.0);
+        assert!(page.tap(at));
+        let gone = |plugins: &Plugins| plugins.plugins().iter().all(|p| p.id != list[0].id);
+        assert!(gone(&page.prefs.plugins));
+        let next = Plugins::with_bundled(store);
+        assert!(gone(&next));
+        assert_eq!(next.plugins().len(), list.len() - 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A card for a plugin the app has no code for: it shows, and a tap on it changes nothing.
     #[test]
     fn a_plugin_nothing_answers_to_draws_and_does_nothing() {
