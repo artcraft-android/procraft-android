@@ -1073,6 +1073,42 @@ impl Document {
         id
     }
 
+    /// Adds an empty layer at the root level (outside any group), placed directly above
+    /// the current layer's top-level group or frame, and makes it current.
+    pub fn add_root_layer(&mut self) -> LayerId {
+        let name = format!("Layer {}", self.layers.len() + 1);
+        let at = match self.layer(self.current) {
+            Some(c) => {
+                let mut top_id = if c.kind == LayerKind::Mask { c.parent.unwrap_or(c.id) } else { c.id };
+                // Walk up to the top-level root layer or group
+                for _ in 0..64 {
+                    match self.group_of(top_id) {
+                        Some(g) => top_id = g,
+                        None => break,
+                    }
+                }
+                // If it has a mask, place above the mask
+                let top = self.mask_of(top_id).unwrap_or(top_id);
+                // Also place above any clipping layers chained directly above it at the root level
+                let mut idx = self.index_of(top).map_or(self.layers.len(), |i| i + 1);
+                while let Some(next) = self.layers.get(idx) {
+                    if next.parent == Some(top_id) || next.clipped {
+                        idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+                idx
+            }
+            None => self.layers.len(),
+        };
+        let layer = self.blank(LayerKind::Paint, name, None);
+        let id = layer.id;
+        self.layers.insert(at.min(self.layers.len()), layer);
+        self.current = id;
+        id
+    }
+
     /// The mask of layer `id`, if it has one.
     pub fn mask_of(&self, id: LayerId) -> Option<LayerId> {
         let at = self.index_of(id)?;

@@ -125,7 +125,9 @@ fun BoxScope.AnimationBar(vm: CanvasViewModel) {
                         vm.frameOptionsOpen = false
                     }
                     Spacer(Modifier.width(23.dp))
-                    BarText(if (pages) "New Page" else "Add Frame", Modifier) { vm.addFrame() }
+                    BarText(if (pages) "New Page" else "Add Frame", Modifier) {
+                        if (pages) vm.addPage() else vm.addFrame()
+                    }
                 }
                 Timeline(vm, barWidth - 24.dp, Modifier.offset(x = 12.dp, y = 42.dp))
             }

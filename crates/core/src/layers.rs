@@ -399,6 +399,12 @@ impl CanvasSession {
         self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
     }
 
+    /// A new empty root-level layer (outside any group), placed above the active
+    /// root frame/group; made current.
+    pub fn add_root_layer(&self) -> u64 {
+        self.change("new layer", |d| d.has_room(1).then(|| d.add_root_layer().0)).unwrap_or(0)
+    }
+
     /// Makes `id` the layer painting goes to, and the only one chosen (no picks): an undo step,
     /// unless nothing changes.
     pub fn select_layer(&self, id: u64) -> bool {
