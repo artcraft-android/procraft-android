@@ -145,7 +145,7 @@ fun DropDot(vm: CanvasViewModel) {
         }
         val long = size * (1f + 0.55f * pull)
         val wide = size * (1f - 0.22f * pull)
-        val turn = Math.toDegrees(kotlin.math.atan2((at - from).y, (at - from).x)).toFloat()
+        val turn = Math.toDegrees(kotlin.math.atan2((at - from).y, (at - from).x).toDouble()).toFloat()
         rotate(turn, pivot = at) {
             drawOval(ink, topLeft = at - Offset(long, wide), size = Size(long * 2f, wide * 2f))
         }
