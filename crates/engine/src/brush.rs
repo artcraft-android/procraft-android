@@ -685,8 +685,8 @@ impl Brush {
         Brush {
             name: "Round Pen".to_owned(),
             spacing: 0.08,
-            streamline: 0.35,
-            pressure_smoothing: 0.2,
+            streamline: 0.015,
+            pressure_smoothing: 0.0,
             hardness: 0.92,
             min_size: 1.0,
             max_size: 120.0,

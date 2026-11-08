@@ -356,7 +356,7 @@ fn graphite() -> Brush {
         "Graphite",
         Brush {
             spacing: 0.06,
-            streamline: 0.1,
+            streamline: 0.0,
             hardness: 0.7,
             min_size: 1.0,
             max_size: 24.0,
@@ -426,7 +426,7 @@ fn fine_liner() -> Brush {
     named(
         "Fine Liner",
         Brush {
-            streamline: 0.5,
+            streamline: 0.062,
             hardness: 0.97,
             max_size: 30.0,
             pressure_size: 0.15,
@@ -441,7 +441,7 @@ fn brush_pen() -> Brush {
     named(
         "Brush Pen",
         Brush {
-            streamline: 0.45,
+            streamline: 0.67,
             max_size: 80.0,
             pressure_size: 0.95,
             pressure_curve: soft_curve(),
@@ -457,7 +457,7 @@ fn round_brush() -> Brush {
         "Round Brush",
         Brush {
             spacing: 0.05,
-            streamline: 0.2,
+            streamline: 0.0,
             hardness: 0.6,
             max_size: 160.0,
             flow: 0.35,
@@ -474,7 +474,7 @@ fn flat_brush() -> Brush {
         "Flat Brush",
         Brush {
             spacing: 0.03,
-            streamline: 0.2,
+            streamline: 0.0,
             max_size: 160.0,
             flow: 0.9,
             pressure_size: 0.4,
@@ -545,7 +545,7 @@ fn charcoal_stick() -> Brush {
         "Charcoal Stick",
         Brush {
             spacing: 0.08,
-            streamline: 0.1,
+            streamline: 0.0,
             max_size: 90.0,
             flow: 0.6,
             pressure_size: 0.4,
@@ -686,7 +686,7 @@ fn sketch_pen() -> Brush {
     named(
         "Sketch Pen",
         Brush {
-            streamline: 0.25,
+            streamline: 0.0,
             hardness: 0.92,
             max_size: 14.0,
             pressure_size: 0.5,
@@ -703,7 +703,7 @@ fn dip_pen() -> Brush {
     named(
         "Dip Pen",
         Brush {
-            streamline: 0.4,
+            streamline: 0.025,
             hardness: 0.98,
             min_size: 0.5,
             max_size: 40.0,
@@ -721,7 +721,7 @@ fn marker() -> Brush {
         "Marker",
         Brush {
             spacing: 0.03,
-            streamline: 0.2,
+            streamline: 0.0,
             hardness: 0.9,
             max_size: 70.0,
             flow: 0.55,
@@ -738,17 +738,21 @@ fn marker() -> Brush {
 }
 
 fn dry_ink() -> Brush {
-    named(
-        "Dry Ink",
-        Brush {
-            streamline: 0.3,
-            hardness: 0.95,
-            max_size: 50.0,
-            pressure_size: 0.7,
-            grain: paper(grain::COARSE, 220.0, 0.55),
-            pen_taper: Taper { start: 0.1, end: 0.2, size: 0.8, opacity: 0.0 },
-            ..Brush::round_pen()
-        },
+    with(
+        named(
+            "Dry Ink",
+            Brush {
+                streamline: 0.0,
+                pressure_smoothing: 0.2,
+                hardness: 0.95,
+                max_size: 50.0,
+                pressure_size: 0.7,
+                grain: paper(grain::COARSE, 220.0, 0.55),
+                pen_taper: Taper { start: 0.1, end: 0.2, size: 0.8, opacity: 0.0 },
+                ..Brush::round_pen()
+            },
+        ),
+        &[("stabilization", 0.302)],
     )
 }
 
@@ -777,7 +781,7 @@ fn gouache() -> Brush {
             "Gouache",
             Brush {
                 spacing: 0.04,
-                streamline: 0.2,
+                streamline: 0.0,
                 hardness: 0.75,
                 max_size: 140.0,
                 flow: 0.9,
@@ -936,7 +940,7 @@ fn chalk() -> Brush {
         "Chalk",
         Brush {
             spacing: 0.06,
-            streamline: 0.1,
+            streamline: 0.431,
             max_size: 80.0,
             flow: 0.75,
             pressure_size: 0.3,
@@ -955,6 +959,7 @@ fn soft_pastel() -> Brush {
     named(
         "Soft Pastel",
         Brush {
+            streamline: 0.0,
             max_size: 120.0,
             flow: 0.6,
             shape: Shape { image: Some(shape::PASTEL), randomise: true, size_jitter: 0.15, ..Shape::default() },
@@ -968,6 +973,7 @@ fn oil_pastel() -> Brush {
     named(
         "Oil Pastel",
         Brush {
+            streamline: 0.0,
             flow: 0.95,
             max_size: 90.0,
             grain: paper(grain::CRUMPLED, 180.0, 0.55),
@@ -981,6 +987,7 @@ fn wax_crayon() -> Brush {
     named(
         "Wax Crayon",
         Brush {
+            streamline: 0.0,
             hardness: 0.85,
             max_size: 40.0,
             flow: 0.9,
@@ -995,6 +1002,7 @@ fn conte() -> Brush {
     named(
         "Conté",
         Brush {
+            streamline: 0.0,
             max_size: 50.0,
             flow: 0.8,
             shape: Shape { image: Some(shape::SQUARE), roundness: 0.5, follow_azimuth: true, ..Shape::default() },
@@ -1015,7 +1023,7 @@ fn wet_wash() -> Brush {
             "Wet Wash",
             Brush {
                 spacing: 0.05,
-                streamline: 0.15,
+                streamline: 0.0,
                 hardness: 0.3,
                 max_size: 300.0,
                 flow: 0.85,
@@ -1097,7 +1105,7 @@ fn nib(name: &str, roundness: f32, angle: f32) -> Brush {
         name,
         Brush {
             spacing: 0.02,
-            streamline: 0.45,
+            streamline: 0.041,
             hardness: 1.0,
             max_size: 60.0,
             pressure_size: 0.35,
@@ -1122,7 +1130,7 @@ fn script_brush() -> Brush {
     named(
         "Script Brush",
         Brush {
-            streamline: 0.55,
+            streamline: 0.091,
             max_size: 70.0,
             pressure_size: 1.0,
             pressure_curve: firm_curve(),
@@ -1137,7 +1145,7 @@ fn monoline() -> Brush {
     named(
         "Monoline",
         Brush {
-            streamline: 0.65,
+            streamline: 0.661,
             hardness: 1.0,
             max_size: 30.0,
             pressure_size: 0.0,
@@ -1153,7 +1161,7 @@ fn pointed_nib() -> Brush {
     named(
         "Pointed Nib",
         Brush {
-            streamline: 0.5,
+            streamline: 0.062,
             min_size: 0.3,
             max_size: 36.0,
             pressure_size: 1.0,
@@ -1171,7 +1179,7 @@ fn spray_can() -> Brush {
         "Spray Can",
         Brush {
             spacing: 0.12,
-            streamline: 0.05,
+            streamline: 0.0,
             hardness: 0.5,
             max_size: 260.0,
             flow: 0.85,
@@ -1389,7 +1397,7 @@ fn smoke() -> Brush {
         "Smoke",
         Brush {
             spacing: 0.08,
-            streamline: 0.3,
+            streamline: 0.0,
             hardness: 0.0,
             max_size: 400.0,
             flow: 0.22,
@@ -1425,7 +1433,7 @@ fn light_trail() -> Brush {
             "Light Trail",
             Brush {
                 spacing: 0.03,
-                streamline: 0.5,
+                streamline: 0.062,
                 hardness: 0.0,
                 max_size: 120.0,
                 flow: 0.35,
@@ -1448,7 +1456,7 @@ fn glow() -> Brush {
             "Glow",
             Brush {
                 spacing: 0.05,
-                streamline: 0.2,
+                streamline: 0.0,
                 hardness: 0.0,
                 max_size: 500.0,
                 flow: 0.15,
@@ -1611,7 +1619,7 @@ fn ballpoint() -> Brush {
     named(
         "Ballpoint",
         Brush {
-            streamline: 0.2,
+            streamline: 0.0,
             hardness: 0.95,
             max_size: 7.0,
             flow: 0.85,
@@ -1630,7 +1638,7 @@ fn studio_ink() -> Brush {
     named(
         "Studio Ink",
         Brush {
-            streamline: 0.6,
+            streamline: 0.129,
             hardness: 1.0,
             max_size: 60.0,
             pressure_size: 0.9,
@@ -1645,7 +1653,7 @@ fn gel_pen() -> Brush {
     named(
         "Gel Pen",
         Brush {
-            streamline: 0.3,
+            streamline: 0.0,
             hardness: 0.97,
             max_size: 12.0,
             pressure_size: 0.2,
@@ -1664,7 +1672,7 @@ fn felt_tip() -> Brush {
         "Felt Tip",
         Brush {
             spacing: 0.04,
-            streamline: 0.25,
+            streamline: 0.0,
             hardness: 0.85,
             max_size: 24.0,
             flow: 0.75,
@@ -1692,6 +1700,7 @@ fn ink_bleed() -> Brush {
         named(
             "Ink Bleed",
             Brush {
+                streamline: 0.0,
                 hardness: 0.7,
                 max_size: 50.0,
                 pressure_size: 0.7,
@@ -1741,7 +1750,7 @@ fn rigger() -> Brush {
     named(
         "Rigger",
         Brush {
-            streamline: 0.4,
+            streamline: 0.025,
             hardness: 0.85,
             max_size: 16.0,
             flow: 0.9,
@@ -1937,7 +1946,7 @@ fn cell_wall() -> Brush {
 }
 
 fn marble() -> Brush {
-    texture_brush("Marble", grain::MARBLE, 600.0)
+    Brush { streamline: 0.0, ..texture_brush("Marble", grain::MARBLE, 600.0) }
 }
 
 fn pinstripe() -> Brush {
@@ -1966,6 +1975,7 @@ fn hard_pastel() -> Brush {
     named(
         "Hard Pastel",
         Brush {
+            streamline: 0.0,
             max_size: 60.0,
             flow: 0.8,
             shape: Shape { image: Some(shape::SQUARE), roundness: 0.6, follow_azimuth: true, ..Shape::default() },
@@ -1979,6 +1989,7 @@ fn chalk_pencil() -> Brush {
     named(
         "Chalk Pencil",
         Brush {
+            streamline: 0.0,
             hardness: 0.8,
             max_size: 18.0,
             flow: 0.85,
@@ -1993,6 +2004,7 @@ fn pastel_pencil() -> Brush {
     named(
         "Pastel Pencil",
         Brush {
+            streamline: 0.0,
             max_size: 26.0,
             shape: Shape { image: Some(shape::GRAINY_DISC), randomise: true, ..Shape::default() },
             grain: paper(grain::LINEN, 110.0, 0.7),
@@ -2005,6 +2017,7 @@ fn litho_crayon() -> Brush {
     named(
         "Litho Crayon",
         Brush {
+            streamline: 0.0,
             hardness: 0.9,
             max_size: 36.0,
             flow: 1.0,
@@ -2118,7 +2131,7 @@ fn felt_brush() -> Brush {
 }
 
 fn copperplate() -> Brush {
-    named("Copperplate", Brush { streamline: 0.6, min_size: 0.2, max_size: 28.0, ..pointed_nib() })
+    named("Copperplate", Brush { streamline: 0.129, min_size: 0.2, max_size: 28.0, ..pointed_nib() })
 }
 
 // Spray Paint
@@ -2194,7 +2207,7 @@ fn fur() -> Brush {
             "Fur",
             Brush {
                 spacing: 0.12,
-                streamline: 0.2,
+                streamline: 0.0,
                 max_size: 160.0,
                 flow: 0.9,
                 pressure_size: 0.4,
@@ -2283,7 +2296,7 @@ fn pixel_round() -> Brush {
 }
 
 fn pixel_line() -> Brush {
-    named("Pixel Line", Brush { max_size: 4.0, streamline: 0.5, ..pixel() })
+    named("Pixel Line", Brush { max_size: 4.0, streamline: 0.062, ..pixel() })
 }
 
 // ---- Elements ----
@@ -2317,7 +2330,7 @@ fn lightning() -> Brush {
             "Lightning",
             Brush {
                 spacing: 1.0,
-                streamline: 0.3,
+                streamline: 0.008,
                 max_size: 300.0,
                 pressure_size: 0.0,
                 pressure_opacity: 0.0,
@@ -2359,7 +2372,7 @@ fn cement() -> Brush {
 }
 
 fn grunge() -> Brush {
-    texture_brush("Grunge", grain::GRUNGE, 400.0)
+    Brush { streamline: 0.0, ..texture_brush("Grunge", grain::GRUNGE, 400.0) }
 }
 
 fn scratched_metal() -> Brush {
@@ -2380,7 +2393,7 @@ fn rivets() -> Brush {
         "Rivets",
         Brush {
             spacing: 2.2,
-            streamline: 0.4,
+            streamline: 0.025,
             hardness: 0.9,
             max_size: 60.0,
             pressure_size: 0.0,
@@ -2421,7 +2434,7 @@ fn hair() -> Brush {
             "Hair",
             Brush {
                 spacing: 0.04,
-                streamline: 0.5,
+                streamline: 0.062,
                 max_size: 120.0,
                 flow: 0.8,
                 pressure_size: 0.5,
@@ -2495,7 +2508,7 @@ fn speed_lines() -> Brush {
             "Speed Lines",
             Brush {
                 spacing: 0.6,
-                streamline: 0.5,
+                streamline: 0.062,
                 max_size: 300.0,
                 pressure_size: 0.0,
                 pressure_opacity: 0.0,
@@ -2519,7 +2532,7 @@ fn dot_trail() -> Brush {
         "Dot Trail",
         Brush {
             spacing: 1.6,
-            streamline: 0.5,
+            streamline: 0.062,
             hardness: 1.0,
             max_size: 50.0,
             pressure_size: 0.3,
@@ -2549,7 +2562,7 @@ fn soft_blender() -> Brush {
         "Soft Blender",
         Brush {
             spacing: 0.05,
-            streamline: 0.2,
+            streamline: 0.0,
             hardness: 0.0,
             max_size: 300.0,
             flow: 0.2,
@@ -2587,7 +2600,7 @@ fn fine_detail() -> Brush {
     named(
         "Fine Detail",
         Brush {
-            streamline: 0.3,
+            streamline: 0.008,
             hardness: 0.85,
             max_size: 12.0,
             flow: 0.9,
@@ -2638,11 +2651,20 @@ fn offset_print() -> Brush {
 // ---- Vintage ----
 
 fn worn_ink() -> Brush {
-    named("Worn Ink", Brush { grain: paper(grain::GRUNGE, 260.0, 0.7), ..dry_ink() })
+    with(
+        named(
+            "Worn Ink",
+            Brush { streamline: 0.008, pressure_smoothing: 0.0, grain: paper(grain::GRUNGE, 260.0, 0.7), ..dry_ink() },
+        ),
+        &[("stabilization", 0.0)],
+    )
 }
 
 fn letterpress() -> Brush {
-    named("Letterpress", Brush { hardness: 1.0, grain: paper(grain::SAND, 200.0, 0.5), ..monoline() })
+    named(
+        "Letterpress",
+        Brush { streamline: 0.177, hardness: 1.0, grain: paper(grain::SAND, 200.0, 0.5), ..monoline() },
+    )
 }
 
 fn old_paper() -> Brush {
@@ -2677,7 +2699,7 @@ fn neon() -> Brush {
             "Neon",
             Brush {
                 spacing: 0.04,
-                streamline: 0.5,
+                streamline: 0.062,
                 hardness: 0.0,
                 max_size: 80.0,
                 flow: 0.5,
@@ -2794,6 +2816,27 @@ mod tests {
                 assert_eq!(width_leaning(b, lean), upright, "{} at {lean} degrees", b.name);
             }
             assert!(width_leaning(b, 60.0) > upright * 1.5, "{}", b.name);
+        }
+    }
+
+    #[test]
+    fn sketching_and_painting_brushes_follow_the_pen_as_it_goes() {
+        let sets = library();
+        for set in sets.iter().filter(|s| s.name == "Sketching" || s.name == "Painting") {
+            for b in &set.brushes {
+                // (a fine rigger is let hold back a touch)
+                assert!(b.streamline <= 0.03, "{}: {}", b.name, b.streamline);
+                let others = (b.pressure_smoothing, b.setting("stabilization"), b.setting("motion_filtering"));
+                assert_eq!(others, (0.0, 0.0, 0.0), "{}", b.name);
+            }
+        }
+    }
+
+    #[test]
+    fn no_brush_smooths_more_than_the_pens_made_for_a_steady_line() {
+        for b in library().iter().flat_map(|s| &s.brushes) {
+            assert!(b.streamline <= 0.67, "{}: {}", b.name, b.streamline);
+            assert!(b.pressure_smoothing == 0.0 || b.name == "Dry Ink", "{}: {}", b.name, b.pressure_smoothing);
         }
     }
 
