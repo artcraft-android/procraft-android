@@ -611,7 +611,15 @@ impl Interface {
             self.popover_open = self.text.editing();
             return;
         }
-        let bar = crate::chrome::top_bar(ui, &mut self.look, info.tool, colour, self.colours.hsv[2], &lit);
+        let bar = crate::chrome::top_bar(
+            ui,
+            &mut self.look,
+            info.tool,
+            colour,
+            self.colours.hsv[2],
+            &lit,
+            self.drop.swatch_away(),
+        );
         let held = self.tool_hold(&ctx, session, &bar);
         match bar.pressed.filter(|_| !held) {
             Some(BarButton::Gallery) => self.actions.push(Action::Gallery),

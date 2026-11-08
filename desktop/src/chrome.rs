@@ -63,7 +63,16 @@ pub fn frost(glass: &mut Vec<f32>, rect: Rect, corner: f32, ppp: f32) {
 }
 
 /// The bar across the top of the canvas: artwork actions on the left, painting tools on the right.
-pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, brightness: f32, lit: &Lit) -> Bar {
+#[allow(clippy::too_many_arguments)]
+pub fn top_bar(
+    ui: &mut Ui,
+    look: &mut Look,
+    tool: ToolKind,
+    colour: Color32,
+    brightness: f32,
+    lit: &Lit,
+    away: bool,
+) -> Bar {
     let mut bar = Bar::default();
     let frame = egui::Frame::NONE.fill(argb(pc::BAR));
     egui::Panel::top("bar").exact_size(pc::BAR_HEIGHT).frame(frame).show(ui, |ui| {
@@ -124,14 +133,17 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
         let mut x = r.right() - pc::BAR_MARGIN - pc::BAR_BUTTON_WIDTH;
         let rect = button(x, pc::BAR_BUTTON_WIDTH);
         let colour_rect = rect;
-        ui.painter().circle_filled(rect.center(), pc::COLOR_DOT / 2.0, colour);
-        // ringed only where the colour would fade into the bar
-        if brightness < DARK_RING_BELOW {
-            ui.painter().circle_stroke(
-                rect.center(),
-                pc::COLOR_DOT / 2.0 - 0.5,
-                Stroke::new(1.0, argb(pc::COLOR_RING)),
-            );
+        // a dot pulled out of here is drawn by the drag instead, off the same frame as its other end
+        if !away {
+            ui.painter().circle_filled(rect.center(), pc::COLOR_DOT / 2.0, colour);
+            // ringed only where the colour would fade into the bar
+            if brightness < DARK_RING_BELOW {
+                ui.painter().circle_stroke(
+                    rect.center(),
+                    pc::COLOR_DOT / 2.0 - 0.5,
+                    Stroke::new(1.0, argb(pc::COLOR_RING)),
+                );
+            }
         }
         let tools = [
             (BarButton::Layers, &icons::LAYERS, lit.layers),

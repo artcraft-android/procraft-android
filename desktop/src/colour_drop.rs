@@ -61,6 +61,12 @@ pub enum Touch {
 struct Press {
     id: Id,
     origin: Pos2,
+    /// The middle of the swatch it came from, which is where the bar draws it and so where the drop
+    /// is drawn from - the press itself can land anywhere on it.
+    centre: Pos2,
+    /// It came out of the top bar's colour button rather than a palette, so the drop draws that
+    /// button's end as well as its own.
+    bar: bool,
     since: Instant,
     held: bool,
     dragging: bool,
@@ -141,8 +147,17 @@ impl ColourDrop {
             && response.is_pointer_button_down_on()
             && let Some(origin) = at
         {
-            self.press =
-                Some(Press { id, origin, since: Instant::now(), held: false, dragging: false, avoid, drag: None });
+            self.press = Some(Press {
+                id,
+                origin,
+                centre: rect.center(),
+                bar: !swatch,
+                since: Instant::now(),
+                held: false,
+                dragging: false,
+                avoid,
+                drag: None,
+            });
         }
         let press = self.press.as_mut().filter(|p| p.id == id)?;
         let at = at.unwrap_or(press.origin);
@@ -194,6 +209,7 @@ impl ColourDrop {
         }
         if at.distance(press.origin) > SLOP {
             press.dragging = true;
+            self.blob.start(press.centre);
             // a mouse or a pen: a little wobble still rests
             press.drag = Some(ColourDrag::new(at.x, at.y, ctx.input(|i| i.time) * 1000.0, true, self.threshold));
             self.poured = false;
@@ -295,6 +311,11 @@ impl ColourDrop {
         self.sliding = false;
     }
 
+    /// Whether the drag is drawing the bar's colour dot itself this frame, so the bar leaves it be.
+    pub fn swatch_away(&self) -> bool {
+        self.press.as_ref().is_some_and(|press| press.dragging && press.bar) || self.blob.swing.length() > HOME
+    }
+
     /// Draws the band hanging from `top` and the dragged colour's dot; keeps the touches filling
     /// with the colour (`current`, unless a swatch was dropped) while filling goes on.
     pub fn show(&mut self, ctx: &egui::Context, session: &CanvasSession, current: u32, top: f32) {
@@ -339,31 +360,39 @@ impl ColourDrop {
                 ctx.request_repaint();
             }
         }
-        let dragging_from = self.press.as_ref().filter(|p| p.dragging).map(|p| p.origin);
+        let dragging_from = self.press.as_ref().filter(|p| p.dragging).map(|p| (p.centre, p.bar));
         if let Some((at, rgb)) = self.dot {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("colour drop dot")));
             let colour = srgb(of_hex(rgb));
             match dragging_from {
-                Some(from) => {
-                    // pulled out of the button: its own dot at one end, and the colour at the other,
-                    // which starts at its full size and shrinks away as it is carried off
-                    if self.blob.last.is_none() {
-                        self.blob.start(from);
+                Some((from, bar)) => {
+                    // pulled out: both ends are drawn here, off this frame's finger, so their points
+                    // come to the same place - the bar is a frame behind whatever it is given
+                    // its radius, not its across: the colour never comes up bigger than the swatch
+                    let radius = pc::COLOR_DOT / 2.0;
+                    self.blob.step(from, at, radius, ctx.input(|i| i.time), bar);
+                    if bar {
+                        self.blob.paint_swatch(&painter, radius, colour);
+                        self.blob.paint(&painter, colour);
+                    } else {
+                        // a palette draws its own swatch and it does not bend, so no point here
+                        painter.circle_filled(at, self.blob.drawn, colour);
                     }
-                    let pull = ((from.distance(at) - 40.0) / 80.0).clamp(0.0, 1.0);
-                    // the button's end is 28 across, the colour's 60, both by the 1.3 the display's
-                    // own text size asks for; only the colour's shrinks as it is carried off
-                    let r0 = 28.0 * 1.3;
-                    let r1 = 60.0 * 1.3 * (1.0 - pull);
-                    let now = ctx.input(|i| i.time);
-                    self.blob.step(from, at, r0, r1, now);
-                    self.blob.paint(&painter, r0, r1, colour);
                     ctx.request_repaint();
                 }
                 None => {
                     painter.circle_filled(at, DOT / 2.0, colour);
                 }
             }
+        } else if self.blob.swing.length() > HOME {
+            // let go of while the swatch was still on its way after it, it finishes the way home on
+            // its own: the bar has stopped drawing it, so it cannot be dropped mid-journey
+            let now = ctx.input(|i| i.time);
+            self.blob.settle(self.blob.last.map_or(0.0, |was| ((now - was) as f32).clamp(0.0, 0.05)));
+            self.blob.last = Some(now);
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("colour drop dot")));
+            painter.circle_filled(self.blob.swatch_at(), pc::COLOR_DOT / 2.0, srgb(of_hex(current)));
+            ctx.request_repaint();
         }
         let out = ease(ctx.animate_bool_with_time(Id::unique("colour drop band"), self.band != Band::None, SLIDE));
         if out <= 0.0 {
@@ -441,22 +470,60 @@ impl ColourDrop {
     }
 }
 
-/// The colour pulled out of a button: the button's circle and a second one out along the pull, joined
-/// by a neck while the pull is short and coming apart when it is long, both of them wobbling.
+/// How far it can be pulled before the two let go of each other, as a share of the swatch's across.
+const REACH: f32 = 1.8;
+/// How far each point runs past the middle of the gap while the two are still close, as a share of
+/// its own size. Crossed like this they read as one body, not as two shapes meeting on a point.
+const OVERLAP: f32 = 0.65;
+/// How much of the pull, at its far end, the crossing takes to close up. Shorter than this and the
+/// crossing is at its fullest, so the two only come onto a point in the last stretch before parting.
+const CLOSING: f32 = 0.22;
+/// How far the swatch in the bar is dragged after the pointer while the two hold on, as a share of
+/// the gap between them, and the most it ever goes.
+const SWAY: f32 = 0.21;
+const SWAY_MAX: f32 = 14.0;
+/// Under this the swatch is back on the bar's own dot, which draws it again.
+const HOME: f32 = 0.3;
+/// How fast the colour has to be going, in points a second, before it is drawn right out of shape,
+/// and how far out of shape that draws it: that much shorter along the way it is going, and drawn
+/// out across it.
+const SPEED: f32 = 1800.0;
+const STRETCH: f32 = 0.35;
+/// How hard the colour is pulled after the pointer once it is free of the swatch, and how hard that
+/// pull is damped. Underdamped on purpose: whirled about, it swings wide of the pointer and settles
+/// back, where a plain follow would only ever ride round inside it.
+const SPRING: f32 = 256.0;
+const DAMPING: f32 = 10.0;
+/// What the dragged one is worth once they are apart, against the swatch's size.
+const SETTLED: f32 = 0.72;
+/// How thin it gets while it is still holding on.
+const THINNEST: f32 = 0.55;
+
+/// The colour pulled out of a button: the swatch itself, and the colour drawn out of it, each turned
+/// into a teardrop pointing at the other while they hold together, and back to circles once they part.
 struct Blob {
-    /// The pointer's end as it lags along behind it.
-    current: Pos2,
-    velocity: Vec2,
-    /// The two ends as they are drawn this frame.
+    /// Where the swatch sits when it is not being pulled after the pointer.
+    home: Pos2,
+    /// How far it is dragged off that, eased, so it springs back to it when the two let go.
+    swing: Vec2,
+    /// Where the swatch is.
     near: Pos2,
+    /// Where the colour is.
     far: Pos2,
-    /// How far the pull has gone, 0 where it began, 1 stretched as far as it goes.
-    spring: f32,
-    /// How far the two have parted, 1 being clean apart.
-    separation: f32,
-    /// The wobble's phase and how much of it there is.
-    jiggle: f32,
-    momentum: f32,
+    /// How far it has to be pulled before the two let go, which is also where the crossing between
+    /// them closes up to nothing.
+    reach: f32,
+    /// How much is left of them holding together: 1 together, 0 apart, between while they let go.
+    link: f32,
+    /// Whether they are still holding on, which is what keeps the colour from lagging behind.
+    holding: bool,
+    /// Its own velocity once it is free of the swatch, which is what gives it weight.
+    velocity: Vec2,
+    /// The way it is going, in radians, and how far that has drawn it out of shape.
+    heading: f32,
+    stretch: f32,
+    /// The dragged one's radius, eased.
+    drawn: f32,
     /// When it was last stepped, in seconds.
     last: Option<f64>,
 }
@@ -464,14 +531,17 @@ struct Blob {
 impl Default for Blob {
     fn default() -> Blob {
         Blob {
-            current: Pos2::ZERO,
-            velocity: vec2(0.0, 0.0),
+            home: Pos2::ZERO,
+            swing: Vec2::ZERO,
             near: Pos2::ZERO,
             far: Pos2::ZERO,
-            spring: 0.0,
-            separation: 0.0,
-            jiggle: 0.0,
-            momentum: 0.0,
+            reach: 0.0,
+            link: 1.0,
+            holding: true,
+            velocity: Vec2::ZERO,
+            heading: 0.0,
+            stretch: 0.0,
+            drawn: 0.0,
             last: None,
         }
     }
@@ -480,121 +550,156 @@ impl Default for Blob {
 impl Blob {
     /// Starts afresh at the button it is pulled out of.
     fn start(&mut self, at: Pos2) {
-        *self = Blob { current: at, near: at, far: at, ..Blob::default() };
+        *self = Blob { home: at, near: at, far: at, drawn: 0.0, ..Blob::default() };
     }
 
-    /// One frame of it, `now` in seconds.
-    fn step(&mut self, origin: Pos2, destination: Pos2, r0: f32, r1: f32, now: f64) {
+    /// One frame of it, `now` in seconds: how far it has been pulled, how much is left of the two
+    /// holding together, how big the dragged one is, and how far the swatch has been dragged after
+    /// the pointer.
+    fn step(&mut self, origin: Pos2, destination: Pos2, r0: f32, now: f64, sways: bool) {
         let dt = match self.last {
             Some(was) => ((now - was) as f32).clamp(0.0, 0.05),
             None => 0.0,
         };
         self.last = Some(now);
         let d = origin.distance(destination);
-        // how far the pull stretches the thing before the neck is at its worst
-        let len = (r0 + (r0 + r1) * 0.33).max(1.0);
-        let stretched = (d / len).min(1.0);
-        let (mut half, mut past) = ((d / (len * 2.0)).min(1.0), ((d - len * 2.0) / 250.0).clamp(0.0, 1.0));
-        let prev = self.spring;
-        if stretched - prev <= 0.0 {
-            // coming back in, the same terms the other way about
-            half = 1.0 - half;
-            past = 1.0 - past;
-        }
-        let rate = (prev * prev * half).max(prev * past);
-        let rate = (rate * 0.2).max(0.02);
-        let frame = dt * 120.0;
-        self.spring = (stretched * frame * rate + prev * (1.0 - frame * rate)).clamp(0.0, 1.0);
-        // near the end of the stretch the neck gives way, and the two part
-        self.separation = if self.spring > 0.9 {
-            let free = (1.0 - self.separation).max(0.0);
-            (self.separation + (frame * free).min(0.1)).clamp(0.0, 1.0)
-        } else if self.spring < 0.8 {
-            let keep = (frame * self.separation - 0.01).max(0.5);
-            (self.separation * keep).clamp(0.0, 1.0)
-        } else {
-            self.separation
+        let reach = r0 * 2.0 * REACH;
+        self.reach = reach;
+        // dragged a little after the pointer while the two hold on, and let go back home once they
+        // part, so it reads as the swatch in the bar being pulled out
+        let sway = match sways {
+            true => (destination - origin) * ((d * SWAY).min(SWAY_MAX) / d.max(0.001)) * self.link,
+            false => Vec2::ZERO,
         };
-        // how hard the pointer is swinging the colour about decides how much it wobbles
-        let swung = ((destination - self.current).length() / 20.0).min(1.0);
-        self.momentum = (swung * 0.005 + swung.max(self.momentum) * 0.995).clamp(0.0, 1.0);
-        self.jiggle += frame * (1.0 / 120.0) * self.momentum * 2.0;
-        // the pointer's end lags along behind the pointer
-        let follow = frame * 0.08;
-        self.velocity = (self.velocity * (1.0 - follow) + (destination - self.current) * follow) * 0.9;
-        self.current += self.velocity;
-        // the two ends drawn: the button's, and out along the pull as far as it has come
-        let along = (destination - origin).normalized() * (len * stretched);
-        let lean = (self.spring * std::f32::consts::PI).sin() * 0.1;
-        self.near = Pos2::new(
-            (origin.x + along.x) * lean + origin.x * (1.0 - lean),
-            (origin.y + along.y) * lean + origin.y * (1.0 - lean),
-        );
-        let give = self.spring.powf(1.5);
-        self.far =
-            Pos2::new(origin.x * (1.0 - give) + self.current.x * give, origin.y * (1.0 - give) + self.current.y * give);
+        self.swing += (sway - self.swing) * (dt * 12.0).clamp(0.0, 1.0);
+        self.near = origin + self.swing;
+        // where the colour is drawn: on the pointer while the two hold on, and after that a mass on
+        // the end of that pull, carrying its own velocity - so whirled about it swings wide of the
+        // pointer rather than riding round inside it
+        if self.holding {
+            self.far = destination;
+            self.velocity = Vec2::ZERO;
+        } else {
+            self.velocity += ((destination - self.far) * SPRING - self.velocity * DAMPING) * dt;
+            self.far += self.velocity * dt;
+        }
+        // the rest is measured from where the swatch and the colour actually are, so the two part
+        // when the gap as drawn reaches the length they can hold - which is the same gap that
+        // leaves their tips just meeting
+        let gap = self.near.distance(self.far);
+        let pulled = (gap / reach).clamp(0.0, 1.0);
+        // it thins as it is pulled, and comes up a little again once it is free, never as big as
+        // the swatch it came from
+        let wanted = if gap < reach { r0 * (1.0 - (1.0 - THINNEST) * pulled) } else { r0 * SETTLED };
+        self.drawn += (wanted - self.drawn) * (dt * 14.0).clamp(0.0, 1.0);
+        let link = if gap < reach { 1.0 } else { 0.0 };
+        // the point it had goes quickly once they part: what is left of it is a ball of liquid
+        let given_up = match link > 0.0 {
+            true => 18.0,
+            false => 42.0,
+        };
+        self.link += (link - self.link) * (dt * given_up).clamp(0.0, 1.0);
+        self.holding = gap < reach;
+        // free of the swatch it is a ball of liquid, squashed along the way it is going by how fast
+        // that is and drawn out across it - but only once its point has gone, so the shape it is
+        // already drawing does not jump when it changes
+        let speed = self.velocity.length();
+        let stretch = match self.holding || self.tail(self.drawn) > 0.05 {
+            true => 0.0,
+            false => (speed / SPEED).min(STRETCH),
+        };
+        self.stretch += (stretch - self.stretch) * (dt * 20.0).clamp(0.0, 1.0);
+        if speed > 1.0 {
+            let turn = (self.velocity.angle() - self.heading + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            self.heading += turn * (dt * 14.0).clamp(0.0, 1.0);
+        }
     }
 
-    fn paint(&self, painter: &egui::Painter, r0: f32, r1: f32, colour: Color32) {
-        let (near_r, far_r) = (r0 / 2.0, r1 / 2.0);
-        // how far apart the two ends have come, as a share of what the pull can reach
-        let reach = (r0 + (r0 + r1) * 0.33).max(1.0);
-        let apart = (self.near.distance(self.far) / reach).min(1.0);
-        let early = self.separation + (1.0 - self.separation) * ((apart - 0.75) / 0.25).clamp(0.0, 1.0);
-        let late = self.separation + (1.0 - self.separation) * (apart / 0.75).min(1.0);
-        let blend = (early + late) * 0.5;
-        let radius = near_r * (1.0 - blend) + blend * far_r;
-        let amp = self.momentum * 0.15 * (20.0 / r1.max(1.0));
-        // apart, they are two circles; while they hold on, one shape with a neck between. All three
-        // have to have given way, not just one: the stretch alone doesn't part them, the spring does.
-        if early.min(late).min(self.separation) >= 1.0 {
-            blob_circle(painter, self.near, near_r, self.jiggle, amp, colour);
-            blob_circle(painter, self.far, radius, self.jiggle, amp, colour);
-            return;
+    /// How far the end of `radius` is drawn out. It runs past the middle of the gap by more the
+    /// closer the two of them are, so near the swatch they cross into each other rather than meeting
+    /// on a point, and by nothing at all at the length where they let go - which is the only moment
+    /// the two points come onto each other exactly.
+    fn tail(&self, radius: f32) -> f32 {
+        let gap = self.near.distance(self.far);
+        let slack = ((1.0 - gap / self.reach.max(1.0)) / CLOSING).clamp(0.0, 1.0);
+        (gap * 0.5 - radius + radius * OVERLAP * slack).max(0.0) * self.link
+    }
+
+    /// The colour pulled out: its point back toward the swatch while they hold on, and a ball of
+    /// liquid drawn out of true once it is free of it.
+    fn paint(&self, painter: &egui::Painter, colour: Color32) {
+        let tail = self.tail(self.drawn);
+        match tail > 0.05 {
+            true => teardrop(painter, self.far, self.drawn, self.near, tail, colour),
+            false => squashed(painter, self.far, self.drawn, self.heading, self.stretch, colour),
         }
-        blob_circle(painter, self.near, near_r, self.jiggle, amp, colour);
-        let d = self.near.distance(self.far);
-        if d > 0.25 {
-            let perp = vec2(-(self.far - self.near).y, (self.far - self.near).x) / d;
-            // the neck between them: the two of them less as they are pulled, and gone once they have
-            // parted - widest at the circles and holding its width between, a collar rather than a waist
-            let give = 1.0 - early;
-            let half = give * (1.0 - late.powi(3)) * (near_r + radius) * 0.5;
-            if half > 0.15 {
-                const SAMPLES: usize = 12;
-                let mut mesh = egui::epaint::Mesh::default();
-                for i in 0..=SAMPLES {
-                    let t = i as f32 / SAMPLES as f32;
-                    let at = self.near.lerp(self.far, t);
-                    mesh.colored_vertex(at + perp * half, colour);
-                    mesh.colored_vertex(at - perp * half, colour);
-                    if let Some(last) = (i as u32).checked_sub(1) {
-                        let (lo, hi) = (last * 2, last * 2 + 2);
-                        mesh.add_triangle(lo, lo + 1, hi);
-                        mesh.add_triangle(lo + 1, hi + 1, hi);
-                    }
-                }
-                painter.add(egui::Shape::mesh(mesh));
-            }
-        }
-        blob_circle(painter, self.far, radius, self.jiggle, amp, colour);
+    }
+
+    /// The swatch it came out of, its point toward the colour. Drawn from here rather than by the
+    /// bar, which would be handing this frame's finger to a frame that has already gone.
+    fn paint_swatch(&self, painter: &egui::Painter, radius: f32, colour: Color32) {
+        teardrop(painter, self.near, radius, self.far, self.tail(radius), colour);
+    }
+
+    /// Takes the swatch the rest of the way home once no colour is out of it any more - it is let go
+    /// of mid-pull, so it still has some of the way to go.
+    fn settle(&mut self, dt: f32) {
+        self.swing *= 1.0 - (dt * 12.0).clamp(0.0, 1.0);
+    }
+
+    /// Where the swatch is drawn: off its own place while it is being pulled after, back on it after.
+    fn swatch_at(&self) -> Pos2 {
+        self.home + self.swing
     }
 }
 
-/// A circle drawn out of true, the way a drop of liquid is while it moves: squashed one way, drawn
-/// the other, at two different rates so it never settles into looking like a disc.
-fn blob_circle(painter: &egui::Painter, at: Pos2, radius: f32, phase: f32, amount: f32, colour: Color32) {
+/// A ball drawn out of true: that much shorter along `heading`, and drawn out across it, the way a
+/// drop of liquid is while it is being thrown about.
+fn squashed(painter: &egui::Painter, at: Pos2, radius: f32, heading: f32, stretch: f32, colour: Color32) {
     if radius <= 0.2 {
         return;
     }
-    let across = (1.0 - amount) + amount * (phase * 4.0 * std::f32::consts::PI).cos();
-    let down = (1.0 - amount) + amount * (phase * 3.0 * std::f32::consts::PI).sin();
-    const STEPS: usize = 32;
+    let (sin, cos) = heading.sin_cos();
+    let (along, across) = (radius * (1.0 - stretch * 0.7), radius * (1.0 + stretch));
+    const STEPS: usize = 48;
     let mut points = Vec::with_capacity(STEPS);
     for i in 0..STEPS {
-        let turn = i as f32 / STEPS as f32 * std::f32::consts::TAU;
-        let (s, c) = turn.sin_cos();
-        points.push(at + vec2(c * radius * across, s * radius * down));
+        let (s, c) = (std::f32::consts::TAU * (i as f32 / STEPS as f32)).sin_cos();
+        let (x, y) = (c * along, s * across);
+        points.push(at + vec2(x * cos - y * sin, x * sin + y * cos));
     }
+    painter.add(egui::Shape::convex_polygon(points, colour, Stroke::NONE));
+}
+
+/// A drop: the ball of `radius` at `at`, drawn out to a point `tail` beyond it toward `toward`. The
+/// point is where the two lines off the ball, run straight in to it, meet - so the outline comes to
+/// a corner there, and it is that corner that reads as a drop rather than a nose on a ball.
+fn teardrop(painter: &egui::Painter, at: Pos2, radius: f32, toward: Pos2, tail: f32, colour: Color32) {
+    if radius <= 0.2 {
+        return;
+    }
+    let off = toward - at;
+    let span = off.length();
+    // nothing drawn out of it, or nothing to draw it toward: just the ball
+    if span < 0.01 || tail <= 0.05 {
+        painter.circle_filled(at, radius, colour);
+        return;
+    }
+    let dir = off / span;
+    let out = radius + tail;
+    // how far round the ball the point is seen to sit, which is where its two lines touch
+    let edge = (radius / out).clamp(-1.0, 1.0).acos();
+    let (sin, cos) = dir.angle().sin_cos();
+    const STEPS: usize = 64;
+    let mut points = Vec::with_capacity(STEPS + 2);
+    // the ball from one of those lines round the far side to the other, then the point itself
+    for i in 0..=STEPS {
+        let a = edge + (std::f32::consts::TAU - 2.0 * edge) * (i as f32 / STEPS as f32);
+        let (s, c) = a.sin_cos();
+        points.push(at + vec2(c * cos - s * sin, c * sin + s * cos) * radius);
+    }
+    points.push(at + dir * out);
+    // ball and point together are convex, so it fills in one go, and smoothly along that outline
     painter.add(egui::Shape::convex_polygon(points, colour, Stroke::NONE));
 }
