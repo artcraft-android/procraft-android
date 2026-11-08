@@ -326,9 +326,12 @@ pub fn combine_modes() -> Vec<(u32, &'static str)> {
         B::Overlay,
         B::HardMix,
         B::Difference,
+        B::Subtract,
+        B::Divide,
     ]
     .iter()
     .map(|m| (m.id(), m.name()))
+    .chain([(GRAIN_LINEAR_HEIGHT, "Linear Height")])
     .collect()
 }
 
