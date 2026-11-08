@@ -1502,6 +1502,7 @@ fun ChromaticPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
 private fun QuickShapeKind.label() = when (this) {
     QuickShapeKind.LINE -> "Line"
     QuickShapeKind.POLYLINE -> "Polyline"
+    QuickShapeKind.CURVE -> "Curve"
     QuickShapeKind.ARC -> "Arc"
     QuickShapeKind.ELLIPSE -> "Ellipse"
     QuickShapeKind.CIRCLE -> "Circle"
@@ -1515,6 +1516,7 @@ private fun QuickShapeKind.label() = when (this) {
 private fun QuickShapeKind.icon() = when (this) {
     QuickShapeKind.LINE -> PcIcons.ShapeLine
     QuickShapeKind.POLYLINE -> PcIcons.ShapePolyline
+    QuickShapeKind.CURVE -> PcIcons.ShapeArc
     QuickShapeKind.ARC -> PcIcons.ShapeArc
     QuickShapeKind.ELLIPSE -> PcIcons.ShapeEllipse
     QuickShapeKind.CIRCLE -> PcIcons.ShapeCircle
