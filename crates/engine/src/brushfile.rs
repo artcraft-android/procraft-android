@@ -144,7 +144,7 @@ fn to_control(kept: Kept, v: f64) -> f32 {
 /// The controls kept one to one: the studio's key, the file's, and how.
 const PLAIN: &[(&str, &str, Kept)] = &[
     // stroke path and stabilization
-    ("spacing", "plotSpacing", Kept::Curve(2.0)),
+    ("spacing", "plotSpacing", Kept::Curve(crate::studio::SPACING_SPAN)),
     ("spacing_jitter", "plotSpacingJitter", Kept::Times(10.0)),
     ("spacing_version", "plotSpacingVersion", Kept::Whole),
     ("jitter_lateral", "plotJitter", Kept::Curve(3.0)),
@@ -926,16 +926,25 @@ mod tests {
 
     #[test]
     fn conversions_go_both_ways() {
-        for kept in
-            [Kept::Same, Kept::Curve(2.0), Kept::Curve(3.0), Kept::Times(10.0), Kept::Squared16, Kept::Complement]
-        {
+        for kept in [
+            Kept::Same,
+            Kept::Curve(2.0),
+            Kept::Curve(3.0),
+            Kept::Curve(crate::studio::SPACING_SPAN),
+            Kept::Times(10.0),
+            Kept::Squared16,
+            Kept::Complement,
+        ] {
             for c in [0.0f32, 0.17, 0.5, 1.0] {
                 let back = to_control(kept, to_file(kept, c).as_real().unwrap());
                 assert!((back - c).abs() < 1e-5, "{kept:?} {c} {back}");
             }
         }
-        // the studio's spacing and grain scale as the file keeps them
-        assert!((to_control(Kept::Curve(2.0), 0.042) - 0.1727).abs() < 1e-3);
+        // the studio's spacing and grain scale as the file keeps them: the file's spacing is the
+        // stamp gap less the studio's floor, so a wide file spacing stays wide
+        let spacing = Kept::Curve(crate::studio::SPACING_SPAN);
+        assert!((to_control(spacing, 0.266) - 0.341456).abs() < 1e-5);
+        assert!((to_file(spacing, to_control(spacing, 0.266)).as_real().unwrap() - 0.266).abs() < 1e-5);
         assert!((to_control(Kept::Squared16, 1.0) - 0.25).abs() < 1e-6);
     }
 
