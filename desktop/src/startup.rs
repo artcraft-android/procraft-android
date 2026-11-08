@@ -25,7 +25,7 @@
 //! where it can't start again, it says why it stopped (see [`stopped`]).
 
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,13 @@ static STOPPED: AtomicBool = AtomicBool::new(false);
 const ENDS_TOLD: bool = cfg!(windows);
 /// The log's file, let go before the app starts itself again (the new one's log takes its place).
 static LOG_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+/// When the window last showed a frame, and when its thread last answered the start's watch, ms
+/// after the app started (none yet: 0).
+static LAST_FRAME: AtomicU64 = AtomicU64::new(0);
+static LAST_ANSWER: AtomicU64 = AtomicU64::new(0);
+/// How often the start is logged while it isn't over, and for how long at most.
+const START_WATCH: Duration = Duration::from_secs(5);
+const START_WATCH_MOST: Duration = Duration::from_secs(10 * 60);
 /// When the app was started.
 static LAUNCHED: OnceLock<Instant> = OnceLock::new();
 
@@ -74,6 +81,10 @@ pub fn init() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         // a system font it can't read is left out; one line for each says nothing to act on
         .filter_module("fontdb", log::LevelFilter::Error)
+        // each line with the time since the app started: where a slow start spent it shows
+        .format(|out, record| {
+            writeln!(out, "[{:>7} ms {:<5} {}] {}", since_launch(), record.level(), record.target(), record.args())
+        })
         .target(env_logger::Target::Pipe(Box::new(Both)))
         .init();
     let before = std::panic::take_hook();
@@ -339,15 +350,58 @@ pub fn start_on_next(tried: usize) -> bool {
     spawn_again(Some(tried), false)
 }
 
-/// The window's first frame has shown (see [`gpu_prepared`]).
+/// The window has shown a frame: the first ends a part of the start (see [`gpu_prepared`]).
 pub fn gpu_shown() {
+    LAST_FRAME.store(since_launch().max(1), Ordering::Relaxed);
     let mut run = run_now();
     if !run.show() {
         return;
     }
-    let since = LAUNCHED.get().map_or(0, |t| t.elapsed().as_millis());
-    log::info!("the window's first frame shown, {since} ms after the app started");
+    log::info!("the window's first frame shown, {} ms after the app started", since_launch());
     keep(&mut run);
+}
+
+/// How long ago the app was started, ms.
+fn since_launch() -> u64 {
+    LAUNCHED.get().map_or(0, |t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Logs, every few seconds while the start isn't over, what it still waits for, whether the
+/// window's thread answers (`wake` asks it; see [`answered`]) and when it last showed a frame. A
+/// log that ends there tells a slow start (still waiting, the window answering) from a stuck one
+/// (the window not answering: it stands "not responding") and from one cut short (a crash logs
+/// itself; with nothing, the app was ended).
+pub fn watch_start(wake: winit::event_loop::EventLoopProxy<()>) {
+    let watch = std::thread::Builder::new().name("procraft-start-watch".to_owned()).spawn(move || {
+        let watching = Instant::now();
+        while watching.elapsed() < START_WATCH_MOST {
+            let asked = since_launch();
+            let _ = wake.send_event(());
+            std::thread::sleep(START_WATCH);
+            let Some(awaited) = run_now().awaited() else { return };
+            let now = since_launch();
+            let (answer, frame) = (LAST_ANSWER.load(Ordering::Relaxed), LAST_FRAME.load(Ordering::Relaxed));
+            let thread = if answer >= asked {
+                "the window answers".to_owned()
+            } else {
+                format!("the window hasn't answered for {} ms", now.saturating_sub(asked))
+            };
+            let shown = if frame == 0 {
+                "no frame shown yet".to_owned()
+            } else {
+                format!("its last frame {} ms ago", now.saturating_sub(frame))
+            };
+            log::info!("{} s after the app started, still {}; {thread}, {shown}", now / 1000, awaited.words());
+        }
+    });
+    if let Err(e) = watch {
+        log::warn!("the start's watch: {e}");
+    }
+}
+
+/// The window's thread has answered the start's watch (see [`watch_start`]).
+pub fn answered() {
+    LAST_ANSWER.store(since_launch().max(1), Ordering::Relaxed);
 }
 
 /// The canvases' pipelines are made, `fine` without a GPU error. Once the window's first frame
@@ -606,6 +660,21 @@ impl Run {
         Some(Record { backend, stage, drew: self.drew_on == Some(backend) })
     }
 
+    /// What the start still waits for; none once it is over, its pipelines failed or the app
+    /// ends (or before a backend is tried).
+    fn awaited(&self) -> Option<Awaited> {
+        if self.ended || self.failed {
+            return None;
+        }
+        match (self.backend, self.trying, self.shown, self.prepared) {
+            (None, Some(trying), ..) => Some(Awaited::Backend(trying)),
+            (None, None, ..) | (Some(_), _, true, true) => None,
+            (Some(_), _, false, false) => Some(Awaited::FrameAndPipelines),
+            (Some(_), _, false, true) => Some(Awaited::Frame),
+            (Some(_), _, true, false) => Some(Awaited::Pipelines),
+        }
+    }
+
     /// Whether a crash now would count against the backend (see [`Stage::counts`]).
     fn at_risk(&self, ends_told: bool) -> bool {
         self.record().is_some_and(|r| r.stage.counts(ends_told))
@@ -624,6 +693,33 @@ impl Run {
             Stage::Trying | Stage::Drawing => Stop::SayAllTried,
             _ if self.at_risk(ends_told) => Stop::SayAnother,
             _ => Stop::Say,
+        }
+    }
+}
+
+/// What the start still waits for (see [`Run::awaited`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Awaited {
+    /// A backend's device, the window's surface and the interface's pipelines, on this backend.
+    Backend(usize),
+    /// The window's first frame and the canvases' pipelines.
+    FrameAndPipelines,
+    /// The window's first frame.
+    Frame,
+    /// The canvases' pipelines.
+    Pipelines,
+}
+
+impl Awaited {
+    fn words(self) -> String {
+        match self {
+            Awaited::Backend(index) => format!(
+                "setting up graphics backend {index} ({}): its device, the window's surface, the interface's pipelines",
+                Gpu::backend_name(index)
+            ),
+            Awaited::FrameAndPipelines => "showing the window's first frame and making the canvases' pipelines".into(),
+            Awaited::Frame => "showing the window's first frame".into(),
+            Awaited::Pipelines => "making the canvases' pipelines".into(),
         }
     }
 }
@@ -1272,5 +1368,38 @@ mod tests {
         // before any backend is tried
         let (run, _) = Run::after("", &[0, 1], true);
         assert_eq!(run.stop(2, true), Stop::Say);
+    }
+
+    #[test]
+    fn the_start_s_watch_says_what_it_waits_for_until_the_start_is_over() {
+        use super::Awaited;
+        let (mut run, _) = Run::after("", &[0, 1], true);
+        assert_eq!(run.awaited(), None);
+        // a backend being set up, then the next after it failed with an error
+        run.try_backend(0);
+        assert_eq!(run.awaited(), Some(Awaited::Backend(0)));
+        run.try_backend(1);
+        assert_eq!(run.awaited(), Some(Awaited::Backend(1)));
+        // its device made: the first frame and the pipelines, then the one left
+        run.made(1);
+        assert_eq!(run.awaited(), Some(Awaited::FrameAndPipelines));
+        run.show();
+        assert_eq!(run.awaited(), Some(Awaited::Pipelines));
+        run.prepare(true);
+        assert_eq!(run.awaited(), None);
+        // the pipelines made before the first frame
+        let mut run = trying(2, 0);
+        run.made(0);
+        run.prepare(true);
+        assert_eq!(run.awaited(), Some(Awaited::Frame));
+        // pipelines that failed (the app starts again, or the next start takes the next), or the
+        // app ending: nothing more to wait for
+        let mut run = trying(2, 0);
+        run.made(0);
+        run.prepare(false);
+        assert_eq!(run.awaited(), None);
+        let mut run = trying(2, 0);
+        run.end();
+        assert_eq!(run.awaited(), None);
     }
 }

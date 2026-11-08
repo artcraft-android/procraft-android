@@ -101,11 +101,34 @@ pub struct Gpu {
     readbacks: Arc<std::sync::Mutex<Vec<wgpu::Buffer>>>,
 }
 
+/// `desc` with Direct3D 12's shader compiler chosen: the newer one if the app came with its
+/// `dxcompiler.dll` (beside it), else the one Windows has. Never one found elsewhere on the PATH, as
+/// wgpu would take: an older one there (an SDK's) can't make our shaders, and nothing draws.
+fn with_compiler(mut desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
+    desc.backend_options.dx12.shader_compiler = dx12_compiler();
+    desc
+}
+
+#[cfg(windows)]
+fn dx12_compiler() -> wgpu::Dx12Compiler {
+    let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("dxcompiler.dll")));
+    match beside.filter(|path| path.is_file()) {
+        Some(path) => wgpu::Dx12Compiler::DynamicDxc { dxc_path: path.to_string_lossy().into_owned() },
+        None => wgpu::Dx12Compiler::Fxc,
+    }
+}
+
+#[cfg(not(windows))]
+fn dx12_compiler() -> wgpu::Dx12Compiler {
+    wgpu::Dx12Compiler::Fxc
+}
+
 impl Gpu {
     /// A wgpu instance for this platform: Vulkan on Android, the native API elsewhere.
     pub fn instance() -> wgpu::Instance {
-        Gpu::instance_after(0)
-            .unwrap_or_else(|| wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()))
+        Gpu::instance_after(0).unwrap_or_else(|| {
+            wgpu::Instance::new(with_compiler(wgpu::InstanceDescriptor::new_without_display_handle()))
+        })
     }
 
     /// The backends a device is made from, best first: those `WGPU_BACKEND` names if it is set
@@ -147,7 +170,7 @@ impl Gpu {
     pub fn adapters(backends: wgpu::Backends) -> Vec<wgpu::AdapterInfo> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = backends;
-        let instance = wgpu::Instance::new(desc);
+        let instance = wgpu::Instance::new(with_compiler(desc));
         pollster::block_on(instance.enumerate_adapters(backends)).iter().map(wgpu::Adapter::get_info).collect()
     }
 
@@ -161,7 +184,7 @@ impl Gpu {
     pub fn instance_after(tries: usize) -> Option<wgpu::Instance> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = *Gpu::backends().get(tries)?;
-        Some(wgpu::Instance::new(desc))
+        Some(wgpu::Instance::new(with_compiler(desc)))
     }
 
     /// [`Gpu::instance_after`] for windows on `display`: OpenGL under Wayland and X11 can show
@@ -172,7 +195,7 @@ impl Gpu {
     ) -> Option<wgpu::Instance> {
         let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(display);
         desc.backends = *Gpu::backends().get(tries)?;
-        Some(wgpu::Instance::new(desc))
+        Some(wgpu::Instance::new(with_compiler(desc)))
     }
 
     /// Sends the writes queued so far to the device and waits for them, so the copies they were
@@ -250,6 +273,8 @@ impl Gpu {
     }
 
     fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, GpuError> {
+        // each stage timed in the log: on a slow driver, where a start stopped shows
+        let started = std::time::Instant::now();
         // every GPU the backend sees, for the log (a laptop's two, a driver's own name and version)
         for adapter in pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())) {
             let info = adapter.get_info();
@@ -262,6 +287,8 @@ impl Gpu {
                 info.driver_info
             );
         }
+        log::info!("the GPUs listed in {} ms", started.elapsed().as_millis());
+        let chosen = std::time::Instant::now();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
@@ -270,7 +297,14 @@ impl Gpu {
         }))
         .map_err(|e| GpuError::NoAdapter(e.to_string()))?;
         let info = adapter.get_info();
-        log::info!("GPU: {} ({:?}, driver {})", info.name, info.backend, info.driver_info);
+        log::info!(
+            "GPU: {} ({:?}, driver {}), chosen in {} ms",
+            info.name,
+            info.backend,
+            info.driver_info,
+            chosen.elapsed().as_millis()
+        );
+        let made = std::time::Instant::now();
         if keeps_textures_uncompressed(&info.name, info.backend) {
             UNCOMPRESSED.store(true, Ordering::Relaxed);
             log::info!("the canvas's textures kept uncompressed on this GPU");
@@ -288,6 +322,7 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
+        log::info!("the GPU's device made in {} ms", made.elapsed().as_millis());
         // new canvases and crops kept to what its textures can be
         procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
         log::info!(
@@ -379,8 +414,14 @@ impl Gpu {
     /// Makes the pipelines canvases draw with, and the brush images they hold, now, so the first
     /// canvas on this device is made at once (slow: off the main thread).
     pub fn prepare_canvases(&self) {
+        let started = std::time::Instant::now();
         let _ = self.canvas_pipelines();
+        let pipelines = started.elapsed().as_millis();
         procraft_engine::textures::prepare();
+        log::info!(
+            "canvases prepared: their pipelines in {pipelines} ms, the brushes' shapes and grains in {} ms",
+            started.elapsed().as_millis().saturating_sub(pipelines)
+        );
     }
 
     /// The pipelines canvases draw with, made by the first canvas on this device.
