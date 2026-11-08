@@ -6116,7 +6116,7 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
     // the preview left out: drawn again each time
     let read = |b: &[u8]| brushfile::read(b).map(|f| BrushFile { thumbnail: None, ..f });
     let mut failures = Vec::new();
-    let (mut brushes, mut grained) = (0, 0);
+    let (mut brushes, mut grained, mut tipped) = (0, 0, 0);
     for path in &files {
         let Some(s) = session(64, 64) else { return };
         let bytes = std::fs::read(path).unwrap();
@@ -6155,14 +6155,18 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
         }
         for i in 0..count {
             brushes += 1;
-            if s.shared
+            // whether it came with a grain, and a tip image (not our round one), of its own
+            let (grain, tip) = s
+                .shared
                 .lock()
                 .library
                 .get(set as usize)
                 .and_then(|l| l.brushes.get(i as usize))
-                .is_some_and(|b| b.grain.source.is_some())
-            {
-                grained += 1;
+                .map_or((false, false), |b| (b.grain.source.is_some(), b.shape.source.is_some()));
+            grained += usize::from(grain);
+            tipped += usize::from(tip);
+            if std::env::var_os("BRUSH_CORPUS_LIST").is_some() {
+                eprintln!("{} #{}: tip {tip}, grain {grain}", path.display(), i + 1);
             }
             let at = format!("{} #{}", path.display(), i + 1);
             let drawn =
@@ -6193,7 +6197,7 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
             }
         }
     }
-    eprintln!("{} files, {brushes} brushes, {grained} with a grain of their own", files.len());
+    eprintln!("{} files, {brushes} brushes, {tipped} with a tip and {grained} with a grain of their own", files.len());
     assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures.join("\n"));
 }
 
@@ -6351,6 +6355,55 @@ fn a_krita_preset_becomes_a_round_brush_with_its_settings() {
     // the texture as paper grain: 70 % strong, its 100 px tiles at half size
     assert!(b.grain.source.is_some());
     assert_eq!((b.grain.depth, b.grain.scale), (0.7, 50.0));
+}
+
+#[test]
+fn a_krita_preset_holding_its_pictures_keeps_its_tip_and_texture() {
+    let s = CanvasSession::new(64, 64);
+    // a GIMP brush 4 x 4, its left half painting, and a GIMP pattern 64 x 64, its left half white
+    let mut tip = Vec::new();
+    for v in [29u32, 2, 4, 4, 1] {
+        tip.extend_from_slice(&v.to_be_bytes());
+    }
+    tip.extend_from_slice(b"GIMP");
+    tip.extend_from_slice(&10u32.to_be_bytes());
+    tip.push(0);
+    tip.extend((0..16).map(|i| if i % 4 < 2 { 255 } else { 0 }));
+    let mut paper = Vec::new();
+    for v in [25u32, 1, 64, 64, 3] {
+        paper.extend_from_slice(&v.to_be_bytes());
+    }
+    paper.extend_from_slice(b"GPAT");
+    paper.push(0);
+    paper.extend((0..64 * 64).flat_map(|i| if i % 64 < 32 { [255; 3] } else { [0; 3] }));
+    let (tip, paper) = (procraft_engine::base64::encode(&tip), procraft_engine::base64::encode(&paper));
+    let xml = format!(
+        r#"<Preset paintopid="paintbrush" name="Gild" embedded_resources="2"><resources><resource md5sum="aa" filename="Tip.gbr" name="Tip" type="brushes"><![CDATA[{tip}]]></resource><resource md5sum="bb" filename="Grain.0001.pat" name="Grain" type="patterns"><![CDATA[{paper}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush md5sum="aa" type="gbr_brush" filename="Tip.gbr" useAutoSpacing="1"/>]]></param><param name="Texture/Pattern/Enabled"><![CDATA[true]]></param><param name="Texture/Pattern/Name"><![CDATA[Grain]]></param><param name="Texture/Pattern/PatternFileName"><![CDATA[Grain.0001.pat]]></param><param name="Texture/Pattern/PatternMD5Sum"><![CDATA[bb]]></param><param name="Texture/Pattern/Scale"><![CDATA[0.5]]></param></Preset>"#
+    );
+    let chunk = |kind: &[u8], data: &[u8]| {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&[0; 4]);
+        out
+    };
+    let mut kpp = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+    let mut text = b"preset\0".to_vec();
+    text.extend_from_slice(xml.as_bytes());
+    kpp.extend(chunk(b"tEXt", &text));
+    kpp.extend(chunk(b"IEND", &[]));
+    let set = s.import_other_brushes(kpp, "Krita".to_owned()).unwrap() as usize;
+    let st = s.shared.lock();
+    let b = &st.library[set].brushes[0];
+    assert_eq!(b.name, "Gild");
+    // its own tip, painting on the left and not the right
+    let shape = b.shape.source.as_ref().unwrap();
+    let row = procraft_engine::textures::TEXTURE_SIZE * 128;
+    assert!(shape.pixels[row + 40] == 255 && shape.pixels[row + 216] == 0);
+    // its texture as paper grain, its 64 px tiles at half size
+    assert!(b.grain.source.is_some());
+    assert_eq!(b.grain.scale, 32.0);
 }
 
 #[test]

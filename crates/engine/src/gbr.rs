@@ -1,7 +1,8 @@
 //! Reading GIMP brushes: a brush (`.gbr`, versions 1 and 2) is a header, its name and its image
 //! (grey, how much each pixel paints; or RGBA, whose alpha paints); a pipe (`.gih`) is a name
 //! line, a line of its parameters and its brushes one after another. Each image is read as the
-//! tips ABR files give. A generated brush (`.vbr`) is text: a shape and a few numbers.
+//! tips ABR files give. A generated brush (`.vbr`) is text: a shape and a few numbers. A pattern
+//! (`.pat`) is a header, its name and its pixels.
 
 use crate::abr::AbrTip;
 
@@ -15,7 +16,48 @@ pub fn read(bytes: &[u8]) -> Option<Vec<AbrTip>> {
     if let Some((tip, _)) = brush(bytes) {
         return Some(vec![tip]);
     }
-    pipe(bytes)
+    pipe(bytes, MOST_IN_PIPE)
+}
+
+/// The first tip in a GIMP brush or pipe file (a pipe's others not read); none if it is neither.
+pub fn read_first(bytes: &[u8]) -> Option<AbrTip> {
+    match brush(bytes) {
+        Some((tip, _)) => Some(tip),
+        None => pipe(bytes, 1)?.into_iter().next(),
+    }
+}
+
+/// A GIMP pattern (`.pat`) as grey, each pixel its lightness times its alpha; none if it isn't
+/// one. Its header: its size, version 1, the width, the height, bytes a pixel (grey, grey and
+/// alpha, RGB or RGBA) and `GPAT`; then its name up to the header's end, then the pixels.
+pub fn read_pattern(bytes: &[u8]) -> Option<AbrTip> {
+    let word = |at: usize| bytes.get(at..at + 4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes);
+    let header = word(0)? as usize;
+    let (version, width, height, depth) = (word(4)?, word(8)?, word(12)?, word(16)?);
+    if version != 1 || bytes.get(20..24)? != b"GPAT" || header < 24 {
+        return None;
+    }
+    if width == 0 || height == 0 || width > MOST_SIDE || height > MOST_SIDE || !(1..=4).contains(&depth) {
+        return None;
+    }
+    let name = bytes.get(24..header)?;
+    let name = String::from_utf8_lossy(name.split(|&b| b == 0).next().unwrap_or_default()).trim().to_owned();
+    let depth = depth as usize;
+    let image = bytes.get(header..header.checked_add(width as usize * height as usize * depth)?)?;
+    let pixels = image
+        .chunks_exact(depth)
+        .map(|px| {
+            let get = |k: usize| u32::from(px.get(k).copied().unwrap_or(0));
+            let (grey, alpha) = match depth {
+                1 => (get(0), 255),
+                2 => (get(0), get(1)),
+                3 => ((get(0) * 299 + get(1) * 587 + get(2) * 114) / 1000, 255),
+                _ => ((get(0) * 299 + get(1) * 587 + get(2) * 114) / 1000, get(3)),
+            };
+            (grey * alpha / 255) as u8
+        })
+        .collect();
+    Some(AbrTip { name, spacing: None, width, height, pixels })
 }
 
 /// A brush at the start of `bytes`, and how many bytes it takes.
@@ -151,8 +193,9 @@ pub fn generated_tip(g: &Generated) -> Option<AbrTip> {
     Some(AbrTip { name: g.name.clone(), spacing: Some(g.spacing), width: w as u32, height: h as u32, pixels })
 }
 
-/// A pipe: its name, a line starting with how many brushes it has, then the brushes.
-fn pipe(bytes: &[u8]) -> Option<Vec<AbrTip>> {
+/// A pipe: its name, a line starting with how many brushes it has, then the brushes (the first
+/// `most` of them read).
+fn pipe(bytes: &[u8], most: usize) -> Option<Vec<AbrTip>> {
     let first = bytes.iter().position(|&b| b == b'\n')?;
     let second = first + 1 + bytes.get(first + 1..)?.iter().position(|&b| b == b'\n')?;
     let name = String::from_utf8_lossy(bytes.get(..first)?).trim().to_owned();
@@ -160,7 +203,7 @@ fn pipe(bytes: &[u8]) -> Option<Vec<AbrTip>> {
     let count: usize = line.split_whitespace().next()?.parse().ok()?;
     let mut at = second + 1;
     let mut tips = Vec::new();
-    for n in 1..=count.min(MOST_IN_PIPE) {
+    for n in 1..=count.min(most) {
         let Some((mut tip, used)) = brush(bytes.get(at..)?) else { break };
         // the pipe's name for its only brush; numbered for those with none of their own
         if count == 1 {
@@ -222,6 +265,46 @@ mod tests {
         let names: Vec<&str> = tips.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["Leaves 1", "Leaf"]);
         assert_eq!(tips[1].spacing, Some(0.5));
+    }
+
+    #[test]
+    fn a_pipes_first_brush_reads_alone() {
+        let mut file = b"Leaves\n2 ncells:2\n".to_vec();
+        file.extend(gbr(2, "First", 3, 2, 1, 50));
+        file.extend(gbr(2, "Second", 3, 2, 1, 50));
+        assert_eq!(read_first(&file).unwrap().name, "First");
+        assert_eq!(read_first(&gbr(2, "Alone", 3, 2, 1, 50)).unwrap().name, "Alone");
+        assert!(read_first(b"nothing").is_none());
+    }
+
+    #[test]
+    fn a_pattern_reads_as_grey_by_its_lightness_and_alpha() {
+        let pattern = |depth: u32, pixels: &[u8]| {
+            let name = b"Paper\0";
+            let mut out = Vec::new();
+            for v in [24 + name.len() as u32, 1, 2, 1, depth] {
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+            out.extend_from_slice(b"GPAT");
+            out.extend_from_slice(name);
+            out.extend_from_slice(pixels);
+            out
+        };
+        let grey = read_pattern(&pattern(1, &[0, 200])).unwrap();
+        assert_eq!(
+            (grey.name.as_str(), grey.width, grey.height, grey.pixels.as_slice()),
+            ("Paper", 2, 1, &[0, 200][..])
+        );
+        // white and half seen through; pure red, its lightness
+        assert_eq!(read_pattern(&pattern(4, &[255, 255, 255, 128, 255, 0, 0, 255])).unwrap().pixels, [128, 76]);
+        assert_eq!(read_pattern(&pattern(2, &[200, 255, 200, 0])).unwrap().pixels, [200, 0]);
+        assert_eq!(read_pattern(&pattern(3, &[0, 0, 255, 10, 10, 10])).unwrap().pixels, [29, 10]);
+        // too short, or not a pattern
+        assert!(read_pattern(&pattern(4, &[1, 2, 3])).is_none());
+        assert!(read_pattern(&gbr(2, "Pencil", 3, 2, 1, 25)).is_none());
+        crate::damaged::survives("GIMP pattern", &pattern(3, &[1, 2, 3, 4, 5, 6]), |b| {
+            let _ = read_pattern(b);
+        });
     }
 
     #[test]

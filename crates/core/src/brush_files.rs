@@ -385,7 +385,8 @@ fn other_brushes(bytes: &[u8], name: String) -> Option<(String, Vec<Brush>)> {
     if let Some(brushes) = procraft_engine::csp::read(bytes) {
         return Some((name, each(&brushes, csp_brush)));
     }
-    // a preset alone has no images of its own: one it names comes round
+    // a preset alone has only the pictures it holds itself (newer ones do): one it only names (one
+    // that came with Krita) comes round
     let preset = krita::read_preset(bytes, &|_| None)?;
     Some((name, vec![krita_brush(&preset)]))
 }
@@ -564,7 +565,7 @@ fn tip_brush(t: &procraft_engine::abr::AbrTip) -> Brush {
 /// A brush of a Krita preset: its tip (round, or an image), spacing, angle, and what pressure
 /// changes.
 fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
-    use procraft_engine::krita::KritaTip;
+    use procraft_engine::krita::{KritaPicture, KritaTip};
     let image = match &k.tip {
         KritaTip::Round { .. } => None,
         KritaTip::Image(t) => Some(fitted(t)),
@@ -581,7 +582,7 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     };
     if let KritaTip::Round { hardness, roundness } = k.tip {
         b.hardness = hardness.clamp(0.0, 1.0);
-        b.shape.roundness = roundness.clamp(0.01, 1.0);
+        b.shape.roundness = roundness.clamp(0.05, 1.0);
     }
     if let Some(spacing) = k.spacing {
         b.spacing = Brush::spacing_within_reach(spacing);
@@ -590,6 +591,10 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     if k.follows {
         b.shape.follow = 1.0;
     }
+    if k.turns_at_random {
+        // a half turn either way: any angle
+        b.shape.scatter = 1.0;
+    }
     if !k.pressure_size {
         b.pressure_size = 0.0;
     }
@@ -597,7 +602,14 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
         b.pressure_opacity = 1.0;
     }
     if let Some(t) = &k.texture {
-        paper(&mut b, std::slice::from_ref(&t.png), t.invert, t.strength, t.scale);
+        let png = match &t.picture {
+            KritaPicture::Encoded(png) => png.clone(),
+            KritaPicture::Grey(g) => sized_gray_png(g.width, g.height, &g.pixels),
+        };
+        paper(&mut b, &[png], t.invert, t.strength, t.scale);
+    }
+    if !k.missing.is_empty() {
+        log::warn!("Krita preset \"{}\": {} not in its file, or not readable", k.name, k.missing.join(", "));
     }
     b
 }
