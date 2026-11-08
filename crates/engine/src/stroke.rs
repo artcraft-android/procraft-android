@@ -238,6 +238,11 @@ const SAMPLE_FRAMES: f32 = 0.25;
 /// counts for the time it covers, so they feel the same however fast the input comes.
 const PEN_RATE: f64 = 240.0;
 const FINGER_RATE: f64 = 120.0;
+/// Samples that come closer together than this (milliseconds) came in one batch, timed as they
+/// were handed over rather than as they were made (a desktop's pointer history): each stands for
+/// a sample at the rates above, and those streamline still holds share the time since the sample
+/// before them evenly, as the input they stand for came at a steady rate.
+const BATCHED_MS: f64 = 0.5;
 
 /// How much of where it was the path keeps at each point at the rates above, for an `amount` of
 /// streamline: strong from the first, as measured (a corner at 600 points a second is cut 18 at
@@ -728,8 +733,9 @@ pub struct StrokeBuilder {
     pressure: Option<f32>,
     smoothed: Option<PathPoint>,
     /// The points streamline hasn't settled yet, each with how long (milliseconds) it came after
-    /// the one before.
+    /// the one before; and how many of the newest came in one batch (see [`BATCHED_MS`]).
     streaming: VecDeque<(PathPoint, f64)>,
+    batch: usize,
     last_sample: Option<Sample>,
     /// The time of the sample being added (see [`Stamp::time_ms`]).
     now_ms: f64,
@@ -948,6 +954,7 @@ impl StrokeBuilder {
             pressure: None,
             smoothed: None,
             streaming: VecDeque::new(),
+            batch: 0,
             last_sample: None,
             now_ms: 0.0,
             head: None,
@@ -1238,10 +1245,15 @@ impl StrokeBuilder {
     fn push(&mut self, s: Sample, out: &mut Vec<Stamp>) {
         self.now_ms = s.time_ms;
         let pen = self.pointer.has_pressure();
-        // the samples at the tuned rate this one stands for (one if it came with the last's time)
+        // the samples at the tuned rate this one stands for (one if it came with the last's time,
+        // or in a batch with it)
         let interval = 1000.0 / if pen { PEN_RATE } else { FINGER_RATE };
         let since = self.last_sample.map_or(0.0, |last| (s.time_ms - last.time_ms).abs());
-        let steps = if since > 0.0 { (since / interval).min(MOST_STEPS) as f32 } else { 1.0 };
+        let batched = self.last_sample.is_some() && since < BATCHED_MS;
+        let steps = if batched || since <= 0.0 { 1.0 } else { (since / interval).min(MOST_STEPS) as f32 };
+        // frames of a 60 Hz display since the last sample (a sample's worth at the tuned rate, if
+        // it came with it)
+        let frames = if batched || since <= 0.0 { SAMPLE_FRAMES } else { (since * 0.06) as f32 };
         let raw = if pen { self.input.pressure_curve.eval(s.pressure.clamp(0.0, 1.0)).clamp(0.0, 1.0) } else { 1.0 };
         let smoothing = pressure_keep(together(self.brush.pressure_smoothing, self.input.pressure_smoothing));
         let pressure = match self.pressure {
@@ -1258,8 +1270,6 @@ impl StrokeBuilder {
         let curved = self.brush.pressures(pressure);
         let soft = match (self.last_sample, self.soft) {
             (Some(last), Some(before)) if !self.steady && !self.exact => {
-                let frames = ((s.time_ms - last.time_ms).abs() * 0.06) as f32;
-                let frames = if frames > 0.0 { frames } else { SAMPLE_FRAMES };
                 self.soften(curved, before, frames, s.pos.distance(last.pos))
             }
             _ => curved,
@@ -1267,9 +1277,6 @@ impl StrokeBuilder {
         self.soft = Some(soft);
         self.segments = self.segments.saturating_add(1);
         if let Some(last) = self.last_sample {
-            // frames of a 60 Hz display since the last sample
-            let frames = ((s.time_ms - last.time_ms).abs() * 0.06) as f32;
-            let frames = if frames > 0.0 { frames } else { SAMPLE_FRAMES };
             let moved = s.pos.distance(last.pos) * self.points_per_pixel / frames;
             let scale = self.input.speed_distance.clamp(0.25, 1.0);
             let over = (moved - SLOW * scale) / (SPAN * scale);
@@ -1285,7 +1292,8 @@ impl StrokeBuilder {
             self.weights = Some(weights.into());
         }
         let target = PathPoint { pos: s.pos, pressure, soft, tilt, azimuth, roll, speed: self.speed };
-        let dt = self.last_sample.map(|last| (s.time_ms - last.time_ms).clamp(0.5, 50.0));
+        // (none for the first sample; nothing of its own for one in a batch with the last)
+        let dt = self.last_sample.map(|last| if batched { 0.0 } else { (s.time_ms - last.time_ms).clamp(0.5, 50.0) });
         self.keep_time(s);
         if let Some(last) = self.last_sample {
             self.before_last = [self.before_last[1], Some(last.pos)];
@@ -1297,29 +1305,49 @@ impl StrokeBuilder {
             // reach of its average are known
             let times = self.history.iter().rev().map(|h| h.0);
             let gap = times.clone().next().zip(times.clone().nth(1)).map_or(0.0, |(now, before)| now - before);
-            self.averaged.add(target, (gap / interval).min(MOST_STEPS));
+            self.averaged.add(target, if batched { 1.0 } else { (gap / interval).min(MOST_STEPS) });
             self.average_to(self.averaged.count().saturating_sub(half), half, out);
             self.averaged.forget(half);
         } else {
-            self.go_on(target, dt, out);
+            self.go_on(target, dt, batched, out);
         }
         self.settle_start();
     }
 
-    /// Takes the path on to `target`, `dt` milliseconds after the last (none: it is the first),
-    /// streamlined: it goes into the window, and those it pushes out are settled.
-    fn go_on(&mut self, target: PathPoint, dt: Option<f64>, out: &mut Vec<Stamp>) {
+    /// Takes the path on to `target`, `dt` milliseconds after the last (none: it is the first;
+    /// `batched`, it came in a batch with the last, see [`BATCHED_MS`]), streamlined: it goes into
+    /// the window, and those it pushes out are settled.
+    fn go_on(&mut self, target: PathPoint, dt: Option<f64>, batched: bool, out: &mut Vec<Stamp>) {
         let Some(dt) = dt.filter(|_| !self.exact && self.brush.streamline > 0.0) else {
             self.smoothed = Some(target);
             self.path_to(target, out);
             return;
         };
         self.streaming.push_back((target, dt));
+        self.share_batch(batched);
         let mut age: f64 = self.streaming.iter().skip(1).map(|p| p.1).sum();
         while age >= self.stream_reach() {
             let Some((next, dt)) = self.streaming.pop_front() else { break };
             age -= self.streaming.front().map_or(0.0, |p| p.1);
             self.stream_to(next, dt, 0.0, out);
+        }
+    }
+
+    /// The newest point of streamline's window came in a batch with those before it, or began one:
+    /// the batch's points still in the window share the time since the point before it evenly
+    /// (each a sample at the tuned rate where there is none to share). Timed as one, all but the
+    /// first would hardly move the path and the first would take it the whole way, so the path
+    /// would go on in steps of a batch and bend sharply at each.
+    fn share_batch(&mut self, batched: bool) {
+        self.batch = if batched { self.batch.saturating_add(1) } else { 1 };
+        let n = self.batch.min(self.streaming.len());
+        if n < 2 {
+            return;
+        }
+        let total: f64 = self.streaming.iter().rev().take(n).map(|p| p.1).sum();
+        let each = if total > 0.0 { total / n as f64 } else { self.tuned_interval() };
+        for point in self.streaming.iter_mut().rev().take(n) {
+            point.1 = each;
         }
     }
 
@@ -1380,7 +1408,7 @@ impl StrokeBuilder {
                 }
                 if let Some(next) = self.averaged.at_lanes(i, sum) {
                     let next = self.still_where_it_was(next);
-                    self.go_on(next, Some(interval), out);
+                    self.go_on(next, Some(interval), false, out);
                 }
                 i += 1;
             }
@@ -1394,7 +1422,7 @@ impl StrokeBuilder {
             i += 1;
             if let Some(next) = next {
                 let next = self.still_where_it_was(next);
-                self.go_on(next, Some(interval), out);
+                self.go_on(next, Some(interval), false, out);
             }
         }
         self.averaged.settled = i;
@@ -2672,6 +2700,123 @@ mod tests {
         let at_share = |stamps: &Vec<Stamp>| stamps[stamps.len() * 7 / 8].center;
         let [a, b, c] = [at_share(&ends[0]), at_share(&ends[1]), at_share(&ends[2])];
         assert!(a.distance(b) < 12.0 && b.distance(c) < 12.0, "{a:?} {b:?} {c:?}");
+    }
+
+    /// Three quarters of a circle `radius` across, drawn in `ms` as `count` samples after the
+    /// first, handed over `batch` at a time each batch timed as one (a hundredth of a millisecond
+    /// apart, as a desktop stamps a pointer history as it hands it on).
+    fn c_curve(radius: f32, count: usize, ms: f64, batch: usize) -> Vec<Sample> {
+        let step = ms / count as f64;
+        (0..=count)
+            .map(|i| {
+                let a = 0.25 * PI as f32 + 1.5 * PI as f32 * i as f32 / count as f32;
+                let at = Vec2::new(300.0 + radius * a.cos(), 300.0 + radius * a.sin());
+                let time = (i / batch) as f64 * step * batch as f64 + 0.01 * (i % batch) as f64;
+                Sample::at(at, 1.0, time)
+            })
+            .collect()
+    }
+
+    /// The largest turn (degrees) between neighbouring stretches of the stamps' path, taken in
+    /// stretches of at least `least` canvas pixels.
+    fn sharpest_turn(stamps: &[Stamp], least: f32) -> f32 {
+        let mut path: Vec<Vec2> = Vec::new();
+        for s in stamps {
+            if path.last().is_none_or(|l| l.distance(s.center) >= least) {
+                path.push(s.center);
+            }
+        }
+        path.windows(3)
+            .map(|w| {
+                let (a, b) = (w[1] - w[0], w[2] - w[1]);
+                (a.x * b.y - a.y * b.x).atan2(a.x * b.x + a.y * b.y).abs().to_degrees()
+            })
+            .fold(0.0, f32::max)
+    }
+
+    /// `samples` drawn `batch` at a time, as a host hands them on.
+    fn drawn_in_batches(brush: Brush, pointer: Pointer, samples: &[Sample], batch: usize) -> Vec<Stamp> {
+        let mut b = StrokeBuilder::new(brush, 6.0, pointer);
+        for some in samples.chunks(batch) {
+            b.add(some);
+        }
+        b.finish()
+    }
+
+    #[test]
+    fn a_fast_stroke_curves_through_its_samples_with_no_corners() {
+        // a C drawn in 150 ms: 9 samples (a mouse at 60 Hz), and a pen's 36 handed over 4 a frame
+        for (pointer, count, batch) in [(Pointer::Mouse, 9, 1), (Pointer::Finger, 9, 1), (Pointer::Stylus, 36, 4)] {
+            let samples = c_curve(100.0, count, 150.0, batch);
+            let stamps = drawn_in_batches(plain(), pointer, &samples, batch);
+            // a 3 px stretch of the circle turns 1.7 degrees: the path bends no sharper than about that
+            let turn = sharpest_turn(&stamps, 3.0);
+            assert!(turn < 4.0, "{pointer:?}: turns {turn} degrees at once");
+            // and goes through every sample
+            for s in &samples {
+                let off = stamps.iter().map(|t| t.center.distance(s.pos)).fold(f32::MAX, f32::min);
+                assert!(off < 1.0, "{pointer:?}: {:?} is {off} from the stroke", s.pos);
+            }
+        }
+    }
+
+    #[test]
+    fn a_streamlined_stroke_handed_over_in_batches_bends_smoothly() {
+        // a pen's samples at 240 Hz, four a frame each frame timed as one: timed as they came, all
+        // but the first of each would hardly move the path, so it went on a frame at a time, turning
+        // 19 to 31 degrees at each
+        for streamline in [0.1, 0.35, 0.6] {
+            let brush = Brush { streamline, ..plain() };
+            let samples = c_curve(100.0, 36, 150.0, 4);
+            let turn = sharpest_turn(&drawn_in_batches(brush.clone(), Pointer::Stylus, &samples, 4), 3.0);
+            let even = sharpest_turn(&drawn_in_batches(brush, Pointer::Stylus, &c_curve(100.0, 36, 150.0, 1), 1), 3.0);
+            assert!(
+                turn < 7.0 && turn < even * 1.6,
+                "{streamline}: turns {turn} degrees at once ({even} timed evenly)"
+            );
+        }
+    }
+
+    #[test]
+    fn streamline_takes_samples_handed_over_together_as_if_each_came_in_its_turn() {
+        // the per-sample model at the tuned rates (as `streamline_comes_up_to_the_input_over_its_window`),
+        // the samples coming four at a time with one time each
+        for (pointer, ms, window) in [(Pointer::Finger, 1000.0 / 120.0, 6), (Pointer::Stylus, 1000.0 / 240.0, 12)] {
+            let curve: Vec<Vec2> = (0..160)
+                .map(|i| {
+                    let t = i as f32 * 0.03 * ms as f32 / 8.0;
+                    Vec2::new(300.0 + 200.0 * t.cos(), 300.0 + 200.0 * t.sin())
+                })
+                .collect();
+            let samples: Vec<Sample> = curve
+                .iter()
+                .enumerate()
+                .map(|(i, p)| Sample::at(*p, 1.0, (i / 4) as f64 * 4.0 * ms + 0.01 * (i % 4) as f64))
+                .collect();
+            let stamps = drawn_in_batches(Brush { streamline: 0.66, ..plain() }, pointer, &samples, 4);
+            let wanted = streamlined(&curve, 0.66, window);
+            for p in wanted.iter().skip(8) {
+                let off = stamps.iter().map(|s| s.center.distance(*p)).fold(f32::MAX, f32::min);
+                assert!(off < 1.5, "{pointer:?}: {p:?} is {off} from the stroke");
+            }
+        }
+    }
+
+    #[test]
+    fn with_no_smoothing_the_stroke_shows_and_ends_where_the_input_is() {
+        // a quick pen stroke at 120 Hz, no StreamLine, stabilisation or motion filtering
+        let samples = c_curve(100.0, 18, 150.0, 1);
+        let mut b = StrokeBuilder::new(plain(), 6.0, Pointer::Stylus);
+        for s in &samples {
+            b.add(std::slice::from_ref(s));
+            // what shows reaches the newest sample
+            let shown = b.preview_to_input(&[]);
+            let end = shown.last().map_or_else(|| b.stamps().last().unwrap().center, |t| t.center);
+            assert!(end.distance(s.pos) < 2.0, "shown up to {end:?}, the input at {:?}", s.pos);
+        }
+        // and the stroke ends on the last (a sample's step is 26 px here: within a stamp's gap)
+        let end = b.finish().last().unwrap().center;
+        assert!(end.distance(samples.last().unwrap().pos) < 2.0, "{end:?}");
     }
 
     #[test]
