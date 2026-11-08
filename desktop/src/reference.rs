@@ -368,7 +368,9 @@ impl Reference {
             };
             // and how it sits there, for the bars' glass
             let mut placed = None;
-            let touched = ui.interact(area, ui.scope_id().with("picture"), Sense::click_and_drag());
+            // (all but the window's top, where the grab line's strip moves the window)
+            let held = area.intersect(Rect::everything_below(window.top() + GRAB));
+            let touched = ui.interact(held, ui.scope_id().with("picture"), Sense::click_and_drag());
             if let Some(t) = shown {
                 let [w, h] = t.size().map(|v| v.max(1) as f32);
                 let sizes = ReferenceSizes {
@@ -447,7 +449,10 @@ impl Reference {
                     argb(TITLE),
                 );
                 // what's on a bar takes its touches, and the rest of it holds them off the picture
-                ui.interact(bar.intersect(window), ui.scope_id().with("top bar"), Sense::click_and_drag());
+                // (all but its top, where the grab line's strip moves the window: a press there is the
+                // strip's, not the bar's)
+                let held = bar.intersect(window).intersect(Rect::everything_below(window.top() + GRAB));
+                ui.interact(held, ui.scope_id().with("top bar"), Sense::click_and_drag());
                 let x_button =
                     Rect::from_center_size(pos2(bar.right() - 10.0 - 21.5, bar.center().y), vec2(43.0, 43.0));
                 painter.circle_filled(x_button.center(), 21.5, argb(CLOSE));
@@ -696,6 +701,56 @@ const SCROLL_ZOOM: f32 = 0.005;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where the window is after a drag by the mouse from `grab` (points from its top left) by `by`.
+    fn dragged_by(grab: Vec2, by: Vec2) -> Option<(Pos2, Pos2)> {
+        use egui::{Event, Modifiers, PointerButton, RawInput};
+        let session = CanvasSession::new(64, 64);
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let mut reference = Reference { on: true, ..Reference::default() };
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0));
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let mut started = None;
+        for step in 0..30 {
+            let from = reference.at.unwrap_or(Pos2::ZERO);
+            let events = match step {
+                5 => {
+                    started = reference.at;
+                    vec![Event::PointerMoved(from + grab)]
+                }
+                6 => vec![press(from + grab, true)],
+                7..=15 => {
+                    let start = started.unwrap_or(from) + grab;
+                    vec![Event::PointerMoved(start + by * (step - 6) as f32 / 9.0)]
+                }
+                16 => vec![press(started.unwrap_or(from) + grab + by, false)],
+                _ => Vec::new(),
+            };
+            let raw = RawInput {
+                screen_rect: Some(screen),
+                time: Some(f64::from(step) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                reference.show(ui.ctx(), &mut look, &session, Duration::ZERO);
+            });
+            output.textures_delta.clear();
+        }
+        Some((started?, reference.at?))
+    }
+
+    #[test]
+    fn the_window_moves_by_its_grab_line() {
+        let Some((from, to)) = dragged_by(vec2(100.0, 6.0), vec2(-200.0, -100.0)) else { return };
+        assert_eq!(to - from, vec2(-200.0, -100.0));
+    }
 
     #[test]
     fn the_window_shows_on_a_short_screen_whole_and_where_its_handles_reach() {
