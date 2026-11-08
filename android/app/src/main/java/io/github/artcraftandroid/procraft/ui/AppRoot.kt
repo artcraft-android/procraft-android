@@ -57,6 +57,7 @@ fun AppRoot(vm: CanvasViewModel) {
             ExportProgress(vm.exportShown, vm::cancelExport)
             ImportProgress(vm.importShown, vm::cancelImport)
             PluginOfferAlert(vm)
+            WrongBuildAlert(vm)
             return@ProCraftTheme
         }
         // back closes an open panel first, then leaves the artwork for the gallery

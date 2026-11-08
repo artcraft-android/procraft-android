@@ -469,6 +469,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         movedNotice = null
     }
 
+    /**
+     * The 32-bit build running on a tablet that runs 64-bit apps: the 64-bit build is the one for
+     * it (newer Android warns about 32-bit apps). Said once for each version.
+     */
+    var wrongBuildNotice by mutableStateOf(
+        !android.os.Process.is64Bit() && android.os.Build.SUPPORTED_64_BIT_ABIS.isNotEmpty() &&
+            interfacePrefs.getString(WRONG_BUILD_SAID, null) != appVersion(),
+    )
+        private set
+
+    fun wrongBuildNoticeRead() {
+        wrongBuildNotice = false
+        interfacePrefs.edit().putString(WRONG_BUILD_SAID, appVersion()).apply()
+    }
+
+    private fun appVersion(): String =
+        getApplication<Application>().let { a -> runCatching { a.packageManager.getPackageInfo(a.packageName, 0).versionName }.getOrNull() } ?: ""
+
     /** A plugin file waiting on the one screen that asks about it, and what it holds. */
     var pluginOffer by mutableStateOf<io.github.artcraftandroid.procraft.core.PluginOffer?>(null)
         private set
@@ -7580,6 +7598,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val FEEDBACK_SOUNDS = "feedback_sounds"
         const val SINGLE_TOUCH_COMPANION = "single_touch_companion"
         const val TAP_ASSISTANCE = "tap_assistance"
+
+        /** The version whose start last said the 32-bit build isn't the one for this tablet. */
+        const val WRONG_BUILD_SAID = "wrong_build_said"
 
         /**
          * The layered package's file extensions, and their names in the Share lists: ours, and the

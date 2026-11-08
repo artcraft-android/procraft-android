@@ -28,7 +28,7 @@
 </p>
 
 <p align="center">
-  <sub>From <a href="https://github.com/artcraft-android/procraft/releases">Releases</a>: Android tablets take the <code>.apk</code> (or Obtainium, for updates); Windows the <code>.msi</code> installer or the portable <code>.zip</code>; Linux the <code>.AppImage</code>, the <code>.deb</code> or the <code>.tar.gz</code> (videos and PDFs there use the system's <code>ffmpeg</code> and <code>poppler-utils</code>).</sub>
+  <sub>From <a href="https://github.com/artcraft-android/procraft/releases">Releases</a>: Android tablets take the <code>arm64.apk</code> (the <code>legacy-arm32.apk</code> is only for older 32-bit tablets), or Obtainium, for updates; Windows the <code>.msi</code> installer or the portable <code>.zip</code>; Linux the <code>.AppImage</code>, the <code>.deb</code> or the <code>.tar.gz</code> (videos and PDFs there use the system's <code>ffmpeg</code> and <code>poppler-utils</code>).</sub>
 </p>
 
 <p align="center">

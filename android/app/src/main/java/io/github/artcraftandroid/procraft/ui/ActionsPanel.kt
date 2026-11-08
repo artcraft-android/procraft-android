@@ -676,6 +676,36 @@ fun PluginOfferAlert(vm: CanvasViewModel) {
     )
 }
 
+/** The 32-bit build on a tablet that runs the 64-bit one: which to install instead, once a version. */
+@Composable
+fun WrongBuildAlert(vm: CanvasViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Alert(
+        Unit.takeIf { vm.wrongBuildNotice },
+        title = { "Use the 64-bit version" },
+        message = {
+            "This is ProCraft's 32-bit version, for older tablets. This tablet runs the 64-bit one, which newer " +
+                "Android expects: install the file ending in arm64.apk over this one, and your artworks stay."
+        },
+        action = "Releases",
+        cancel = "Later",
+        onCancel = vm::wrongBuildNoticeRead,
+        onAction = {
+            vm.wrongBuildNoticeRead()
+            runCatching {
+                context.startActivity(
+                    android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(RELEASES_PAGE))
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        },
+        destructive = false,
+    )
+}
+
+/** Where each release's files are. */
+private const val RELEASES_PAGE = "https://github.com/artcraft-android/procraft/releases/latest"
+
 /** Choices as rows of a rounded group, the chosen one a full blue row. */
 @Composable
 private fun ChoiceGroup(choices: List<String>, chosen: Int, onPick: (Int) -> Unit) {
