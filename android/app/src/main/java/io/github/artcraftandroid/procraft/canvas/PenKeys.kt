@@ -3,6 +3,25 @@ package io.github.artcraftandroid.procraft.canvas
 import android.view.InputDevice
 import android.view.KeyEvent
 
+/** The key Huawei's M-Pencil gives for a double-tap, twice over for each one. */
+internal const val PEN_DOUBLE_TAP_KEY = 718
+
+/** Presses of that key closer than this (ms) are one double-tap given twice. */
+private const val DOUBLE_TAP_GIVEN_TWICE_MS = 300L
+
+/** Tells a pen's next double-tap from the second press of the one just heard. */
+internal class PenDoubleTaps {
+    private var heardAt: Long? = null
+
+    /** Whether a press at [at] (ms) is a double-tap of its own. */
+    fun isNew(at: Long): Boolean {
+        val last = heardAt
+        if (last != null && at - last < DOUBLE_TAP_GIVEN_TWICE_MS) return false
+        heardAt = at
+        return true
+    }
+}
+
 /** A device named as a pen, as a word of its own ("Smart Pen", not "Open Keyboard"). */
 private val PEN_NAME = Regex("""\b(pen|stylus)\b""", RegexOption.IGNORE_CASE)
 
