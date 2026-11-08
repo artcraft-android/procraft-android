@@ -144,3 +144,77 @@ fn pressure_lays_more_paint_for_pencils_and_airbrushes() {
         assert!(heavy_ink > light_ink, "{name}: heavy pressure must lay more");
     }
 }
+
+#[test]
+fn a_brush_survives_the_round_trip_through_its_file() {
+    let Some(s) = session() else { return };
+    let lib = s.brush_library();
+    let set = lib.iter().find(|s| s.name == "Sketching").expect("Sketching");
+    let brush = set.brushes.iter().find(|b| b.name == "6B Pencil").expect("6B Pencil");
+    let keys: Vec<String> =
+        ["spacing", "hardness", "pressure_size", "pressure_opacity", "grain_depth", "grain_scale", "max_size", "flow"]
+            .iter()
+            .map(|k| (*k).to_owned())
+            .collect();
+    let values = |set: u32, index: u32| {
+        assert!(s.select_brush(set, index));
+        s.studio_begin();
+        let v = s.studio_settings(keys.clone());
+        s.studio_end(false);
+        v
+    };
+    let before = values(brush.set, brush.index);
+    let before_preview = s.brush_preview(brush.set, brush.index, 240, 60).expect("preview");
+    let bytes = s.brush_as_file(brush.set, brush.index).expect("the brush's file");
+    let imported = s.import_any_brushes(bytes, Some("6B Pencil.brush".to_owned()), 0).expect("the imported set");
+    let library = s.brush_library();
+    let brought = library.get(imported as usize).and_then(|set| set.brushes.iter().find(|b| b.name == "6B Pencil"));
+    let brought = brought.expect("the brush, imported");
+    let after = values(brought.set, brought.index);
+    assert_eq!(after, before, "settings kept: {keys:?}");
+    // the file brings its own preview picture; what must be the same is what the brush does, not
+    // the thumbnail it came with
+    let after_preview = s.brush_preview(brought.set, brought.index, 240, 60).expect("the imported preview");
+    assert_eq!((after_preview.width, after_preview.height), (before_preview.width, before_preview.height));
+    assert!(after_preview.rgba.iter().any(|&b| b > 0), "the imported brush still draws");
+}
+
+#[test]
+fn a_set_survives_the_round_trip_through_its_file() {
+    let Some(s) = session() else { return };
+    let lib = s.brush_library();
+    let set = lib.iter().find(|s| s.name == "Inking").expect("Inking");
+    let before: Vec<String> = set.brushes.iter().map(|b| b.name.clone()).collect();
+    let bytes = s.brush_set_as_file(set.brushes.first().expect("a brush").set).expect("the set's file");
+    let imported = s.import_any_brushes(bytes, Some("Inking.brushset".to_owned()), 0).expect("the imported set");
+    let library = s.brush_library();
+    let after: Vec<String> =
+        library.get(imported as usize).expect("the set, imported").brushes.iter().map(|b| b.name.clone()).collect();
+    assert_eq!(after, before, "the set's brushes, in order");
+}
+
+#[test]
+fn a_studio_setting_reaches_both_the_preview_and_the_canvas() {
+    let Some(s) = session() else { return };
+    let (set, index) = find(&s, "Painting", "Round Brush").expect("Round Brush");
+    let preview = |s: &CanvasSession| {
+        let p = s.brush_preview(set, index, 240, 60).expect("preview");
+        p.rgba.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3))
+    };
+    let set_flow = |v: f32| {
+        s.select_brush(set, index);
+        s.studio_begin();
+        s.set_studio_setting("flow".to_owned(), v);
+        s.studio_end(true);
+    };
+    set_flow(0.05);
+    let faint_preview = preview(&s);
+    s.clear_layer();
+    let (_, faint) = stroke(&s, "Painting", "Round Brush", 1.0);
+    set_flow(1.0);
+    let solid_preview = preview(&s);
+    s.clear_layer();
+    let (_, solid) = stroke(&s, "Painting", "Round Brush", 1.0);
+    assert_ne!(faint_preview, solid_preview, "the studio's change shows in the brush's preview");
+    assert!(solid > faint, "the studio's change shows on the canvas: {faint} then {solid}");
+}
