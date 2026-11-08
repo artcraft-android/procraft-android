@@ -143,7 +143,25 @@ impl Brush {
     /// room left: a dry brush in Uniform Blending (blending, building up by what is left) and the
     /// Normal blend mode. Stamps drawn "over" can't follow that rule pixel by pixel.
     pub fn laid_in_place(&self) -> bool {
-        self.setting("rendering_mode").round() == 4.0 && !self.mixes_wet() && self.setting("blend_mode").round() == 0.0
+        self.setting("rendering_mode").round() == 4.0
+            && !self.mixes_wet()
+            && self.setting("blend_mode").round() == 0.0
+            // impasto paint keeps a height of its own, which the stamps build up in the stroke's
+            // height texture: laid straight into the layer, they have nowhere to put it
+            && !self.uses_height()
+    }
+
+    /// Whether the brush paints impasto: its file gave it a height over a material of its own.
+    /// Brush files keep a height amount on every brush (Procreate's default is 0.5), and their
+    /// shapes are often only a silhouette or a soft tip: what tells a height brush apart is the
+    /// studio's Uniform Blending and a stock material grain, which the impasto brushes carry and
+    /// ordinary pencils and markers do not. A brush kept and read back keeps only the controls
+    /// that differ from the brush it came from, so the height amount itself may not be in
+    /// `extra`: the material and rendering stay with the brush instead.
+    pub fn uses_height(&self) -> bool {
+        self.setting("height_amount") > 0.0
+            && self.setting("rendering_mode").round() == 4.0
+            && self.stock.grain.is_some()
     }
 
     /// Whether the brush blends (Uniform or Intense Blending, mixing as it goes): its opacity
@@ -596,6 +614,38 @@ mod tests {
         // a spacing tighter than the floor shows as none
         b.spacing = 0.001;
         assert_eq!(b.setting("spacing"), 0.0);
+    }
+
+    #[test]
+    fn only_a_material_glaze_brush_paints_impasto() {
+        let mut b = Brush::round_pen();
+        b.set_setting("rendering_mode", 4.0);
+        b.set_setting("blend_mode", 0.0);
+        b.set_setting("height_amount", 0.5);
+        // a round tip has no height of its own: its paint lies flat, in place
+        assert!(!b.uses_height());
+        assert!(b.laid_in_place());
+        // a material grain with Uniform Blending is the impasto family; kept and read back the
+        // height amount may have gone (it equals the default), but the grain stays
+        b.stock.grain = Some(crate::brush::StockImage { name: "Brush-Preset-Grunge.jpg".to_owned(), inverted: false });
+        b.extra.remove("height_amount");
+        assert!(b.uses_height());
+        assert!(!b.laid_in_place());
+        // the same grain in another rendering mode is an ordinary textured brush: flat
+        b.set_setting("rendering_mode", 5.0);
+        assert!(!b.uses_height());
+        assert!(!b.laid_in_place());
+        // no height set: flat again
+        b.set_setting("rendering_mode", 4.0);
+        b.set_setting("height_amount", 0.0);
+        assert!(!b.uses_height());
+        assert!(b.laid_in_place());
+        // Uniform Blending without a material grain (a bundled paper grain) is flat too
+        b.set_setting("height_amount", 0.5);
+        b.stock.grain = None;
+        b.shape.source = crate::brush::Source::new(vec![255; crate::textures::TEXTURE_SIZE.pow(2)]);
+        assert!(!b.uses_height());
+        assert!(b.laid_in_place());
     }
 
     #[test]

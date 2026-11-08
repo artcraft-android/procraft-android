@@ -3491,3 +3491,109 @@ fn a_long_stroke_of_large_stamps_is_more_than_one_piece() {
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(canvas.pieces_sent(), sent);
 }
+
+#[test]
+fn a_height_brush_lights_its_paint_and_a_flat_one_does_not() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let n = TEXTURE_SIZE;
+    // a rolling height: its slopes face the light one way and another across the stamp
+    let pixels: Vec<u8> = (0..n * n)
+        .map(|i| {
+            let x = (i % n) as f32 / n as f32 * std::f32::consts::TAU * 3.0;
+            let y = (i / n) as f32 / n as f32 * std::f32::consts::TAU * 2.0;
+            let h = 0.35 + 0.65 * (0.5 + 0.5 * (x.sin() * y.cos()));
+            (h * 255.0) as u8
+        })
+        .collect();
+    let layer = |height: f32| {
+        let mut doc = Document::new(96, 96);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut brush = Brush::round_pen();
+        brush.shape.source = Source::new(pixels.clone());
+        brush.set_setting("rendering_mode", 4.0);
+        brush.set_setting("height_amount", height);
+        brush.set_setting("height_scale", 1.0);
+        brush.stock.grain =
+            Some(procraft_engine::brush::StockImage { name: "Brush-Preset-Grunge.jpg".to_owned(), inverted: false });
+        let mut s = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [0.8, 0.5, 0.3], 1.0, false);
+        canvas.use_sources(&gpu, &mut s, &brush);
+        canvas.begin_stroke(doc.current(), s);
+        canvas.add_stamps(&[dot(Vec2::new(48.0, 48.0), 40.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let spread = |px: &[u8]| {
+        let tones: Vec<i32> = px
+            .chunks(4)
+            .filter(|p| p[3] > 80)
+            .map(|p| {
+                let a = i32::from(p[3]);
+                (i32::from(p[0]) + i32::from(p[1]) + i32::from(p[2])) * 255 / (3 * a)
+            })
+            .collect();
+        assert!(!tones.is_empty(), "the stamp painted nothing");
+        tones.iter().max().unwrap() - tones.iter().min().unwrap()
+    };
+    assert!(spread(&layer(1.0)) > 24, "the height lights the paint");
+    assert!(spread(&layer(0.0)) <= 3, "a brush without height stays flat");
+}
+
+#[test]
+fn wet_pickup_drags_the_paint_under_a_stroke_into_its_colour() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let painted = |pickup: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        // a patch of orange, then a blue dab over it and another on the bare layer beside it
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.9, 0.4, 0.1], 1.0));
+        canvas.add_stamps(&[dot(Vec2::new(20.0, 32.0), 10.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let blue = StrokeStyle { pickup, ..StrokeStyle::new(StrokeTool::Paint, [0.1, 0.2, 0.9], 1.0) };
+        canvas.begin_stroke(doc.current(), blue);
+        canvas.add_stamps(&[dot(Vec2::new(20.0, 32.0), 8.0), dot(Vec2::new(50.0, 32.0), 8.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 64, 20, 32), pixel(&layer, 64, 50, 32))
+    };
+    let (over, bare) = painted(0.6);
+    // over the orange the blue takes some of it (more red and green than on bare paint)
+    assert!(over[0] > bare[0] + 30 && over[1] > bare[1] + 20, "{over:?} vs {bare:?}");
+    // with no pickup the same blue is the same blue either way
+    let (over, bare) = painted(0.0);
+    assert!(over[0].abs_diff(bare[0]) < 4 && over[1].abs_diff(bare[1]) < 4, "{over:?} vs {bare:?}");
+}
+
+#[test]
+fn wet_pickup_carries_colour_along_the_stroke() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let painted = |pickup: f32| {
+        let mut doc = Document::new(96, 96);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        // a vertical orange bar at x = 40
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.9, 0.4, 0.1], 1.0));
+        let bar: Vec<Stamp> = (4..92).step_by(4).map(|y| dot(Vec2::new(40.0, y as f32), 6.0)).collect();
+        canvas.add_stamps(&bar);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        // a wide blue stroke left to right: it should drag the orange past the bar
+        let blue = StrokeStyle { pickup, ..StrokeStyle::new(StrokeTool::Paint, [0.1, 0.2, 0.9], 1.0) };
+        canvas.begin_stroke(doc.current(), blue);
+        let across: Vec<Stamp> = (20..=76).step_by(2).map(|x| dot(Vec2::new(x as f32, 48.0), 20.0)).collect();
+        canvas.add_stamps(&across);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        // right of the orange bar, and left of it (where the paint behind is empty)
+        (pixel(&layer, 96, 50, 48), pixel(&layer, 96, 30, 48))
+    };
+    let (ahead, behind) = painted(0.6);
+    assert!(ahead[0] > behind[0] + 20, "orange is dragged forward: {ahead:?} vs {behind:?}");
+    let (ahead, behind) = painted(0.0);
+    assert!(ahead[0].abs_diff(behind[0]) < 4, "no pickup, no drag: {ahead:?} vs {behind:?}");
+}

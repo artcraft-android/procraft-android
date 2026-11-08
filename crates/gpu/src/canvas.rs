@@ -31,6 +31,9 @@ const SPARES_KEPT: usize = 1;
 const BOUNDS_STRETCH: u32 = 512;
 /// Half floats, so a stroke's build-up from many faint stamps doesn't band.
 const STROKE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Impasto paint's height at each canvas pixel: half floats, filled by the stamps and lit as the
+/// stroke is composited.
+const HEIGHT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Every draw gets its own slot in the uniform buffer (dynamic offsets are 256-byte aligned).
 const SLOT: u64 = 256;
 /// The Multiply blend mode's number.
@@ -39,7 +42,7 @@ const MULTIPLY_MODE: u32 = 1;
 const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
-const UNIFORM_SIZE: u64 = 128;
+const UNIFORM_SIZE: u64 = 160;
 const _: () = assert!(
     size_of::<LayerUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<StampUniform>() as u64 <= UNIFORM_SIZE
@@ -51,9 +54,9 @@ const _: () = assert!(
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 
 /// The vertex layout of a stamp instance (stroke stamps and the predicted tail).
-const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
+const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 13] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32x2, 6 => Float32x2, 7 => Float32x4,
-    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32
+    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32, 12 => Float32x2
 ];
 
 #[repr(C)]
@@ -139,6 +142,10 @@ pub struct StrokeStyle {
     /// Wet mix: how much of the colour under the brush mixes into its paint, 0..1; none paints
     /// plainly.
     pub wet_pull: Option<f32>,
+    /// Wet pickup: how much of the paint already on the layer is dragged into the stroke's own
+    /// colour, where the two meet, 0..1 (none at 0). Unlike `wet_pull` it works on a dry brush
+    /// whose file gave it wet accumulation, mixing the layer as it was before the stroke.
+    pub pickup: f32,
     /// Wet paint mixes with the layer as it was before the stroke (a glaze), not with the stroke
     /// as it goes (a blending mode).
     pub wet_from_before: bool,
@@ -195,6 +202,10 @@ pub struct StrokeStyle {
     /// Dry paint laid in place, each pixel taking paint only as far as it has room left (see
     /// `Brush::laid_in_place`).
     pub laid_in_place: bool,
+    /// Impasto: how strongly the paint's height is lit, 0..1 (none at 0).
+    pub height_amount: f32,
+    /// Impasto: how deep the paint's height runs, 0..1.
+    pub height_scale: f32,
 }
 
 impl StrokeStyle {
@@ -221,6 +232,7 @@ impl StrokeStyle {
     pub fn dry(self) -> StrokeStyle {
         StrokeStyle {
             wet_pull: None,
+            pickup: 0.0,
             wet_from_before: false,
             load: 0.0,
             dilution: 0.0,
@@ -259,6 +271,7 @@ impl StrokeStyle {
             grain_brightness: 0.0,
             grain_contrast: 0.0,
             wet_pull: None,
+            pickup: 0.0,
             wet_from_before: false,
             load: 0.0,
             dilution: 0.0,
@@ -283,6 +296,8 @@ impl StrokeStyle {
             preview: false,
             luminance: false,
             laid_in_place: false,
+            height_amount: 0.0,
+            height_scale: 0.1,
         }
     }
 
@@ -295,6 +310,16 @@ impl StrokeStyle {
         preserve_alpha: bool,
     ) -> StrokeStyle {
         let wet = brush.mixes_wet();
+        // a brush file's wet accumulation, which pulls the paint under a stroke into its own: the
+        // pull only counts when the brush has some water or paint load behind it (a file's
+        // accumulation alone is a default on most brushes). A dual brush's second is where a file
+        // often keeps the smudge, so the stroke carries it even when the second is dropped (a
+        // shape made from it) or drawn apart.
+        let wetness = |b: &Brush| {
+            let loaded = b.setting("wet_charge") > 0.02 || b.setting("wet_dilution") > 0.02;
+            if loaded && b.extra.contains_key("wet_pull") { b.setting("wet_pull").clamp(0.0, 1.0) } else { 0.0 }
+        };
+        let pickup = wetness(brush).max(brush.secondary.as_deref().map_or(0.0, wetness));
         StrokeStyle {
             tool,
             color,
@@ -319,6 +344,7 @@ impl StrokeStyle {
             grain_contrast: brush.setting("grain_contrast").clamp(-1.0, 1.0),
             // wet mix once any of its settings is set
             wet_pull: wet.then(|| brush.setting("wet_pull").clamp(0.0, 1.0)),
+            pickup,
             wet_from_before: wet && !brush.mixes_with_stroke(),
             load: if wet { brush.setting("wet_charge").clamp(0.0, 1.0) } else { 0.0 },
             dilution: if wet { brush.setting("wet_dilution").clamp(0.0, 1.0) } else { 0.0 },
@@ -351,6 +377,8 @@ impl StrokeStyle {
             preview: false,
             luminance: brush.setting("luminance_blending") >= 0.5,
             laid_in_place: tool == StrokeTool::Paint && brush.laid_in_place(),
+            height_amount: if brush.uses_height() { brush.setting("height_amount").clamp(0.0, 1.0) } else { 0.0 },
+            height_scale: brush.setting("height_scale").clamp(0.0, 1.0),
         }
     }
 
@@ -578,6 +606,8 @@ struct StampInstance {
     brightness_add: f32,
     /// How far the grain's patch turns (see `Stamp::grain_turn`).
     grain_turn: f32,
+    /// The direction the stroke moved to this stamp, a unit vector (none for its first).
+    motion: [f32; 2],
 }
 
 /// How much work stamp `s` is on a canvas `full`: the pixels it covers there, more for one
@@ -660,7 +690,11 @@ struct StampUniform {
     shape_lod_cap: f32,
     /// Pixels a side of the image a moving grain is read from.
     grain_side: f32,
-    _pad: u32,
+    /// Impasto: how strongly the shape's height is kept (none at 0).
+    height_amount: f32,
+    /// 1 when the stroke drags the paint under it (wet pickup), so its height texture keeps the
+    /// direction.
+    drag: f32,
 }
 
 #[repr(C)]
@@ -702,6 +736,13 @@ struct LayerUniform {
     clip_masked: f32,
     /// Pixels a side of the image the grain is read from.
     grain_side: f32,
+    /// Impasto: how strongly the stroke's height is lit (none at 0), and how deep it runs.
+    height_amount: f32,
+    height_scale: f32,
+    /// Wet pickup: how much of the paint under the stroke it drags into its own colour, 0..1.
+    pickup: f32,
+    /// 1 when the stroke's height texture holds the drag direction (green and blue).
+    motion: u32,
 }
 
 impl Default for LayerUniform {
@@ -733,6 +774,10 @@ impl Default for LayerUniform {
             dual_threshold: -1.0,
             clip_masked: 0.0,
             grain_side: TEXTURE_SIZE as f32,
+            height_amount: 0.0,
+            height_scale: 0.1,
+            pickup: 0.0,
+            motion: 0,
         }
     }
 }
@@ -757,6 +802,17 @@ impl LayerUniform {
         }
     }
 
+    /// With the stroke's wet pickup: the first's or its second's, whichever is wetter.
+    fn with_pickup(self, stroke: Option<&ActiveStroke>) -> LayerUniform {
+        let pickup = stroke.map_or(0.0, |s| s.style.pickup.max(s.second.map_or(0.0, |d| d.style.pickup)));
+        LayerUniform { pickup, ..self }
+    }
+
+    /// With whether the stroke's height texture holds the direction its paint is dragged.
+    fn with_motion(self, motion: bool) -> LayerUniform {
+        LayerUniform { motion: u32::from(motion), ..self }
+    }
+
     /// With the stroke's look: its canvas grain, if it has one, and its edges and threshold.
     fn with_grain(self, style: Option<&StrokeStyle>) -> LayerUniform {
         let Some(s) = style else { return self };
@@ -772,6 +828,8 @@ impl LayerUniform {
             burnt_blend: s.burnt_blend,
             grain_sharp: if s.grain_sharp { 1.0 } else { 0.0 },
             grain_side: s.grain_side,
+            height_amount: s.height_amount,
+            height_scale: s.height_scale,
             ..self
         };
         match s.canvas_grain() {
@@ -1230,6 +1288,8 @@ struct ActiveStroke {
     pencil: bool,
     /// A dual brush's second stroke, if it has one.
     second: Option<SecondStroke>,
+    /// Where the last stamp of the first stroke was put, for the direction the paint is dragged.
+    last_stamp: Option<procraft_engine::geom::Vec2>,
 }
 
 /// A dual brush's second stroke, drawn along the open stroke's path into a texture of its own
@@ -1248,6 +1308,9 @@ enum Op {
     PluginFilter(plugin_filter::FilterValues),
     /// The open stroke's second cleared (a dual brush's stroke begins, with this second).
     ClearSecond(SecondStroke),
+    /// Impasto: the open stroke's height begins from its layer's height, so paint over old paint
+    /// builds on it.
+    PrimeHeight(LayerId),
     /// The open stroke goes on without its second.
     DropSecond,
     /// Stamps added to the stroke (`clear`: the stroke is redrawn from scratch).
@@ -1567,6 +1630,9 @@ struct FilterUniform {
 struct LayerGpu {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    /// Impasto: the paint's height over the layer, made when a height brush first paints here.
+    /// Premultiplied RGBA, its height in red.
+    height: Option<(wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// Steps (oldest first) as one: its pixels latest first, so undoing them puts back the oldest
@@ -1637,6 +1703,8 @@ pub(crate) struct Pipelines {
     uniform_layout: wgpu::BindGroupLayout,
     stamp: wgpu::RenderPipeline,
     stamp_max: wgpu::RenderPipeline,
+    /// Impasto: the stamps' shape written as paint height (the tallest stamp at each pixel).
+    stamp_height: wgpu::RenderPipeline,
     /// Stamps adding towards their transfer (dual-source blending), where the GPU has it.
     stamp_capped: Option<wgpu::RenderPipeline>,
     layer: wgpu::RenderPipeline,
@@ -1691,6 +1759,9 @@ pub(crate) struct Pipelines {
     surround_module: wgpu::ShaderModule,
     surround_pipeline_layout: wgpu::PipelineLayout,
     stamp_layout: wgpu::PipelineLayout,
+    /// Impasto: merging a stroke's paint height into its layer's.
+    height_merge_layout: wgpu::BindGroupLayout,
+    height_merge: wgpu::RenderPipeline,
     overlay_module: wgpu::ShaderModule,
     /// Frosted panels: the blur passes and the regions drawn.
     backdrop_module: wgpu::ShaderModule,
@@ -1716,9 +1787,13 @@ pub struct Canvas {
     layers: HashMap<LayerId, LayerGpu>,
     stroke: wgpu::Texture,
     stroke_view: wgpu::TextureView,
+    /// Impasto: the open stroke's paint height, made the first time a height brush paints.
+    stroke_height: OnDemand,
     /// Where the open stroke's tip is drawn (see [`Canvas::set_tip`]), and what it covered.
     tip: Option<IRect>,
     tip_backup: Option<wgpu::Texture>,
+    /// The height under the tip, put back when it is taken off.
+    tip_height_backup: Option<wgpu::Texture>,
     /// The finished composite, and the other half of its ping-pong pair: where a layer of a
     /// blend mode other than Normal goes, made the first time one does.
     composite: wgpu::Texture,
@@ -1734,6 +1809,8 @@ pub struct Canvas {
     scratch: OnDemand,
     /// A dual brush's second stroke (see [`SecondStroke`]), made when one is first drawn.
     second_stroke: OnDemand,
+    /// Impasto: where a stroke's height is merged with its layer's before going into the layer.
+    height_scratch: OnDemand,
     /// The second of the stroke being drawn from the ops (told by [`Op::ClearSecond`]), until it
     /// ends.
     queued_second: Option<SecondStroke>,
@@ -2048,7 +2125,8 @@ impl Canvas {
             [&shapes_view, &grains_view, &everything],
             [&shape_sampler, &grain_sampler],
         );
-        let stroke_bind = quad_bind(device, &pipelines.quad_layout, [&stroke_view; 7], &grains_view, &grain_sampler);
+        let stroke_bind =
+            quad_bind(device, &pipelines.quad_layout, [&stroke_view; 7], &stroke_view, &grains_view, &grain_sampler);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -2078,8 +2156,10 @@ impl Canvas {
             layers: HashMap::new(),
             stroke: stroke_texture,
             stroke_view,
+            stroke_height: OnDemand::new("stroke height", width, height, HEIGHT_FORMAT),
             tip: None,
             tip_backup: None,
+            tip_height_backup: None,
             composite,
             composite_view,
             composite_second: OnDemand::new("composite 2", width, height, LAYER_FORMAT),
@@ -2087,6 +2167,7 @@ impl Canvas {
             play_frame: None,
             scratch: OnDemand::new("scratch", width, height, LAYER_FORMAT),
             second_stroke: OnDemand::new("second stroke", width, height, STROKE_FORMAT),
+            height_scratch: OnDemand::new("height scratch", width, height, HEIGHT_FORMAT),
             queued_second: None,
             blur_textures: Mutex::new(HashMap::new()),
             spare_before: None,
@@ -2330,6 +2411,7 @@ impl Canvas {
             device,
             &self.pipelines.quad_layout,
             [&self.stroke_view; 7],
+            self.height_view(),
             self.grain_view(),
             &self.grain_sampler,
         );
@@ -2469,7 +2551,13 @@ impl Canvas {
     pub fn begin_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None });
+        self.active =
+            Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None, last_stamp: None });
+        // impasto paint starts from the height already on its layer, so a stroke over old paint
+        // builds on its ridges
+        if style.height_amount > 0.0 && self.layers.get(&layer).is_some_and(|l| l.height.is_some()) {
+            self.ops.push(Op::PrimeHeight(layer));
+        }
     }
 
     /// Begins a stroke as [`Canvas::begin_stroke`] does, with a dual brush's second (its stamps
@@ -2606,9 +2694,37 @@ impl Canvas {
                 distance: if s.distance.is_finite() { s.distance } else { 0.0 },
             })
             .collect();
-        let instances: Vec<StampInstance> = drawn
+        // which way the paint is dragged, stamp to stamp: the second has no height of its own,
+        // and a stroke redrawn from scratch starts its direction again
+        let mut last = if second || clear { None } else { active.last_stamp };
+        let motions: Vec<[f32; 2]> = drawn
             .iter()
             .map(|s| {
+                let Some(previous) = last else {
+                    if !second {
+                        last = Some(s.center);
+                    }
+                    return [0.0; 2];
+                };
+                let step = s.center - previous;
+                let length = step.length();
+                if length > 1e-3 {
+                    if !second {
+                        last = Some(s.center);
+                    }
+                    [step.x / length, step.y / length]
+                } else {
+                    [0.0; 2]
+                }
+            })
+            .collect();
+        if !second {
+            active.last_stamp = last;
+        }
+        let instances: Vec<StampInstance> = drawn
+            .iter()
+            .zip(motions)
+            .map(|(s, motion)| {
                 let radius = drawn_radius(&style, s.radius, s.taper);
                 let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
                 bounds = bounds.union(IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2));
@@ -2634,6 +2750,7 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
+                    motion,
                 }
             })
             .collect();
@@ -2697,6 +2814,7 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
+                    motion: [0.0; 2],
                 }
             }),
         );
@@ -3122,7 +3240,7 @@ impl Canvas {
             self.upload_now(gpu, &texture, b, &rows, 0, b.width() as usize * 4);
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.layers.insert(id, LayerGpu { texture, view });
+        self.layers.insert(id, LayerGpu { texture, view, height: None });
         true
     }
 
@@ -3460,7 +3578,8 @@ impl Canvas {
     pub fn begin_pencil_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None });
+        self.active =
+            Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None, last_stamp: None });
     }
 
     /// A step of the liquify brush: `stamps` added up, then the field carried along by them.
@@ -3652,7 +3771,7 @@ impl Canvas {
                 let encoder = clears.get_or_insert_with(|| gpu.device.create_command_encoder(&Default::default()));
                 drop(render_pass(encoder, "spare cleared", &view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
             }
-            self.layers.insert(id, LayerGpu { texture, view });
+            self.layers.insert(id, LayerGpu { texture, view, height: None });
             added = true;
         }
         if let Some(encoder) = clears {
@@ -3842,6 +3961,24 @@ impl Canvas {
                         apart.1 = 0;
                     }
                 }
+                Op::PrimeHeight(layer) => {
+                    let base = self.layers.get(&layer).and_then(|l| l.height.as_ref()).map(|(t, _)| t);
+                    if let Some(base) = base {
+                        let (height, _) = self.stroke_height.get(device);
+                        encoder.copy_texture_to_texture(
+                            copy_at(base, 0, 0),
+                            copy_at(height, 0, 0),
+                            extent(self.width, self.height),
+                        );
+                    } else if let Some((_, view)) = self.stroke_height.views() {
+                        drop(render_pass(
+                            &mut encoder,
+                            "stroke height clear",
+                            view,
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        ));
+                    }
+                }
                 Op::ClearSecond(second) => {
                     self.queued_second = Some(second);
                     let (_, view) = self.second_stroke.get(device);
@@ -3852,7 +3989,7 @@ impl Canvas {
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     ));
                 }
-                Op::Stamps { instances, style, clear, pencil, second, .. } => {
+                Op::Stamps { instances, style, clear, pencil, second, layer, .. } => {
                     let count = u32::try_from(instances.len()).unwrap_or(u32::MAX);
                     let first = next_instance;
                     next_instance = next_instance.saturating_add(count);
@@ -3875,7 +4012,8 @@ impl Canvas {
                         shape_sharp: u32::from(style.shape_sharp),
                         shape_lod_cap: style.shape_lod_cap,
                         grain_side: style.grain_side,
-                        _pad: 0,
+                        height_amount: style.height_amount,
+                        drag: if style.pickup > 0.0 { 1.0 } else { 0.0 },
                         secondary: [style.secondary[0], style.secondary[1], style.secondary[2], 1.0],
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
@@ -3899,6 +4037,38 @@ impl Canvas {
                         pass.draw(0..6, 0..count);
                     }
                     drop(pass);
+                    // impasto: the shape's height into the stroke's height texture (the height
+                    // each stamp lays), cleared or kept with the colour. A dual brush's second
+                    // adds no height of its own: the paint's body is the first stroke's.
+                    if !pencil && !second && (style.height_amount > 0.0 || style.pickup > 0.0) {
+                        let (height_texture, height) = self.stroke_height.get(device);
+                        // redrawing the stroke starts its height from the layer's again, so what
+                        // this stroke laid before doesn't double and the paint under it stays
+                        let base = self.layers.get(&layer).and_then(|l| l.height.as_ref()).map(|(texture, _)| texture);
+                        if clear && let Some(base) = base {
+                            encoder.copy_texture_to_texture(
+                                copy_at(base, 0, 0),
+                                copy_at(height_texture, 0, 0),
+                                extent(self.width, self.height),
+                            );
+                        }
+                        let height_load = if clear && base.is_none() {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        };
+                        let mut pass = render_pass(&mut encoder, "stamp height", height, height_load);
+                        if count > 0 {
+                            pass.set_pipeline(&self.pipelines.stamp_height);
+                            pass.set_bind_group(0, &self.uniform_bind, &[offset]);
+                            pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
+                            let start = u64::from(first) * size_of::<StampInstance>() as u64;
+                            let end = u64::from(next_instance) * size_of::<StampInstance>() as u64;
+                            pass.set_vertex_buffer(0, self.stamp_buffer.slice(start..end));
+                            pass.draw(0..6, 0..count);
+                        }
+                        drop(pass);
+                    }
                     // a dual brush's paint laid in place: put together again where the second went
                     if second && self.smudge.as_ref().is_some_and(|s| s.apart.is_some()) {
                         let rect = instances.iter().fold(IRect::EMPTY, |r, s| {
@@ -3945,10 +4115,19 @@ impl Canvas {
                         &self.stroke_view,
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     ));
+                    if let Some((_, view)) = self.stroke_height.views() {
+                        drop(render_pass(
+                            &mut encoder,
+                            "cancel height",
+                            view,
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        ));
+                    }
                 }
                 Op::SaveTip(rect) => {
                     let (width, height) = (rect.width(), rect.height());
                     let roomy = self.tip_backup.as_ref().is_some_and(|b| b.width() >= width && b.height() >= height);
+                    let impasto = self.active.is_some_and(|a| a.style.height_amount > 0.0);
                     if !roomy {
                         // grown in steps, so a tip that grows doesn't make one every frame
                         let room = |n: u32, most: u32| n.max(1).next_multiple_of(256).min(most);
@@ -3956,9 +4135,24 @@ impl Canvas {
                         let size = (room(width.max(w), self.width), room(height.max(h), self.height));
                         self.tip_backup = Some(texture(device, "tip backup", size.0, size.1, STROKE_FORMAT));
                     }
+                    if impasto {
+                        let (tw, th) = self.tip_backup.as_ref().map_or((width, height), |b| (b.width(), b.height()));
+                        let fits = self.tip_height_backup.as_ref().is_some_and(|b| b.width() >= tw && b.height() >= th);
+                        if !fits {
+                            self.tip_height_backup = Some(texture(device, "tip height backup", tw, th, HEIGHT_FORMAT));
+                        }
+                    }
                     if let Some(backup) = &self.tip_backup {
                         encoder.copy_texture_to_texture(
                             copy_at(&self.stroke, rect.x0, rect.y0),
+                            copy_at(backup, 0, 0),
+                            extent(width, height),
+                        );
+                    }
+                    if impasto && let Some(backup) = &self.tip_height_backup {
+                        let (height_texture, _) = self.stroke_height.get(device);
+                        encoder.copy_texture_to_texture(
+                            copy_at(height_texture, rect.x0, rect.y0),
                             copy_at(backup, 0, 0),
                             extent(width, height),
                         );
@@ -3972,11 +4166,24 @@ impl Canvas {
                             extent(rect.width(), rect.height()),
                         );
                     }
+                    if let Some(backup) = &self.tip_height_backup
+                        && let Some((height, _)) = self.stroke_height.views()
+                    {
+                        encoder.copy_texture_to_texture(
+                            copy_at(backup, 0, 0),
+                            copy_at(height, rect.x0, rect.y0),
+                            extent(rect.width(), rect.height()),
+                        );
+                    }
                 }
                 Op::Undo => {
                     if let Some(step) = self.undo.pop() {
                         let inverse = self.apply_step(gpu, &mut encoder, doc, step);
                         self.redo.push(inverse);
+                        // the paint's height went with the pixels it lit: the layer starts flat
+                        for layer in self.layers.values_mut() {
+                            layer.height = None;
+                        }
                         history_changed = true;
                     }
                 }
@@ -3984,6 +4191,9 @@ impl Canvas {
                     if let Some(step) = self.redo.pop() {
                         let inverse = self.apply_step(gpu, &mut encoder, doc, step);
                         self.undo.push(inverse);
+                        for layer in self.layers.values_mut() {
+                            layer.height = None;
+                        }
                         history_changed = true;
                     }
                 }
@@ -4037,6 +4247,10 @@ impl Canvas {
                         self.dirty = full;
                         history_changed = true;
                     }
+                    // new paint laid flat: no impasto height to build on
+                    if let Some(layer) = self.layers.get_mut(&id) {
+                        layer.height = None;
+                    }
                 }
                 Op::Clear(id, painted) => {
                     let full = self.full();
@@ -4061,11 +4275,17 @@ impl Canvas {
                     }
                     self.dirty = full;
                     history_changed = true;
+                    if let Some(layer) = self.layers.get_mut(&id) {
+                        layer.height = None;
+                    }
                 }
                 Op::Put(id, pixels) => {
                     if let Some(layer) = self.layers.get(&id) {
                         let (full, row) = (self.full(), self.width as usize * 4);
                         uploaded.extend(self.upload(device, &mut encoder, &layer.texture, full, &pixels, 0, row));
+                    }
+                    if let Some(layer) = self.layers.get_mut(&id) {
+                        layer.height = None;
                     }
                     self.dirty = self.full();
                 }
@@ -4075,6 +4295,9 @@ impl Canvas {
                     if let Some(layer) = self.layers.get(&id) {
                         let row = width as usize * 4;
                         uploaded.extend(self.upload(device, &mut encoder, &layer.texture, rect, &pixels, 0, row));
+                    }
+                    if let Some(layer) = self.layers.get_mut(&id) {
+                        layer.height = None;
                     }
                     self.dirty = self.dirty.union(rect.intersect(self.full()));
                 }
@@ -5130,10 +5353,17 @@ impl Canvas {
             let quad = |layer: &wgpu::TextureView| {
                 let views = [layer, stroke_view, stroke_view, stroke_view, stroke_view, second, stroke_view];
                 let grain = self.grain_view_of(&stroke.style);
-                quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler)
+                quad_bind(device, &self.pipelines.quad_layout, views, self.height_view(), grain, &self.grain_sampler)
             };
             let laid = stroke.style.tool == StrokeTool::Laid;
-            match (stroke.style.tool, laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
+            // pickup reads the layer the paint goes over, so the stroke is put into the scratch
+            // first (a pass cannot read the layer it writes)
+            let pickup = stroke.style.tool == StrokeTool::Paint
+                && stroke.style.pickup.max(stroke.second.map_or(0.0, |d| d.style.pickup)) > 0.0;
+            match (
+                stroke.style.tool,
+                laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance || pickup,
+            ) {
                 (StrokeTool::Paint | StrokeTool::Laid, true) => {
                     // recolour where the layer has alpha, or blend by a mode or burn edges (which
                     // read the layer): into scratch, then back
@@ -5149,7 +5379,9 @@ impl Canvas {
                             ..Default::default()
                         }
                         .with_grain(Some(&stroke.style))
-                        .with_dual(Some(&stroke)),
+                        .with_dual(Some(&stroke))
+                        .with_pickup(Some(&stroke))
+                        .with_motion(self.stroke_height.made().is_some()),
                     );
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let bind = quad(&layer.view);
@@ -5172,10 +5404,14 @@ impl Canvas {
                     let offset = uniforms.push(
                         &LayerUniform { opacity: 1.0, stroke_opacity: opacity, ..Default::default() }
                             .with_grain(Some(&stroke.style))
-                            .with_dual(Some(&stroke)),
+                            .with_dual(Some(&stroke))
+                            .with_pickup(Some(&stroke))
+                            .with_motion(self.stroke_height.made().is_some()),
                     );
-                    let dual =
-                        (stroke.second.is_some() || stroke.style.full_grain.is_some()).then(|| quad(&self.stroke_view));
+                    let dual = (stroke.second.is_some()
+                        || stroke.style.full_grain.is_some()
+                        || stroke.style.height_amount > 0.0)
+                        .then(|| quad(&self.stroke_view));
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let mut pass = render_pass(encoder, "commit", &layer.view, wgpu::LoadOp::Load);
                         pass.set_pipeline(match tool {
@@ -5183,15 +5419,64 @@ impl Canvas {
                             StrokeTool::Erase => &self.pipelines.commit_erase,
                         });
                         scissor(&mut pass, rect);
-                        pass.set_bind_group(0, dual.as_ref().unwrap_or(&self.stroke_bind), &[]);
+                        let bind = dual.as_ref().unwrap_or(&self.stroke_bind);
+                        pass.set_bind_group(0, bind, &[]);
                         pass.set_bind_group(1, &self.uniform_bind, &[offset]);
                         pass.draw(0..3, 0..1);
                     }
                 }
             }
         }
+        // impasto: the stroke's height joins its layer's, to shade the next stroke over it
+        if stroke.style.height_amount > 0.0 {
+            self.merge_height(device, encoder, stroke.layer, rect);
+        }
         drop(render_pass(encoder, "stroke clear", &self.stroke_view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+        if let Some((_, view)) = self.stroke_height.views() {
+            drop(render_pass(encoder, "stroke height clear", view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+        }
         self.dirty = self.dirty.union(rect);
+    }
+
+    /// Merges the open stroke's height into `layer`'s within `rect`: the taller height is kept, so
+    /// impasto laid over impasto builds on its ridges.
+    fn merge_height(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, layer: LayerId, rect: IRect) {
+        let rect = rect.intersect(self.full());
+        if rect.is_empty() || !self.layers.contains_key(&layer) {
+            return;
+        }
+        let Some((_, stroke_height_view)) = self.stroke_height.views() else { return };
+        let (layer_height, layer_height_view) = match self.layers.get_mut(&layer) {
+            Some(gpu) => {
+                let (texture, view) = gpu.height.get_or_insert_with(|| {
+                    let t = texture(device, "layer height", self.width, self.height, HEIGHT_FORMAT);
+                    let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+                    (t, v)
+                });
+                (texture.clone(), view.clone())
+            }
+            None => return,
+        };
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("height merge"),
+            layout: &self.pipelines.height_merge_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&layer_height_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(stroke_height_view) },
+            ],
+        });
+        let (scratch, scratch_view) = self.height_scratch.get(device);
+        let mut pass = render_pass(encoder, "height merge", scratch_view, wgpu::LoadOp::Load);
+        scissor(&mut pass, rect);
+        pass.set_pipeline(&self.pipelines.height_merge);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        encoder.copy_texture_to_texture(
+            copy_at(scratch, rect.x0, rect.y0),
+            copy_at(&layer_height, rect.x0, rect.y0),
+            extent(rect.width(), rect.height()),
+        );
     }
 
     /// Before layers are blended into `lower` (the layer, and its opacity): each of `masks`
@@ -6692,7 +6977,9 @@ impl Canvas {
             ..Default::default()
         }
         .with_grain(stroke.as_ref().map(|s| &s.style))
-        .with_dual(stroke.as_ref());
+        .with_dual(stroke.as_ref())
+        .with_pickup(stroke.as_ref())
+        .with_motion(self.stroke_height.made().is_some());
         let mask_view = mask_view.unwrap_or(&self.stroke_view);
         self.draw_onto(
             device,
@@ -7335,7 +7622,7 @@ impl Canvas {
         if !self.layers.contains_key(&id) {
             let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.layers.insert(id, LayerGpu { texture, view });
+            self.layers.insert(id, LayerGpu { texture, view, height: None });
         }
         self.touched(id);
         self.let_go_caches(false);
@@ -7372,7 +7659,7 @@ impl Canvas {
         if !self.layers.contains_key(&id) {
             let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.layers.insert(id, LayerGpu { texture, view });
+            self.layers.insert(id, LayerGpu { texture, view, height: None });
         }
         self.touched(id);
         self.let_go_caches(false);
@@ -7450,7 +7737,7 @@ impl Canvas {
         if !self.layers.contains_key(&id) {
             let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.layers.insert(id, LayerGpu { texture, view });
+            self.layers.insert(id, LayerGpu { texture, view, height: None });
         }
         self.touched(id);
         self.let_go_caches(false);
@@ -7760,9 +8047,16 @@ impl Canvas {
             device,
             &self.pipelines.quad_layout,
             [a, b, c, d, mask, self.second_view(device), clip_mask],
+            self.height_view(),
             self.grain_view(),
             &self.grain_sampler,
         )
+    }
+
+    /// Impasto: the open stroke's height (else any, unread: a brush without height leaves it
+    /// bound but `height_amount` 0 never reads it).
+    fn height_view(&self) -> &wgpu::TextureView {
+        self.stroke_height.views().map_or(&self.stroke_view, |(_, view)| view)
     }
 
     /// The open stroke's second's texture while it has one (else any, unread).
@@ -7783,11 +8077,15 @@ impl Canvas {
     /// made with, its brush images, the undo history's pixels and what any edit under way keeps.
     pub fn textures(&self) -> Vec<wgpu::Texture> {
         let mut all: Vec<&wgpu::Texture> = vec![&self.stroke, &self.composite, &self.shapes, &self.grains, &self.table];
+        all.extend(self.stroke_height.made());
         all.extend(self.layers.values().map(|l| &l.texture));
+        all.extend(self.layers.values().filter_map(|l| l.height.as_ref()).map(|(t, _)| t));
         all.extend(self.tip_backup.as_ref());
+        all.extend(self.tip_height_backup.as_ref());
         all.extend(self.composite_second.made());
         all.extend(self.scratch.made());
         all.extend(self.second_stroke.made());
+        all.extend(self.height_scratch.made());
         all.extend(self.groups.iter().flat_map(|(pair, _)| pair));
         all.push(self.everything.texture());
         all.extend(self.pencil.as_ref().map(|p| p.view.texture()));
@@ -7875,6 +8173,8 @@ impl Pipelines {
                 tex_entry(6),
                 tex_entry(7),
                 tex_entry(8),
+                // impasto: the stroke's paint height
+                tex_entry(9),
             ],
         });
         let brush_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -8203,6 +8503,67 @@ impl Pipelines {
         };
         let stamp = stamp_pipeline("stamp", PREMULTIPLIED_OVER);
         let stamp_max = stamp_pipeline("stamp max", MAXIMUM);
+        // the same stamps into the stroke's height, the tallest at each pixel
+        let stamp_height = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("stamp height"),
+            layout: Some(&stamp_layout),
+            vertex: wgpu::VertexState {
+                module: &stamp_module,
+                entry_point: Some("vs_stamp"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<StampInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &STAMP_ATTRIBUTES,
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &stamp_module,
+                entry_point: Some("fs_height"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HEIGHT_FORMAT,
+                    blend: Some(PREMULTIPLIED_OVER),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        // impasto: the taller of a layer's height and its stroke's, when the stroke ends
+        let height_merge_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("the heights a stroke merges"),
+            entries: &[tex_entry(0), tex_entry(1)],
+        });
+        let height_module = module("height", include_str!("shaders/height.wgsl"));
+        let height_merge = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("height merge"),
+            layout: Some(&layout("height merge", &[Some(&height_merge_layout)])),
+            vertex: wgpu::VertexState {
+                module: &height_module,
+                entry_point: Some("vs_full"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &height_module,
+                entry_point: Some("fs_merge"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HEIGHT_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         // stamps adding towards their transfer: the paint (scaled by it) over what is there, kept
         // by what the stamp covers (a second colour out of the shader)
         let stamp_capped = device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING).then(|| {
@@ -8356,6 +8717,7 @@ impl Pipelines {
             ),
             stamp,
             stamp_max,
+            stamp_height,
             stamp_capped,
             smudge_layout,
             smudge_carry,
@@ -8377,6 +8739,8 @@ impl Pipelines {
             surround_pipeline_layout,
 
             stamp_layout,
+            height_merge_layout,
+            height_merge,
             overlay_module,
 
             selection_module,
@@ -8833,6 +9197,11 @@ impl OnDemand {
         self.made.get().map(|(t, _)| t)
     }
 
+    /// The texture and its view, if they have been made.
+    fn views(&self) -> Option<(&wgpu::Texture, &wgpu::TextureView)> {
+        self.made.get().map(|(t, v)| (t, v))
+    }
+
     /// Lets the texture go, to be made again when next wanted.
     fn let_go(&mut self) {
         self.made.take();
@@ -9042,6 +9411,7 @@ fn quad_bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     views: [&wgpu::TextureView; 7],
+    height: &wgpu::TextureView,
     grains: &wgpu::TextureView,
     grain_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
@@ -9059,6 +9429,7 @@ fn quad_bind(
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(mask) },
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(second) },
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(clip_mask) },
+            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(height) },
         ],
     })
 }
@@ -9731,5 +10102,26 @@ mod tests {
         assert_eq!(final_mixture(0.4, 0.9, 1.0, (0, 4), false), 0.4);
         // neither picking up nor mixing: what it carries, whole
         assert_eq!(final_mixture(0.0, 0.9, 0.0, (1, 4), false), 1.0);
+    }
+
+    #[test]
+    fn only_a_loaded_wet_brush_drags_the_paint_under_it() {
+        use procraft_engine::brush::Brush;
+        let style = |b: &Brush| StrokeStyle::for_brush(b, StrokeTool::Paint, [0.0; 3], 1.0, false);
+        let mut b = Brush::round_pen();
+        // a file's pull alone is a default on most brushes: no water, no load, no drag
+        b.set_setting("wet_pull", 0.5);
+        assert_eq!(style(&b).pickup, 0.0);
+        // a little charge behind it drags
+        b.set_setting("wet_charge", 0.05);
+        assert!((style(&b).pickup - 0.5).abs() < 1e-5);
+        // and so does dilution
+        b.set_setting("wet_charge", 0.0);
+        b.set_setting("wet_dilution", 0.3);
+        assert!((style(&b).pickup - 0.5).abs() < 1e-5);
+        // a trace of load (a file's near-zero) is not enough
+        b.set_setting("wet_dilution", 0.0);
+        b.set_setting("wet_charge", 0.01);
+        assert_eq!(style(&b).pickup, 0.0);
     }
 }
