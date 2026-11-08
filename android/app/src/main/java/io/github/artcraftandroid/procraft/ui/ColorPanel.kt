@@ -323,8 +323,9 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
         FloatingWidth,
         0.dp,
         Modifier.offset(x, y).height(height).pointerInput(Unit) {
-            // the canvas under it takes no touch
-            awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+            // the canvas under it takes no touch (a move stays unconsumed: the grabber's drag gives up
+            // on one consumed before it has gone far enough)
+            awaitEachGesture { awaitFirstDown().consume() }
         },
         side = ArrowSide.NONE,
     ) {
