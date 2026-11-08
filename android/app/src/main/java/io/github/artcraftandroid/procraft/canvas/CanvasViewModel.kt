@@ -6399,7 +6399,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private var colourDrag: io.github.artcraftandroid.procraft.core.ColourDrag? = null
 
     /** The dragged colour came to rest and its slid threshold has begun filling (or tried to, and couldn't). */
-    private var dropPoured = false
+    private var dropPoured by mutableStateOf(false)
     private var dropPourRefused = false
 
     /**

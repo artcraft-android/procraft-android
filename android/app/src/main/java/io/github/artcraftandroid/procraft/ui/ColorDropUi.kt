@@ -35,11 +35,13 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -123,8 +125,9 @@ internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = nul
 }
 
 /**
- * The colour being dragged out: a droplet under the finger, still joined to where it was picked up
- * from by a neck. It thins as it is stretched, the way a drop holds on, and is gone past its reach.
+ * The colour being dragged out, drawn out of the button it came from: full size while it is still
+ * over it, smaller the further it is pulled, and gone by the time it is well away. It stretches
+ * along the way it is going as it comes away, the way a drop pulled out of something would.
  */
 @Composable
 fun DropDot(vm: CanvasViewModel) {
@@ -133,35 +136,19 @@ fun DropDot(vm: CanvasViewModel) {
     val ink = CanvasSpace.color(rgb)
     Canvas(Modifier.fillMaxSize()) {
         val radius = DotSize.toPx() / 2f
-        if (from != null) {
-            val away = (at - from).getDistance()
-            val slack = 1f - ((away - 2f * radius) / 140f).coerceIn(0f, 1f)
-            if (slack > 0.02f && away > 0.001f) {
-                val dir = (at - from) / away
-                val perp = Offset(-dir.y, dir.x)
-                // where the neck meets each circle: near their middles as it stretches, so it comes
-                // off a point; and the waist drawn in from that, so the neck is pinched, not a tube
-                val grip = radius * slack * 0.95f
-                val waist = grip * (0.30f + 0.35f * slack)
-                val mid = (from + at) / 2f
-                val path = Path().apply {
-                    val start = from + perp * grip
-                    moveTo(start.x, start.y)
-                    val over = mid + perp * waist
-                    val end = at + perp * grip
-                    quadraticTo(over.x, over.y, end.x, end.y)
-                    val under = at - perp * grip
-                    lineTo(under.x, under.y)
-                    val back = mid - perp * waist
-                    val home = from - perp * grip
-                    quadraticTo(back.x, back.y, home.x, home.y)
-                    close()
-                }
-                drawPath(path, ink)
-            }
-            drawCircle(ink, radius, from)
+        val pull = if (from == null) 0f else ((((at - from).getDistance() - 40f) / 80f)).coerceIn(0f, 1f)
+        val size = radius * (1f - pull)
+        if (size <= 0.4f) return@Canvas
+        if (from == null || pull <= 0.001f) {
+            drawCircle(ink, size, at)
+            return@Canvas
         }
-        drawCircle(ink, radius, at)
+        val long = size * (1f + 0.55f * pull)
+        val wide = size * (1f - 0.22f * pull)
+        val turn = Math.toDegrees(kotlin.math.atan2((at - from).y, (at - from).x)).toFloat()
+        rotate(turn, pivot = at) {
+            drawOval(ink, topLeft = at - Offset(long, wide), size = Size(long * 2f, wide * 2f))
+        }
     }
 }
 

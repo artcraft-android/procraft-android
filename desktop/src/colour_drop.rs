@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use procraft_core::{CanvasSession, ColourDrag, DragStep, Fill};
 
 use crate::colours::{of_hex, srgb};
@@ -31,6 +31,9 @@ const LINE_HEIGHT: f32 = 4.0;
 const BAND_FILL: Themed = Themed(0xD63B3B3B, 0xD6EEEEEE);
 const ROW_FILL: Themed = Themed(0xCC4A4A4A, 0xCCDCDCDC);
 const INK: Themed = Themed(0xFFC5C5C5, 0xFF222222);
+
+/// How long a colour let go takes to shrink away where it landed.
+const DROP_AWAY: f32 = 0.1;
 
 /// What the band under the top bar shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,6 +89,10 @@ pub struct ColourDrop {
     refused: bool,
     /// A clock for the fill coming in to run against.
     clock: Instant,
+    /// The colour being pulled out of the button.
+    blob: Blob,
+    /// A colour just let go on the artwork: where, which, and when - it shrinks away as it fills.
+    dropped: Option<(Pos2, u32, Instant)>,
 }
 
 impl Default for ColourDrop {
@@ -101,6 +108,8 @@ impl Default for ColourDrop {
             poured: false,
             refused: false,
             clock: Instant::now(),
+            blob: Blob::default(),
+            dropped: None,
         }
     }
 }
@@ -258,6 +267,10 @@ impl ColourDrop {
         let [r, g, b] = of_hex(rgb);
         self.poured = session.pour_begin(at.x * ppp, at.y * ppp, r, g, b, threshold);
         self.refused = !self.poured;
+        // let go on the artwork, the drop itself shrinks away as the fill goes in
+        if self.poured {
+            self.dropped = Some((at, rgb, Instant::now()));
+        }
     }
 
     /// Continue filling's touch slid the threshold to `threshold`.
@@ -313,15 +326,41 @@ impl ColourDrop {
         if self.band != Band::None {
             self.shown = self.band;
         }
+        // a colour just let go shrinks away where it landed, the fill going in as it does
+        if let Some((at, rgb, since)) = self.dropped {
+            let gone = since.elapsed().as_secs_f32() / DROP_AWAY;
+            if gone >= 1.0 {
+                self.dropped = None;
+            } else {
+                let scale = 1.0 - (1.0 - 0.025) * gone;
+                let painter =
+                    ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("colour drop dot")));
+                painter.circle_filled(at, DOT / 2.0 * scale, srgb(of_hex(rgb)));
+                ctx.request_repaint();
+            }
+        }
+        let dragging_from = self.press.as_ref().filter(|p| p.dragging).map(|p| p.origin);
         if let Some((at, rgb)) = self.dot {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("colour drop dot")));
             let colour = srgb(of_hex(rgb));
-            // dragged, it stays joined to where it came from by a neck that thins as it stretches
-            match self.press.as_ref().map(|p| (p.origin, p.dragging)) {
-                Some((from, true)) => {
-                    bridge(&painter, from, at, DOT / 2.0, colour);
+            match dragging_from {
+                Some(from) => {
+                    // pulled out of the button: its own dot at one end, and the colour at the other,
+                    // which starts at its full size and shrinks away as it is carried off
+                    if self.blob.last.is_none() {
+                        self.blob.start(from);
+                    }
+                    let pull = ((from.distance(at) - 40.0) / 80.0).clamp(0.0, 1.0);
+                    // the button's end is 28 across, the colour's 60, both by the 1.3 the display's
+                    // own text size asks for; only the colour's shrinks as it is carried off
+                    let r0 = 28.0 * 1.3;
+                    let r1 = 60.0 * 1.3 * (1.0 - pull);
+                    let now = ctx.input(|i| i.time);
+                    self.blob.step(from, at, r0, r1, now);
+                    self.blob.paint(&painter, r0, r1, colour);
+                    ctx.request_repaint();
                 }
-                _ => {
+                None => {
                     painter.circle_filled(at, DOT / 2.0, colour);
                 }
             }
@@ -402,43 +441,160 @@ impl ColourDrop {
     }
 }
 
-/// The dragged colour joined to where it was picked up: both circles, and a neck between them that
-/// thins as it is stretched, the way a drop of liquid holds on, and is gone once it is too far.
-fn bridge(painter: &egui::Painter, from: Pos2, to: Pos2, radius: f32, colour: Color32) {
-    /// How far past the two circles touching the neck lasts.
-    const STRETCH: f32 = 140.0;
-    painter.circle_filled(from, radius, colour);
-    painter.circle_filled(to, radius, colour);
-    let d = from.distance(to);
-    let slack = 1.0 - ((d - 2.0 * radius) / STRETCH).clamp(0.0, 1.0);
-    if slack <= 0.02 || d <= 1e-3 {
-        return;
-    }
-    let dir = (to - from) / d;
-    let perp = vec2(-dir.y, dir.x);
-    // where the neck meets each circle: near their middles as it stretches, so it comes off a point
-    let grip = radius * slack * 0.95;
-    let (over, under) = (perp * grip, perp * -grip);
-    let mid = from.lerp(to, 0.5);
-    // and the waist, drawn in from that, so the neck is pinched rather than a tube
-    let waist = perp * (grip * (0.30 + 0.35 * slack));
-    let mut points = Vec::with_capacity(28);
-    points.extend(bend(from + over, mid + waist, to + over));
-    points.extend(bend(from + under, mid - waist, to + under));
-    painter.add(egui::Shape::convex_polygon(points, colour, Stroke::NONE));
+/// The colour pulled out of a button: the button's circle and a second one out along the pull, joined
+/// by a neck while the pull is short and coming apart when it is long, both of them wobbling.
+struct Blob {
+    /// The pointer's end as it lags along behind it.
+    current: Pos2,
+    velocity: Vec2,
+    /// The two ends as they are drawn this frame.
+    near: Pos2,
+    far: Pos2,
+    /// How far the pull has gone, 0 where it began, 1 stretched as far as it goes.
+    spring: f32,
+    /// How far the two have parted, 1 being clean apart.
+    separation: f32,
+    /// The wobble's phase and how much of it there is.
+    jiggle: f32,
+    momentum: f32,
+    /// When it was last stepped, in seconds.
+    last: Option<f64>,
 }
 
-/// A quadratic curve from `a` to `b` through `control`, as points to draw a shape with.
-fn bend(a: Pos2, control: Pos2, b: Pos2) -> Vec<Pos2> {
-    const STEPS: usize = 12;
-    (0..=STEPS)
-        .map(|i| {
-            let t = i as f32 / STEPS as f32;
-            let keep = 1.0 - t;
-            pos2(
-                keep * keep * a.x + 2.0 * keep * t * control.x + t * t * b.x,
-                keep * keep * a.y + 2.0 * keep * t * control.y + t * t * b.y,
-            )
-        })
-        .collect()
+impl Default for Blob {
+    fn default() -> Blob {
+        Blob {
+            current: Pos2::ZERO,
+            velocity: vec2(0.0, 0.0),
+            near: Pos2::ZERO,
+            far: Pos2::ZERO,
+            spring: 0.0,
+            separation: 0.0,
+            jiggle: 0.0,
+            momentum: 0.0,
+            last: None,
+        }
+    }
+}
+
+impl Blob {
+    /// Starts afresh at the button it is pulled out of.
+    fn start(&mut self, at: Pos2) {
+        *self = Blob { current: at, near: at, far: at, ..Blob::default() };
+    }
+
+    /// One frame of it, `now` in seconds.
+    fn step(&mut self, origin: Pos2, destination: Pos2, r0: f32, r1: f32, now: f64) {
+        let dt = match self.last {
+            Some(was) => ((now - was) as f32).clamp(0.0, 0.05),
+            None => 0.0,
+        };
+        self.last = Some(now);
+        let d = origin.distance(destination);
+        // how far the pull stretches the thing before the neck is at its worst
+        let len = (r0 + (r0 + r1) * 0.33).max(1.0);
+        let stretched = (d / len).min(1.0);
+        let (mut half, mut past) = ((d / (len * 2.0)).min(1.0), ((d - len * 2.0) / 250.0).clamp(0.0, 1.0));
+        let prev = self.spring;
+        if stretched - prev <= 0.0 {
+            // coming back in, the same terms the other way about
+            half = 1.0 - half;
+            past = 1.0 - past;
+        }
+        let rate = (prev * prev * half).max(prev * past);
+        let rate = (rate * 0.2).max(0.02);
+        let frame = dt * 120.0;
+        self.spring = (stretched * frame * rate + prev * (1.0 - frame * rate)).clamp(0.0, 1.0);
+        // near the end of the stretch the neck gives way, and the two part
+        self.separation = if self.spring > 0.9 {
+            let free = (1.0 - self.separation).max(0.0);
+            (self.separation + (frame * free).min(0.1)).clamp(0.0, 1.0)
+        } else if self.spring < 0.8 {
+            let keep = (frame * self.separation - 0.01).max(0.5);
+            (self.separation * keep).clamp(0.0, 1.0)
+        } else {
+            self.separation
+        };
+        // how hard the pointer is swinging the colour about decides how much it wobbles
+        let swung = ((destination - self.current).length() / 20.0).min(1.0);
+        self.momentum = (swung * 0.005 + swung.max(self.momentum) * 0.995).clamp(0.0, 1.0);
+        self.jiggle += frame * (1.0 / 120.0) * self.momentum * 2.0;
+        // the pointer's end lags along behind the pointer
+        let follow = frame * 0.08;
+        self.velocity = (self.velocity * (1.0 - follow) + (destination - self.current) * follow) * 0.9;
+        self.current += self.velocity;
+        // the two ends drawn: the button's, and out along the pull as far as it has come
+        let along = (destination - origin).normalized() * (len * stretched);
+        let lean = (self.spring * std::f32::consts::PI).sin() * 0.1;
+        self.near = Pos2::new(
+            (origin.x + along.x) * lean + origin.x * (1.0 - lean),
+            (origin.y + along.y) * lean + origin.y * (1.0 - lean),
+        );
+        let give = self.spring.powf(1.5);
+        self.far =
+            Pos2::new(origin.x * (1.0 - give) + self.current.x * give, origin.y * (1.0 - give) + self.current.y * give);
+    }
+
+    fn paint(&self, painter: &egui::Painter, r0: f32, r1: f32, colour: Color32) {
+        let (near_r, far_r) = (r0 / 2.0, r1 / 2.0);
+        // how far apart the two ends have come, as a share of what the pull can reach
+        let reach = (r0 + (r0 + r1) * 0.33).max(1.0);
+        let apart = (self.near.distance(self.far) / reach).min(1.0);
+        let early = self.separation + (1.0 - self.separation) * ((apart - 0.75) / 0.25).clamp(0.0, 1.0);
+        let late = self.separation + (1.0 - self.separation) * (apart / 0.75).min(1.0);
+        let blend = (early + late) * 0.5;
+        let radius = near_r * (1.0 - blend) + blend * far_r;
+        let amp = self.momentum * 0.15 * (20.0 / r1.max(1.0));
+        // apart, they are two circles; while they hold on, one shape with a neck between. All three
+        // have to have given way, not just one: the stretch alone doesn't part them, the spring does.
+        if early.min(late).min(self.separation) >= 1.0 {
+            blob_circle(painter, self.near, near_r, self.jiggle, amp, colour);
+            blob_circle(painter, self.far, radius, self.jiggle, amp, colour);
+            return;
+        }
+        blob_circle(painter, self.near, near_r, self.jiggle, amp, colour);
+        let d = self.near.distance(self.far);
+        if d > 0.25 {
+            let perp = vec2(-(self.far - self.near).y, (self.far - self.near).x) / d;
+            // the neck between them: the two of them less as they are pulled, and gone once they have
+            // parted - widest at the circles and holding its width between, a collar rather than a waist
+            let give = 1.0 - early;
+            let half = give * (1.0 - late.powi(3)) * (near_r + radius) * 0.5;
+            if half > 0.15 {
+                const SAMPLES: usize = 12;
+                let mut mesh = egui::epaint::Mesh::default();
+                for i in 0..=SAMPLES {
+                    let t = i as f32 / SAMPLES as f32;
+                    let at = self.near.lerp(self.far, t);
+                    mesh.colored_vertex(at + perp * half, colour);
+                    mesh.colored_vertex(at - perp * half, colour);
+                    if let Some(last) = (i as u32).checked_sub(1) {
+                        let (lo, hi) = (last * 2, last * 2 + 2);
+                        mesh.add_triangle(lo, lo + 1, hi);
+                        mesh.add_triangle(lo + 1, hi + 1, hi);
+                    }
+                }
+                painter.add(egui::Shape::mesh(mesh));
+            }
+        }
+        blob_circle(painter, self.far, radius, self.jiggle, amp, colour);
+    }
+}
+
+/// A circle drawn out of true, the way a drop of liquid is while it moves: squashed one way, drawn
+/// the other, at two different rates so it never settles into looking like a disc.
+fn blob_circle(painter: &egui::Painter, at: Pos2, radius: f32, phase: f32, amount: f32, colour: Color32) {
+    if radius <= 0.2 {
+        return;
+    }
+    let across = (1.0 - amount) + amount * (phase * 4.0 * std::f32::consts::PI).cos();
+    let down = (1.0 - amount) + amount * (phase * 3.0 * std::f32::consts::PI).sin();
+    const STEPS: usize = 32;
+    let mut points = Vec::with_capacity(STEPS);
+    for i in 0..STEPS {
+        let turn = i as f32 / STEPS as f32 * std::f32::consts::TAU;
+        let (s, c) = turn.sin_cos();
+        points.push(at + vec2(c * radius * across, s * radius * down));
+    }
+    painter.add(egui::Shape::convex_polygon(points, colour, Stroke::NONE));
 }

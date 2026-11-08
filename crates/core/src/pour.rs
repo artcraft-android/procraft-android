@@ -26,40 +26,42 @@ const SPREAD_MS: f64 = 190.0;
 struct Spread {
     /// When the front started moving, in milliseconds; set on the first frame it is asked about.
     began: Option<f64>,
-    /// Where it was dropped, in canvas pixels, and how far the furthest of the fill is from there.
+    /// Where it was dropped, in canvas pixels.
     seed: (u32, u32),
-    most: f32,
+    /// Half the width and half the height of what it fills, about the drop: the front takes the
+    /// shape of the area rather than being round, and a wobble on it keeps it from reading as one.
+    semi: (f32, f32),
     /// All of it, as it is once the front has gone over everything.
     all: Mask,
-    /// How far the front has reached.
-    reach: f32,
+    /// How far along the front is, 0 where it was dropped, 1 when it has all come in.
+    gone: f32,
 }
 
 impl Spread {
-    /// What of it has come in so far: what is within the front's reach of where it was dropped.
+    /// What of it has come in so far: what is within the front, an ellipse about where it was
+    /// dropped, wobbling a little as it goes.
     fn partial(&self) -> Mask {
-        if self.reach >= self.most {
+        if self.gone >= 1.0 {
             return self.all.clone();
         }
         let mut mask = self.all.clone();
         let (sx, sy) = (self.seed.0 as f32, self.seed.1 as f32);
+        let (half, down) = (self.semi.0 * self.gone, self.semi.1 * self.gone);
         let width = self.all.width as usize;
         for (y, row) in mask.data.chunks_exact_mut(width).enumerate() {
-            let down = y as f32 - sy;
-            let across =
-                if down.abs() >= self.reach { None } else { Some((self.reach * self.reach - down * down).sqrt()) };
-            match across {
-                Some(across) => {
-                    let from = ((sx - across).ceil().max(0.0) as usize).min(row.len());
-                    let upto = ((sx + across).floor().max(-1.0) as usize).saturating_add(1).min(row.len());
-                    if let Some(left) = row.get_mut(..from) {
-                        left.fill(0);
-                    }
-                    if let Some(right) = row.get_mut(upto..) {
-                        right.fill(0);
-                    }
-                }
-                None => row.fill(0),
+            let dy = y as f32 - sy;
+            if down <= 0.0 || dy.abs() >= down {
+                row.fill(0);
+                continue;
+            }
+            let across = half * (1.0 - (dy / down) * (dy / down)).max(0.0).sqrt();
+            let from = ((sx - across).ceil().max(0.0) as usize).min(row.len());
+            let upto = ((sx + across).floor().max(-1.0) as usize).saturating_add(1).min(row.len());
+            if let Some(before) = row.get_mut(..from) {
+                before.fill(0);
+            }
+            if let Some(after) = row.get_mut(upto..) {
+                after.fill(0);
             }
         }
         mask
@@ -324,6 +326,7 @@ impl CanvasSession {
     pub fn pour_begin(&self, x: f32, y: f32, r: f32, g: f32, b: f32, threshold: f32) -> bool {
         self.pour_end(true, None);
         self.await_pour();
+        self.spread_through();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(seed) = seed_at(st, x, y) else { return false };
@@ -362,6 +365,8 @@ impl CanvasSession {
         }
         pour.show(w, st.canvas.as_mut(), false);
         st.pour = Some(pour);
+        // it comes in where it was dropped, going on while the colour is still held
+        self.begin_spread(st, None);
         self.shared.frame(st);
         true
     }
@@ -374,6 +379,8 @@ impl CanvasSession {
         let seed = seed_at(st, x, y);
         let (w, h) = (st.doc.width(), st.doc.height());
         let Some(pour) = st.pour.as_mut().filter(|p| p.finishing.is_none()) else { return false };
+        // taken hold of again while it is still coming in, it is shown as it is
+        pour.spread = None;
         let same = match seed {
             Some(seed) => pour.moved(w, h, seed),
             None => {
@@ -394,6 +401,8 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(pour) = st.pour.as_mut().filter(|p| p.finishing.is_none()) else { return };
+        // its colour changed while it is still coming in: it is shown as it is
+        pour.spread = None;
         let colour = [r, g, b].map(unit);
         if colour == pour.colour {
             return;
@@ -409,6 +418,8 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(pour) = st.pour.as_mut().filter(|p| p.finishing.is_none()) else { return };
+        // its threshold dragged while it is still coming in: it is shown as it is
+        pour.spread = None;
         let t = thousandths(threshold);
         if t == pour.shown {
             return;
@@ -425,11 +436,17 @@ impl CanvasSession {
     /// [`CanvasSession::pour_finishing`] until then.
     pub fn pour_end(&self, keep: bool, name: Option<String>) {
         self.await_pour();
-        self.spread_through();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if keep && self.begin_spread(st, name.clone()) {
-            self.shared.frame(st);
+        if let Some(pour) = st.pour.as_mut().filter(|pour| pour.spread.is_some()) {
+            if keep {
+                // still coming in: it ends when it has, and the release only says it is kept
+                pour.ending_name = name;
+                return;
+            }
+            // let go of before it had: whatever of it is there goes back
+            pour.spread = None;
+            end_pour(&self.shared, st, false, None);
             return;
         }
         if keep && self.finish_pour(st, &name) {
@@ -457,7 +474,7 @@ impl CanvasSession {
             let passed = ((now - began) / SPREAD_MS).clamp(0.0, 1.0) as f32;
             // away from the drop quickly, easing as it comes to the far side
             let eased = 1.0 - (1.0 - passed).powi(3);
-            spread.reach = spread.most * eased;
+            spread.gone = eased;
             pour.show(width, st.canvas.as_mut(), false);
             passed >= 1.0
         };
@@ -502,12 +519,11 @@ impl CanvasSession {
         let Some(all) = pour.shown_mask.clone() else { return false };
         let Some([x, y, w, h]) = all.bounds() else { return false };
         let (sx, sy) = (seed.0 as f32, seed.1 as f32);
-        let most = [[x, y], [x + w, y + h]]
-            .iter()
-            .map(|&[cx, cy]| ((cx as f32 - sx).powi(2) + (cy as f32 - sy).powi(2)).sqrt())
-            .fold(0.0_f32, f32::max);
+        // half the fill about the drop, so the front takes the shape of the area it is filling
+        let semi =
+            ((sx - x as f32).max((x + w) as f32 - sx).max(1.0), (sy - y as f32).max((y + h) as f32 - sy).max(1.0));
         pour.ending_name = name;
-        pour.spread = Some(Spread { began: None, seed, most, all, reach: 0.0 });
+        pour.spread = Some(Spread { began: None, seed, semi, all, gone: 0.0 });
         true
     }
 
