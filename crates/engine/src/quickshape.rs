@@ -177,7 +177,10 @@ impl Shape {
             ShapeKind::Triangle => polygon(stroke, 3).unwrap_or_else(|| self.clone()),
             ShapeKind::EquilateralTriangle => equilateral(&polygon(stroke, 3).unwrap_or_else(|| self.clone())),
             ShapeKind::Line => line_of(stroke),
-            _ => self.clone(),
+            ShapeKind::Arc => fit_arc(stroke).unwrap_or_else(|| self.clone()),
+            ShapeKind::Polyline => {
+                Shape { kind: ShapeKind::Polyline, nodes: simplify(stroke, CORNER_TOLERANCE * size(stroke)) }
+            }
         }
     }
 
@@ -1054,6 +1057,31 @@ mod tests {
         let before = bent.clone();
         bent.move_handle(1, start.lerp(end, 0.5));
         assert_eq!(bent, before);
+    }
+
+    #[test]
+    fn a_line_chosen_goes_back_to_the_arc_or_polyline_it_was_offered_beside() {
+        let arc: Vec<Vec2> = (0..=40)
+            .map(|i| {
+                let t = i as f32 / 40.0 * 2.0;
+                Vec2::new(200.0 + 150.0 * t.cos(), 200.0 + 150.0 * t.sin())
+            })
+            .collect();
+        let bend: Vec<Vec2> = (0..=40)
+            .map(|i| {
+                let t = i as f32;
+                if i <= 20 { Vec2::new(10.0 * t, 0.0) } else { Vec2::new(200.0, 10.0 * (t - 20.0)) }
+            })
+            .collect();
+        for (stroke, kind) in [(&arc, ShapeKind::Arc), (&bend, ShapeKind::Polyline)] {
+            let found = recognise(stroke);
+            assert_eq!(found.iter().map(|s| s.kind).collect::<Vec<_>>(), [kind, ShapeKind::Line]);
+            let line = found[0].as_kind(ShapeKind::Line, stroke);
+            assert_eq!(line.kind, ShapeKind::Line);
+            let back = line.as_kind(kind, stroke);
+            assert_eq!(back.kind, kind);
+            assert_eq!(back.nodes, found[0].nodes);
+        }
     }
 
     #[test]
