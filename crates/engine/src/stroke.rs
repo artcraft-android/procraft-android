@@ -263,11 +263,14 @@ fn pressure_keep(amount: f32) -> f32 {
 /// Motion filtering's weights for a point and those either side of it (an odd count, adding up to
 /// one), `amount` and `expression` 0..1, at `rate` samples a second. A windowed low-pass, but only
 /// how much of each frequency it lets through is kept, so nothing is moved along: the path doesn't
-/// lag or cut inside a curve.
+/// lag or cut inside a curve. Expression lengthens the filter, letting more of the hand's own
+/// motion under the cut through: the more of it is taken out, the less there is to let back.
 fn motion_weights(amount: f32, expression: f32, rate: f64) -> Vec<f32> {
-    let strength = f64::from(amount.clamp(0.0, 1.0)).powf(MOTION_POWER);
+    let amount = f64::from(amount.clamp(0.0, 1.0));
+    let strength = amount.powf(MOTION_POWER);
     let cut = rate * (1.0 - strength) + MOTION_LOWEST_CUT * strength;
-    let longer = 1.0 + (MOTION_EXPRESSION_LONGEST - 1.0) * f64::from(expression.clamp(0.0, 1.0));
+    let room = 1.0 - amount;
+    let longer = 1.0 + (MOTION_EXPRESSION_LONGEST - 1.0) * f64::from(expression.clamp(0.0, 1.0)) * room;
     let wanted = rate / cut * longer;
     let size = (wanted.ceil() as usize).next_power_of_two().clamp(2, MOTION_MOST_SAMPLES);
     let span = wanted.min((size - 1) as f64);
@@ -315,10 +318,11 @@ fn by_speed(amount: f32, speed: f32) -> f32 {
     if amount >= 0.0 { 1.0 - amount * speed } else { 1.0 + amount * (1.0 - speed) }
 }
 
-/// Stabilisation averages each point with those either side of it: at full strength this many
-/// samples' worth each way (at the rate above), fewer as the strength to this power falls.
-const MOST_AVERAGED: f32 = 120.0;
-const STABILIZATION_POWER: f32 = 2.2;
+/// Stabilisation averages each point with those either side of it: at full strength, this long a
+/// stretch of the input, milliseconds. A length of the stroke rather than a count of samples, so
+/// the same setting averages the same distance however fast the input comes, and a quick stroke -
+/// covering more of itself within that stretch - comes out evened out more.
+const STABILIZATION_MS: f64 = 200.0;
 /// Motion filtering lets through what moves slower than its cut and takes out what shakes faster:
 /// at full strength the cut is this, in hertz. Below that it rises to the input's own rate with
 /// the strength to this power, so a little is strong already.
@@ -1496,12 +1500,18 @@ impl StrokeBuilder {
         both
     }
 
-    /// How many samples each way stabilisation averages.
+    /// How many samples each way stabilisation averages: the stretch of stroke [`STABILIZATION_MS`]
+    /// covers at the brushed strength, in samples at the input's tuned rate.
     fn stabilised(&self) -> usize {
         if self.exact {
             return 0;
         }
-        (self.extras.stabilization.clamp(0.0, 1.0).powf(STABILIZATION_POWER) * MOST_AVERAGED) as usize
+        let amount = self.extras.stabilization.clamp(0.0, 1.0);
+        if amount <= 0.0 {
+            return 0;
+        }
+        let interval = 1000.0 / if self.pointer.has_pressure() { PEN_RATE } else { FINGER_RATE };
+        (f64::from(amount) * STABILIZATION_MS / interval / 2.0).round() as usize
     }
 
     /// Takes the path on to `to`: the stretch before it walked along the curve through the points
@@ -4089,7 +4099,7 @@ mod tests {
             (800.0 - last.center.x, last.radius)
         };
         let close = |a: f32, b: f32, share: f32| (a - b).abs() <= share * a.abs().max(b.abs());
-        for (setting, amount, behind) in [("stabilization", 1.0, 200.0), ("motion_filtering", 0.25, 15.0)] {
+        for (setting, amount, behind) in [("stabilization", 1.0, 60.0), ("motion_filtering", 0.25, 15.0)] {
             let mut b = plain();
             b.set_setting(setting, amount);
             let (slow, fast) = (end(&b, PEN_RATE).0, end(&b, PEN_RATE * 3.0).0);
@@ -4104,6 +4114,59 @@ mod tests {
             close(unsmoothed - slow, unsmoothed - fast, 0.15),
             "pressure: {slow} at 240 Hz, {fast} at 720 Hz, {unsmoothed} unsmoothed"
         );
+    }
+
+    #[test]
+    fn stabilisation_trails_by_a_tenth_of_a_second_at_its_most() {
+        // full strength holds the stroke back by half the stretch it averages, and no more: a
+        // stabiliser that drags the line a second behind the pen is a delay, not a stabiliser
+        let mut b = plain();
+        b.set_setting("stabilization", 1.0);
+        let mut s = StrokeBuilder::new(b, 4.0, Pointer::Stylus);
+        s.add(&line(400, 400.0));
+        let last = *s.stamps().last().unwrap();
+        // a pixel every four milliseconds, so a pixel behind is four milliseconds behind
+        let behind = (400.0 - last.center.x) * 4.0;
+        assert!((60.0..140.0).contains(&behind), "trails {behind} ms");
+    }
+
+    #[test]
+    fn a_quicker_stroke_is_evened_out_more() {
+        // the same three wobbles over the same 600 px, once at a stroll and once at a dash: the
+        // average covers a longer piece of the stroke the quicker it is drawn, so more of the
+        // wobble goes. The faster a stroke, the more it smooths it.
+        let wobble = |ms: f64| -> f32 {
+            let mut b = plain();
+            b.set_setting("stabilization", 0.5);
+            let mut s = StrokeBuilder::new(b, 4.0, Pointer::Stylus);
+            let wave: Vec<Sample> = (0..=240)
+                .map(|i| {
+                    let u = i as f32 / 240.0;
+                    Sample::at(
+                        Vec2::new(600.0 * u, 40.0 * (std::f32::consts::TAU * 3.0 * u).sin()),
+                        0.5,
+                        ms * (i as f64) / 240.0,
+                    )
+                })
+                .collect();
+            s.add(&wave);
+            let stamps = s.finish();
+            let third = stamps.len() / 3;
+            let ys: Vec<f32> = stamps.iter().skip(third).take(third).map(|s| s.center.y).collect();
+            ys.iter().copied().fold(f32::MIN, f32::max) - ys.iter().copied().fold(f32::MAX, f32::min)
+        };
+        let (stroll, dash) = (wobble(2400.0), wobble(600.0));
+        assert!(dash < stroll * 0.8, "{dash} of the wobble at a dash, {stroll} at a stroll");
+    }
+
+    #[test]
+    fn expression_has_nothing_left_to_give_at_full_filtering() {
+        // the more is filtered out, the less of the hand's own motion is left for expression to
+        // let back through; at the top of the slider it changes nothing at all
+        assert_eq!(motion_weights(1.0, 1.0, PEN_RATE), motion_weights(1.0, 0.0, PEN_RATE));
+        // at the bottom it still lengthens the filter
+        let (bare, expressed) = (motion_weights(0.05, 0.0, PEN_RATE), motion_weights(0.05, 1.0, PEN_RATE));
+        assert!(expressed.len() > bare.len(), "{} taps against {}", expressed.len(), bare.len());
     }
 
     #[test]
