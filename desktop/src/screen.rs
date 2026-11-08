@@ -80,25 +80,28 @@ fn is_minimised(size: winit::dpi::PhysicalSize<u32>) -> bool {
 
 impl Screen {
     /// The window's surface, and a device that can show it, and which backend made them: the
-    /// first from backend `from` on (round to those before it) that makes both and can show on
-    /// the window without an error (see `Gpu::instance_after`); one whose driver panics gives way
-    /// to the next too. `trying` is told each backend before it is tried (a driver that crashes
-    /// takes the app down with it). Else what each backend said. The canvases' pipelines are then
-    /// made on a thread of their own (see [`Screen::canvases_made`]), `wake` woken once they are.
-    /// `tried` backends were tried before the app started again: only those left are.
+    /// first of the backends in `order` (see `Gpu::instance_after`), from backend `from` on (round
+    /// to those before it), that makes both and can show on the window without an error; one whose
+    /// driver panics gives way to the next too. `trying` is told each backend before it is tried
+    /// (a driver that crashes takes the app down with it). Else what each backend said. The
+    /// canvases' pipelines are then made on a thread of their own (see [`Screen::canvases_made`]),
+    /// `wake` woken once they are. `tried` backends were tried before the app started again: only
+    /// those left are.
     pub fn new(
         window: Arc<Window>,
         display: &OwnedDisplayHandle,
+        order: &[usize],
         from: usize,
         tried: usize,
         mut trying: impl FnMut(usize),
         wake: winit::event_loop::EventLoopProxy<()>,
     ) -> Result<(Screen, usize), String> {
-        let count = Gpu::backend_count().max(1);
+        let count = order.len().max(1);
         let left = count.saturating_sub(tried).max(1);
+        let at = order.iter().position(|&b| b == from).unwrap_or(0);
         let mut failed = Vec::new();
         for tries in 0..left {
-            let backend = (from + tries) % count;
+            let backend = order.get((at + tries) % count).copied().unwrap_or(from);
             let last = tries + 1 >= left;
             trying(backend);
             let started = Instant::now();
@@ -342,6 +345,10 @@ impl Screen {
         queue.present(frame);
         // the backend shows: a crash from now on isn't its start's
         crate::startup::gpu_shown();
+        // nor, once a canvas opening has drawn (or closed first), the canvas's
+        if crate::startup::canvas_awaited() {
+            crate::startup::canvas_shown(session.map(|s| s.frames_drawn() > 0));
+        }
         if canvas_soon { Some(Duration::ZERO) } else { interface_after }
     }
 }

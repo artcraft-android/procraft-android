@@ -113,8 +113,8 @@ impl Gpu {
     /// whose Vulkan is missing or fails); on Windows Vulkan and Direct3D 12, Direct3D 12 first on
     /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens), then OpenGL (a GPU or
     /// driver too old for either); on Linux Vulkan, then OpenGL (the same); elsewhere the native
-    /// API.
-    fn backends() -> Vec<wgpu::Backends> {
+    /// API. A backend's index here is the one the other calls take.
+    pub fn backends() -> Vec<wgpu::Backends> {
         if let Some(chosen) = wgpu::Backends::from_env().filter(|b| !b.is_empty()) {
             return vec![chosen];
         }
@@ -134,6 +134,21 @@ impl Gpu {
     /// How many backends there are to make a device from (see [`Gpu::instance_after`]).
     pub fn backend_count() -> usize {
         Gpu::backends().len()
+    }
+
+    /// Whether `WGPU_BACKEND` names the backends: then they are the only ones tried.
+    pub fn backends_named() -> bool {
+        wgpu::Backends::from_env().is_some_and(|b| !b.is_empty())
+    }
+
+    /// The GPUs `backends` sees, as each says what it is, from an instance of their own: no device
+    /// is made from any (Direct3D 12 makes one of its own for each, to ask what it can do; Vulkan
+    /// only asks), e.g. to choose which backend to try first.
+    pub fn adapters(backends: wgpu::Backends) -> Vec<wgpu::AdapterInfo> {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = backends;
+        let instance = wgpu::Instance::new(desc);
+        pollster::block_on(instance.enumerate_adapters(backends)).iter().map(wgpu::Adapter::get_info).collect()
     }
 
     /// Backend `index`'s name, for the log and messages (see [`Gpu::instance_after`]).

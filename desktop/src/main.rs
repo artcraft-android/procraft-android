@@ -323,11 +323,13 @@ impl ApplicationHandler for App {
         };
         // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
         pen::watch(&window, self.wake.clone());
-        // from the backend the last run used, or the next if that run never ended
-        let from = startup::gpu_start(procraft_gpu::Gpu::backend_count());
+        // in this machine's order, from the backend the last run used, or the next if that one
+        // was at risk when it stopped
+        let order = startup::backend_order();
+        let from = startup::gpu_start(order);
         let tried = startup::gpu_tried();
         let display = event_loop.owned_display_handle();
-        let screen = match Screen::new(window, &display, from, tried, startup::gpu_trying, self.wake.clone()) {
+        let screen = match Screen::new(window, &display, order, from, tried, startup::gpu_trying, self.wake.clone()) {
             Ok((s, backend)) => {
                 startup::gpu_made(backend);
                 s
@@ -512,6 +514,9 @@ impl App {
         let size = screen.window.inner_size();
         let scale = screen.window.scale_factor() as f32;
         session.set_display_scale(scale);
+        // until it shows, a driver crashing counts against the backend (unless a canvas has drawn
+        // on it before)
+        startup::canvas_opening();
         // its layers go up on a thread of their own (an artwork of many takes seconds), the window
         // drawing meanwhile
         let (gpu, opened) = (screen.gpu.clone(), session.clone());
