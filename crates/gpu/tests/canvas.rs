@@ -3511,8 +3511,11 @@ fn a_height_brush_lights_its_paint_and_a_flat_one_does_not() {
         let mut canvas = Canvas::new(&gpu, &doc).unwrap();
         let mut brush = Brush::round_pen();
         brush.shape.source = Source::new(pixels.clone());
+        brush.set_setting("rendering_mode", 4.0);
         brush.set_setting("height_amount", height);
         brush.set_setting("height_scale", 1.0);
+        brush.stock.grain =
+            Some(procraft_engine::brush::StockImage { name: "Brush-Preset-Grunge.jpg".to_owned(), inverted: false });
         let mut s = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [0.8, 0.5, 0.3], 1.0, false);
         canvas.use_sources(&gpu, &mut s, &brush);
         canvas.begin_stroke(doc.current(), s);
