@@ -48,6 +48,9 @@ struct LayerUniform {
     clip_masked: f32,
     // pixels a side of the image the grain is read from
     grain_side: f32,
+    // impasto: how strongly the stroke's height is lit (none at 0), and how deep it runs
+    height_amount: f32,
+    height_scale: f32,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -62,6 +65,8 @@ const STROKE_LUMINANCE: u32 = 256u;
 @group(0) @binding(6) var mask_tex: texture_2d<f32>;
 @group(0) @binding(7) var second_tex: texture_2d<f32>;
 @group(0) @binding(8) var clip_mask_tex: texture_2d<f32>;
+// impasto: the stroke's paint height
+@group(0) @binding(9) var height_tex: texture_2d<f32>;
 @group(1) @binding(0) var<uniform> lu: LayerUniform;
 
 // one triangle covering the target
@@ -75,6 +80,38 @@ fn vs_full(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 fn stroke_alpha(p: vec2<i32>, o: vec2<i32>) -> f32 {
     let dims = vec2<i32>(textureDimensions(stroke_tex));
     return textureLoad(stroke_tex, clamp(p + o, vec2<i32>(0), dims - 1), 0).a;
+}
+
+// impasto: the paint's height at p
+fn paint_height(p: vec2<i32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(height_tex));
+    let q = clamp(p, vec2<i32>(0), dims - 1);
+    return textureLoad(height_tex, q, 0).r;
+}
+
+// how the paint's height catches the light: its body brighter than its valleys, and its slopes
+// shaded as the light comes from the upper left, a little in front
+fn height_light(p: vec2<i32>) -> f32 {
+    if (lu.height_amount <= 0.0 || lu.height_scale <= 0.0 || paint_height(p) <= 0.0) {
+        return 1.0;
+    }
+    let d = 3;
+    let hl = paint_height(p - vec2<i32>(d, 0));
+    let hr = paint_height(p + vec2<i32>(d, 0));
+    let hu = paint_height(p - vec2<i32>(0, d));
+    let hd = paint_height(p + vec2<i32>(0, d));
+    // the body's height over a few pixels, so the stamps' own edges soften into ridges
+    let body = 0.2 * (paint_height(p) + hl + hr + hu + hd);
+    let dx = 0.5 * (hr - hl);
+    let dy = 0.5 * (hd - hu);
+    // the paint's depth: taller paint leans its slopes further into the light
+    let slope = lu.height_scale * 110.0 * lu.height_amount;
+    let n = normalize(vec3<f32>(-dx * slope, -dy * slope, 1.0));
+    let l = normalize(vec3<f32>(-0.45, -0.65, 1.0));
+    let lit = 1.0 + (dot(n, l) - l.z) * 1.4;
+    // the body itself: a valley in shadow, a ridge catching the light
+    let tone = 1.0 + (body - 0.45) * 0.9 * lu.height_amount;
+    return clamp(tone * lit, 0.7, 1.25);
 }
 
 // a grain's value made lighter or darker and of more or less contrast
@@ -157,6 +194,12 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
     if (lu.threshold >= 0.0 && s.a > 0.0) {
         let on = select(0.0, 1.0, s.a > lu.threshold);
         s = s * (on / s.a);
+    }
+    // impasto: light the paint by the slopes of its height
+    let shade = height_light(p);
+    if (shade != 1.0 && s.a > 0.0) {
+        let c = clamp(unpremultiply(s) * shade, vec3<f32>(0.0), vec3<f32>(1.0));
+        s = vec4<f32>(c * s.a, s.a);
     }
     return StrokePixel(s * lu.stroke_opacity, burn);
 }

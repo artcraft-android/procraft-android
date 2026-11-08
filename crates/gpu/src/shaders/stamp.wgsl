@@ -32,6 +32,8 @@ struct StampUniform {
     shape_lod_cap: f32,
     // pixels a side of the image a moving grain is read from
     grain_side: f32,
+    // impasto: how strongly the shape is also a height (none at 0)
+    height_amount: f32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -231,4 +233,42 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     let inside_selection = textureSampleLevel(selected, shape_smp, i.pos.xy / su.canvas_size, 0.0).r;
     a = a * i.alpha * inside_selection;
     return vec4<f32>(i.color * a, a);
+}
+
+// The same stamp as a height: the shape's own luminance (its ridges high, its valleys low), the
+// round tip's profile, scaled by the stamp's pressure and kept inside the selection. Written to
+// the stroke's height texture, the tallest stamp at each pixel.
+@fragment
+fn fs_height(i: StampOut) -> @location(0) vec4<f32> {
+    if (su.height_amount <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let r = i.radius;
+    var h = 0.0;
+    // how much paint the stamp lays here: the height only arrives with the paint
+    var cover = 0.0;
+    if (su.shape < 0) {
+        let d = length(i.q) * r;
+        let rim = clamp(r - d + 0.5, 0.0, 1.0);
+        let soft = 1.0 - smoothstep(min(su.hardness, 0.999) * r, r + 0.5, d);
+        cover = min(rim, soft);
+        h = cover;
+    } else {
+        let uv = i.q * i.fill * 0.5 + 0.5;
+        let side = f32(textureDimensions(shapes).x);
+        let lod = clamp(log2(0.5 * side / (r + QUAD_REACH)), 0.0, su.shape_lod_cap + log2(side / 256.0));
+        let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
+        var s = textureSampleLevel(shapes, shape_smp, uv, su.shape, lod).r;
+        if (su.shape_sharp == 1u) {
+            s = shape_texel(uv, su.shape);
+        }
+        cover = select(0.0, s, inside);
+        // the height is the shape read smooth: its fine speckle would only alias the lighting
+        let height_lod = min(lod + 2.0, su.shape_lod_cap + log2(side / 256.0));
+        h = select(0.0, textureSampleLevel(shapes, shape_smp, uv, su.shape, height_lod).r, inside);
+    }
+    let inside_selection = textureSampleLevel(selected, shape_smp, i.pos.xy / su.canvas_size, 0.0).r;
+    let a = clamp(0.22 * i.alpha * inside_selection * cover, 0.0, 1.0);
+    // premultiplied, so where stamps meet the height that arrives last (or strongest) shows
+    return vec4<f32>(h * a, h * a, h * a, a);
 }

@@ -3491,3 +3491,48 @@ fn a_long_stroke_of_large_stamps_is_more_than_one_piece() {
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(canvas.pieces_sent(), sent);
 }
+
+#[test]
+fn a_height_brush_lights_its_paint_and_a_flat_one_does_not() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let n = TEXTURE_SIZE;
+    // a rolling height: its slopes face the light one way and another across the stamp
+    let pixels: Vec<u8> = (0..n * n)
+        .map(|i| {
+            let x = (i % n) as f32 / n as f32 * std::f32::consts::TAU * 3.0;
+            let y = (i / n) as f32 / n as f32 * std::f32::consts::TAU * 2.0;
+            let h = 0.35 + 0.65 * (0.5 + 0.5 * (x.sin() * y.cos()));
+            (h * 255.0) as u8
+        })
+        .collect();
+    let layer = |height: f32| {
+        let mut doc = Document::new(96, 96);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut brush = Brush::round_pen();
+        brush.shape.source = Source::new(pixels.clone());
+        brush.set_setting("height_amount", height);
+        brush.set_setting("height_scale", 1.0);
+        let mut s = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [0.8, 0.5, 0.3], 1.0, false);
+        canvas.use_sources(&gpu, &mut s, &brush);
+        canvas.begin_stroke(doc.current(), s);
+        canvas.add_stamps(&[dot(Vec2::new(48.0, 48.0), 40.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let spread = |px: &[u8]| {
+        let tones: Vec<i32> = px
+            .chunks(4)
+            .filter(|p| p[3] > 80)
+            .map(|p| {
+                let a = i32::from(p[3]);
+                (i32::from(p[0]) + i32::from(p[1]) + i32::from(p[2])) * 255 / (3 * a)
+            })
+            .collect();
+        assert!(!tones.is_empty(), "the stamp painted nothing");
+        tones.iter().max().unwrap() - tones.iter().min().unwrap()
+    };
+    assert!(spread(&layer(1.0)) > 24, "the height lights the paint");
+    assert!(spread(&layer(0.0)) <= 3, "a brush without height stays flat");
+}

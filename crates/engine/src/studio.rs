@@ -143,7 +143,22 @@ impl Brush {
     /// room left: a dry brush in Uniform Blending (blending, building up by what is left) and the
     /// Normal blend mode. Stamps drawn "over" can't follow that rule pixel by pixel.
     pub fn laid_in_place(&self) -> bool {
-        self.setting("rendering_mode").round() == 4.0 && !self.mixes_wet() && self.setting("blend_mode").round() == 0.0
+        self.setting("rendering_mode").round() == 4.0
+            && !self.mixes_wet()
+            && self.setting("blend_mode").round() == 0.0
+            // impasto paint keeps a height of its own, which the stamps build up in the stroke's
+            // height texture: laid straight into the layer, they have nowhere to put it
+            && !self.uses_height()
+    }
+
+    /// Whether the brush paints impasto: its file gave it a height (all Procreate's do) over a
+    /// shape whose own light and shadow are its height. Our own brushes, with no height set, are
+    /// flat. A brush kept and read back keeps only the controls that differ from the brush it
+    /// came from, so a height equal to the default is not in `extra`: the imported shape tells
+    /// them apart instead.
+    pub fn uses_height(&self) -> bool {
+        self.setting("height_amount") > 0.0
+            && (self.shape.source.is_some() || self.shape_file.is_some() || self.stock.shape.is_some())
     }
 
     /// Whether the brush blends (Uniform or Intense Blending, mixing as it goes): its opacity
@@ -596,6 +611,29 @@ mod tests {
         // a spacing tighter than the floor shows as none
         b.spacing = 0.001;
         assert_eq!(b.setting("spacing"), 0.0);
+    }
+
+    #[test]
+    fn a_brush_with_height_over_an_imported_shape_paints_impasto() {
+        let mut b = Brush::round_pen();
+        b.set_setting("rendering_mode", 4.0);
+        b.set_setting("blend_mode", 0.0);
+        // a round tip has no height of its own: its paint lies flat, in place
+        b.set_setting("height_amount", 0.5);
+        assert!(!b.uses_height());
+        assert!(b.laid_in_place());
+        // over an imported shape, the height is the paint's body, which the stamps build in the
+        // open. Kept and read back, only the controls that differ from its origin are there, so
+        // the height setting itself may have gone; the imported shape still says it is impasto.
+        let n = crate::textures::TEXTURE_SIZE;
+        b.shape.source = crate::brush::Source::new(vec![255; n * n]);
+        b.extra.remove("height_amount");
+        assert!(b.uses_height());
+        assert!(!b.laid_in_place());
+        // no height set: flat again
+        b.set_setting("height_amount", 0.0);
+        assert!(!b.uses_height());
+        assert!(b.laid_in_place());
     }
 
     #[test]
