@@ -181,7 +181,7 @@ fn main() {
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
         Err(e) => {
-            log::error!("no event loop: {e}");
+            startup::stopped(&format!("it couldn't make its window's event loop: {e}"));
             return;
         }
     };
@@ -222,12 +222,12 @@ fn main() {
     // (its message and place are in the log already)
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| event_loop.run_app(&mut app))) {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => log::error!("event loop: {e}"),
+        Ok(Err(e)) => startup::stopped(&format!("its window's event loop stopped: {e}")),
         Err(panic) => {
             if let Some(screen) = &app.screen {
                 screen.window.set_visible(false);
             }
-            startup::say_stopped(procraft_gpu::panic_message(panic.as_ref()));
+            startup::stopped(procraft_gpu::panic_message(panic.as_ref()));
             // what the app held is let go by the system: a driver that panicked may not take it back
             std::process::exit(101);
         }
@@ -316,7 +316,7 @@ impl ApplicationHandler for App {
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                log::error!("no window: {e}");
+                startup::stopped(&format!("it couldn't open its window: {e}"));
                 event_loop.exit();
                 return;
             }
@@ -1064,8 +1064,16 @@ impl App {
         // nothing they show can be drawn (and with the screen gone this happens once)
         self.projection = None;
         self.screen = None;
-        files::tell("The graphics device stopped", "ProCraft starts again, with the artwork as it was last saved.");
-        startup::start_again(None);
+        // as a backend starts, or a canvas first draws on it, that counts against the backend
+        if let Some(tried) = startup::device_lost() {
+            log::warn!("the graphics device stopped as this backend started: starting again on the next");
+            if !startup::start_on_next(tried) {
+                startup::stopped("the graphics device stopped, and it couldn't start itself again");
+            }
+        } else {
+            files::tell("The graphics device stopped", "ProCraft starts again, with the artwork as it was last saved.");
+            startup::start_again(None);
+        }
         event_loop.exit();
     }
 
@@ -1090,7 +1098,9 @@ impl App {
         log::warn!("the canvases' pipelines failed on this graphics backend: starting again on the next");
         self.screen = None;
         self.closed = true;
-        startup::start_again(Some(tried));
+        if !startup::start_again(Some(tried)) {
+            startup::stopped("its pipelines failed on this graphics backend, and it couldn't start itself again");
+        }
         event_loop.exit();
     }
 

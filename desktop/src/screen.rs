@@ -38,12 +38,18 @@ struct Pad {
     id: egui::TextureId,
 }
 
+/// The stack the canvases' pipelines are made on (reserved; only what is used is taken).
+const PIPELINES_STACK: usize = 64 << 20;
+
 /// Makes the canvases' pipelines on `gpu` (and the brush images they hold) on a thread of their
 /// own, waking `wake` once they are; a canvas made meanwhile waits for them. The thread says
 /// whether they were made without a GPU error (a driver that panics on them fails too).
 fn make_canvases(gpu: &Gpu, wake: winit::event_loop::EventLoopProxy<()>) -> Option<std::thread::JoinHandle<bool>> {
     let gpu = gpu.clone();
-    let made = std::thread::Builder::new().name("procraft-pipelines".to_owned()).spawn(move || {
+    // on a big stack: a driver's shader compiler recurses, and a stack overflow ends the app with
+    // next to no word
+    let thread = std::thread::Builder::new().name("procraft-pipelines".to_owned()).stack_size(PIPELINES_STACK);
+    let made = thread.spawn(move || {
         let (started, errors) = (Instant::now(), gpu.errors());
         let fine = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gpu.prepare_canvases())) {
             Ok(()) => gpu.errors() == errors && !gpu.is_lost(),

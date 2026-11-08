@@ -19,10 +19,15 @@
 //!
 //! The backends are tried in the order [`backend_order`] gives for this machine; "the next" is the
 //! next in it, round to the first. `WGPU_BACKEND` names one by hand: then no record is kept.
+//!
+//! A crash (or a panic on the window's thread) while a backend starts, or as a canvas first draws
+//! on it, starts the app again at once on the next backend, until each has been tried; then, or
+//! where it can't start again, it says why it stopped (see [`stopped`]).
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use procraft_gpu::{Gpu, wgpu};
 
@@ -40,6 +45,9 @@ const GPU_ASKING: &str = "gpu-asking.txt";
 
 /// This run's part in the record.
 static RUN: Mutex<Run> = Mutex::new(Run::NEW);
+/// The app has stopped (a crash, a panic on the window's thread): the record stays as it was then,
+/// whatever the other threads do before the process ends.
+static STOPPED: AtomicBool = AtomicBool::new(false);
 /// Whether the system tells the app when the session is ending (Windows): there a run that never
 /// ended was a crash, or the app killed.
 const ENDS_TOLD: bool = cfg!(windows);
@@ -48,13 +56,21 @@ static LOG_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new
 /// When the app was started.
 static LAUNCHED: OnceLock<Instant> = OnceLock::new();
 
-/// The log to the terminal and to the app folder's log file, and a crash's message into it.
+/// The log to the terminal and to the app folder's log file, and a crash's message into it. A
+/// start the app made itself on another graphics backend goes on in the same log, so it holds
+/// every backend's try (the run before them all stays the previous log).
 pub fn init() {
     LAUNCHED.get_or_init(Instant::now);
     let dir = files::app_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::rename(dir.join(LOG), dir.join(PREVIOUS_LOG));
-    *LOG_FILE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = std::fs::File::create(dir.join(LOG)).ok();
+    let tried = gpu_tried();
+    let file = if tried > 0 {
+        std::fs::OpenOptions::new().create(true).append(true).open(dir.join(LOG))
+    } else {
+        let _ = std::fs::rename(dir.join(LOG), dir.join(PREVIOUS_LOG));
+        std::fs::File::create(dir.join(LOG))
+    };
+    *LOG_FILE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = file.ok();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         // a system font it can't read is left out; one line for each says nothing to act on
         .filter_module("fontdb", log::LevelFilter::Error)
@@ -65,7 +81,8 @@ pub fn init() {
         log::error!("panicked: {info}\n{}", std::backtrace::Backtrace::force_capture());
         before(info);
     }));
-    log::info!("ProCraft {} on {} {}", env!("PROCRAFT_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    let again = if tried > 0 { format!(", started again with {tried} graphics backends tried") } else { String::new() };
+    log::info!("ProCraft {} on {} {}{again}", env!("PROCRAFT_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
     #[cfg(windows)]
     native::watch();
 }
@@ -93,26 +110,33 @@ impl Write for Both {
 }
 
 /// Starts the app again, with the files it was given, as a new process (this one is to end at
-/// once): its log let go first, so the new one can keep it as the one before. `tried`: how many
-/// graphics backends this start has tried, so the new one tries only those left (see
-/// [`gpu_tried`]); none, a new start.
-pub fn start_again(tried: Option<usize>) {
+/// once): its log let go first, so the new one can keep it. `tried`: how many graphics backends
+/// this start has tried, so the new one tries only those left (see [`gpu_tried`]); none, a new
+/// start. Whether the new one started.
+pub fn start_again(tried: Option<usize>) -> bool {
+    spawn_again(tried, true)
+}
+
+/// [`start_again`], with the files the app was given or without them; whether the new process
+/// started. The log is let go only if no other thread holds it (a crash may have stopped one that
+/// did).
+fn spawn_again(tried: Option<usize>, with_files: bool) -> bool {
     log::info!("starting again");
-    LOG_FILE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-    match std::env::current_exe() {
-        Ok(me) => {
-            let mut again = std::process::Command::new(me);
-            again.args(std::env::args_os().skip(1));
-            match tried {
-                Some(n) => again.env(TRIED, n.to_string()),
-                None => again.env_remove(TRIED),
-            };
-            if let Err(e) = again.spawn() {
-                log::error!("starting again: {e}");
-            }
-        }
-        Err(e) => log::error!("starting again: {e}"),
+    if let Ok(mut file) = LOG_FILE.try_lock() {
+        file.take();
     }
+    let started = std::env::current_exe().and_then(|me| {
+        let mut again = std::process::Command::new(me);
+        if with_files {
+            again.args(std::env::args_os().skip(1));
+        }
+        match tried {
+            Some(n) => again.env(TRIED, n.to_string()),
+            None => again.env_remove(TRIED),
+        };
+        again.spawn()
+    });
+    started.inspect_err(|e| log::error!("starting again: {e}")).is_ok()
 }
 
 /// How many graphics backends were tried before the app started itself again (on a backend's
@@ -248,7 +272,8 @@ pub fn gpu_start(order: &[usize]) -> usize {
     } else {
         String::new()
     };
-    let (run, start) = Run::after(&saved, order, ENDS_TOLD);
+    let (mut run, start) = Run::after(&saved, order, ENDS_TOLD);
+    run.tried = gpu_tried();
     *run_now() = run;
     let Some(record) = Record::read(&saved) else { return start };
     let (index, name) = (record.backend, Gpu::backend_name(record.backend));
@@ -288,6 +313,30 @@ pub fn gpu_trying(index: usize) {
 /// The window's device is made from backend `index`.
 pub fn gpu_made(index: usize) {
     run_now().made(index);
+    // the drivers are loaded now, and one may have put its own filter in place of the app's
+    #[cfg(windows)]
+    native::watch_again();
+}
+
+/// The graphics device was lost. While a backend starts, or as a canvas first draws on it, that
+/// counts against the backend, and the app is to start again on the next: how many have been
+/// tried, then (see [`start_on_next`]). Else none.
+pub fn device_lost() -> Option<usize> {
+    let mut run = run_now();
+    match run.stop(Gpu::backend_count(), ENDS_TOLD) {
+        Stop::Again(tried) if kept() => {
+            run.prepare(false);
+            keep(&mut run);
+            Some(tried)
+        }
+        _ => None,
+    }
+}
+
+/// Starts the app again on the next backend, `tried` tried, without the files it was opened with
+/// (they may have been taken in already); whether it started.
+pub fn start_on_next(tried: usize) -> bool {
+    spawn_again(Some(tried), false)
 }
 
 /// The window's first frame has shown (see [`gpu_prepared`]).
@@ -307,6 +356,8 @@ pub fn gpu_prepared(fine: bool) {
     let mut run = run_now();
     run.prepare(fine);
     keep(&mut run);
+    #[cfg(windows)]
+    native::watch_again();
 }
 
 /// A canvas is opening in the window: until its first frame shows (see [`canvas_shown`]), a crash
@@ -351,7 +402,7 @@ fn run_now() -> std::sync::MutexGuard<'static, Run> {
 /// all, so a crash as it is written leaves the last.
 fn keep(run: &mut Run) {
     let record = run.record();
-    if record == run.written || !recorded() {
+    if record == run.written || !recorded() || STOPPED.load(Ordering::SeqCst) {
         return;
     }
     run.written = record;
@@ -455,6 +506,9 @@ struct Run {
     ended: bool,
     /// What the record was last written to say.
     written: Option<Record>,
+    /// How many backends have been tried, with those tried before the app started itself again:
+    /// the one being tried the last of them.
+    tried: usize,
 }
 
 impl Run {
@@ -468,6 +522,7 @@ impl Run {
         opening: false,
         ended: false,
         written: None,
+        tried: 0,
     };
 
     /// A run after the record `saved`, and the backend it starts from, of those in `order` (see
@@ -480,6 +535,7 @@ impl Run {
     /// Backend `index` is about to be tried for the window.
     fn try_backend(&mut self, index: usize) {
         self.trying = Some(index);
+        self.tried += 1;
     }
 
     /// The window's device is made from backend `index`.
@@ -554,48 +610,99 @@ impl Run {
     fn at_risk(&self, ends_told: bool) -> bool {
         self.record().is_some_and(|r| r.stage.counts(ends_told))
     }
+
+    /// What the app does if it stops now (a crash, a panic on the window's thread), with `count`
+    /// backends: while its backend starts, or as a canvas first draws on it, it starts again on
+    /// the next, until each has been tried; else it says so (see [`Stop`]).
+    fn stop(&self, count: usize, ends_told: bool) -> Stop {
+        let Some(record) = self.record() else { return Stop::Say };
+        if count < 2 {
+            return Stop::Say;
+        }
+        match record.stage {
+            Stage::Trying | Stage::Drawing if self.tried < count => Stop::Again(self.tried),
+            Stage::Trying | Stage::Drawing => Stop::SayAllTried,
+            _ if self.at_risk(ends_told) => Stop::SayAnother,
+            _ => Stop::Say,
+        }
+    }
 }
 
-/// Says the app stopped on `what` (a panic's message, a crash) as it goes, where its log is and,
-/// while its backend was at risk, that starting it again tries another backend. Only logged for a
-/// test's window.
-pub fn say_stopped(what: &str) {
+/// What the app does as it stops (see [`Run::stop`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    /// Starts itself again on the next backend, this many tried.
+    Again(usize),
+    /// Says why it stopped, and that starting it again tries another backend.
+    SayAnother,
+    /// Says why it stopped, and that every backend was tried.
+    SayAllTried,
+    /// Says why it stopped.
+    Say,
+}
+
+/// The app stopped on `what` (a crash, a panic's message on the window's thread), and is to end:
+/// started again on the next backend, if it can be (see [`Run::stop`]), else said, with where its
+/// log is (only logged for a test's window). The backend record stays as it is now.
+pub fn stopped(what: &str) {
     log::error!("stopped: {what}");
+    STOPPED.store(true, Ordering::SeqCst);
     if !kept() {
         return;
     }
-    // said on a thread of its own: on the window's thread, a crash in the middle of the window's
-    // own messages keeps the message from ever showing (a thread that can't start, the crash
-    // holding the system's loader, isn't waited for)
-    let text = stopped_text(what);
-    let (started, start) = std::sync::mpsc::channel();
-    let said = std::thread::Builder::new().name("procraft-stopped".to_owned()).spawn(move || {
-        let _ = started.send(());
-        files::tell("ProCraft stopped", &text);
-    });
-    if let Ok(said) = said
-        && start.recv_timeout(std::time::Duration::from_secs(3)).is_ok()
-    {
-        let _ = said.join();
-    }
+    let stop = run_if_free().map_or(Stop::Say, |run| run.stop(Gpu::backend_count(), ENDS_TOLD));
+    let stop = match stop {
+        // without the files it was opened with: they may have been taken in already
+        Stop::Again(tried) if apart("procraft-again", move || start_on_next(tried)) == Some(true) => {
+            return;
+        }
+        Stop::Again(_) => Stop::SayAnother,
+        stop => stop,
+    };
+    let text = stopped_text(what, stop);
+    apart("procraft-stopped", move || files::tell("ProCraft stopped", &text));
 }
 
-/// What [`say_stopped`] says.
-fn stopped_text(what: &str) -> String {
+/// This run's part in the record as it is now, if another thread lets go of it soon: a crash may
+/// have stopped the thread holding it.
+fn run_if_free() -> Option<Run> {
+    for _ in 0..20 {
+        match RUN.try_lock() {
+            Ok(run) => return Some(*run),
+            Err(std::sync::TryLockError::Poisoned(run)) => return Some(*run.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    None
+}
+
+/// Runs `work` on a thread of its own and waits for it: on the window's thread, a crash in the
+/// middle of the window's own messages keeps a message from ever showing. A thread that doesn't
+/// start (the crash holding the system's loader) isn't waited for. None if it didn't start or
+/// panicked.
+fn apart<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (started, start) = std::sync::mpsc::channel();
+    let thread = std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let _ = started.send(());
+            work()
+        })
+        .ok()?;
+    start.recv_timeout(Duration::from_secs(3)).ok()?;
+    thread.join().ok()
+}
+
+/// What [`stopped`] says, as it does after `stop`.
+fn stopped_text(what: &str, stop: Stop) -> String {
     let what = what.trim().trim_end_matches('.');
     let what = if what.is_empty() { "something went wrong" } else { what };
-    // not waited for: a crash may have stopped the thread holding it
-    let at_risk = match RUN.try_lock() {
-        Ok(run) => run.at_risk(ENDS_TOLD),
-        Err(std::sync::TryLockError::Poisoned(run)) => run.into_inner().at_risk(ENDS_TOLD),
-        Err(std::sync::TryLockError::WouldBlock) => false,
+    let after = match stop {
+        Stop::SayAnother | Stop::Again(_) => "\n\nStart it again to try another graphics backend.",
+        Stop::SayAllTried => "\n\nEach graphics backend has been tried. Updating the graphics driver may help.",
+        Stop::Say => "",
     };
-    let again = if at_risk && kept() && Gpu::backend_count() > 1 {
-        "\n\nStart it again to try another graphics backend."
-    } else {
-        ""
-    };
-    format!("ProCraft stopped: {what}.{again}\n\nIts log is {}", files::app_dir().join(LOG).display())
+    format!("ProCraft stopped: {what}.{after}\n\nIts log is {}", files::app_dir().join(LOG).display())
 }
 
 /// What the app says when no backend could draw the window, `why` each failed.
@@ -607,14 +714,17 @@ pub fn no_gpu_text(why: &str) -> String {
 }
 
 /// A crash in the system's or a driver's own code (Windows): logged with the file it happened in,
-/// and said, rather than the app vanishing.
+/// then the app started again on the next backend or the crash said (see [`stopped`]), rather
+/// than the app vanishing.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod native {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use windows::Win32::Foundation::HMODULE;
-    use windows::Win32::System::Diagnostics::Debug::{EXCEPTION_POINTERS, SetUnhandledExceptionFilter};
+    use windows::Win32::System::Diagnostics::Debug::{
+        AddVectoredExceptionHandler, EXCEPTION_POINTERS, SetUnhandledExceptionFilter,
+    };
     use windows::Win32::System::LibraryLoader::{
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
         GetModuleHandleExW,
@@ -629,13 +739,53 @@ mod native {
     /// A crash is being said (one crashing as it is said goes to the system).
     static CRASHED: AtomicBool = AtomicBool::new(false);
 
+    /// A stack overflow: little stack is left for the code that sees it.
+    const STACK_OVERFLOW: u32 = 0xC000_00FD;
+    /// What ends the process if no code handles it: an access violation, a page that can't be
+    /// read, an illegal or privileged instruction, a stack overflow.
+    const FATAL: [u32; 5] = [0xC000_0005, 0xC000_0006, 0xC000_001D, 0xC000_0096, STACK_OVERFLOW];
+    /// How many of them are logged as they happen, and how many have been seen.
+    const MOST_SEEN: u32 = 8;
+    static SEEN: AtomicU32 = AtomicU32::new(0);
+    /// `EXCEPTION_CONTINUE_SEARCH`, as a vectored handler returns it.
+    const GO_ON: i32 = 0;
+
     pub fn watch() {
-        // SAFETY: `crashed` is a filter as the system calls one, for the whole process
-        unsafe { SetUnhandledExceptionFilter(Some(crashed)) };
+        // SAFETY: both are handlers as the system calls them, for the whole process
+        unsafe {
+            SetUnhandledExceptionFilter(Some(crashed));
+            AddVectoredExceptionHandler(0, Some(seen));
+        }
+    }
+
+    /// Puts the filter back if something has put its own in its place (only the last set is
+    /// called: a driver's runtime replacing it would leave a crash with no word at all).
+    pub fn watch_again() {
+        // SAFETY: as in `watch`
+        let before = unsafe { SetUnhandledExceptionFilter(Some(crashed)) };
+        if before.map(|filter| filter as *const ()) != Some(crashed as *const ()) {
+            log::warn!("something had replaced the app's crash filter: put back");
+        }
+    }
+
+    /// Logs an exception that would end the process as it happens, before any code handles it: a
+    /// driver may handle it itself, but what ends the process with no filter called (the driver's
+    /// own abort, say) then still leaves where it went wrong.
+    unsafe extern "system" fn seen(info: *mut EXCEPTION_POINTERS) -> i32 {
+        // SAFETY: the system gives the exception's pointers, valid while the handler runs
+        let record = unsafe { info.as_ref().and_then(|i| i.ExceptionRecord.as_ref()) };
+        let Some(record) = record else { return GO_ON };
+        let code = record.ExceptionCode.0.cast_unsigned();
+        if FATAL.contains(&code) && code != STACK_OVERFLOW && SEEN.fetch_add(1, Ordering::Relaxed) < MOST_SEEN {
+            let file = module_of(record.ExceptionAddress).unwrap_or_else(|| "the app's code".to_owned());
+            log::warn!("an exception {code:#010X} in {file} (it ends the app if nothing handles it)");
+        }
+        GO_ON
     }
 
     /// A crash no code handled: its exception's code and the file of the code it happened in,
-    /// logged and said; then the app ends.
+    /// logged; the app started again or the crash said (see [`super::stopped`]); then the app
+    /// ends.
     unsafe extern "system" fn crashed(info: *const EXCEPTION_POINTERS) -> i32 {
         if CRASHED.swap(true, Ordering::SeqCst) {
             return EXCEPTION_CONTINUE_SEARCH;
@@ -643,11 +793,20 @@ mod native {
         // SAFETY: the system gives the crash's pointers, valid while the filter runs
         let record = unsafe { info.as_ref().and_then(|i| i.ExceptionRecord.as_ref()) };
         let (code, address) =
-            record.map_or((0, std::ptr::null_mut()), |r| (r.ExceptionCode.0.cast_unsigned(), r.ExceptionAddress));
-        let file = module_of(address).unwrap_or_else(|| "the app's code".to_owned());
-        log::error!("crashed in {file} (exception {code:#010X} at {address:?})");
-        super::say_stopped(&format!("it crashed in {file} (exception {code:#010X})"));
+            record.map_or((0, 0), |r| (r.ExceptionCode.0.cast_unsigned(), r.ExceptionAddress as usize));
+        // on a stack of its own: after a stack overflow this one has next to none left, and a
+        // second crash here would end the app with no word
+        if super::apart("procraft-crash", move || said(code, address)).is_none() {
+            said(code, address);
+        }
         EXCEPTION_EXECUTE_HANDLER
+    }
+
+    /// The crash logged, and the app started again or the crash said.
+    fn said(code: u32, address: usize) {
+        let file = module_of(address as *mut core::ffi::c_void).unwrap_or_else(|| "the app's code".to_owned());
+        log::error!("crashed in {file} (exception {code:#010X} at {address:#x})");
+        super::stopped(&format!("it crashed in {file} (exception {code:#010X})"));
     }
 
     /// The name of the file (a DLL, the app) whose code is at `address`.
@@ -996,10 +1155,122 @@ mod tests {
 
     #[test]
     fn a_stop_says_what_happened_and_where_the_log_is() {
-        let text = super::stopped_text("wgpu error: Validation Error.\n");
+        let text = super::stopped_text("wgpu error: Validation Error.\n", Stop::Say);
         assert!(text.starts_with("ProCraft stopped: wgpu error: Validation Error."), "{text}");
         assert!(text.contains("procraft.log"), "{text}");
-        let text = super::stopped_text("");
+        assert!(!text.contains("graphics"), "{text}");
+        let text = super::stopped_text("", Stop::Say);
         assert!(text.starts_with("ProCraft stopped: something went wrong."), "{text}");
+        let text = super::stopped_text("it crashed in igvk64.dll (exception 0xC0000005)", Stop::SayAnother);
+        assert!(text.contains("Start it again to try another graphics backend."), "{text}");
+        let text = super::stopped_text("it crashed in a driver (exception 0xC0000005)", Stop::SayAllTried);
+        assert!(text.contains("Each graphics backend has been tried."), "{text}");
+        assert!(!text.contains("Start it again"), "{text}");
+    }
+
+    use super::Stop;
+
+    /// A run on the first of `count` backends, `tried` of them tried before it (the app started
+    /// itself again), its device being made.
+    fn trying(count: usize, tried: usize) -> Run {
+        let order: Vec<usize> = (0..count).collect();
+        let (mut run, start) = Run::after("", &order, true);
+        run.tried = tried;
+        run.try_backend(start);
+        run
+    }
+
+    #[test]
+    fn a_crash_as_a_backend_starts_starts_the_app_again_on_the_next_until_each_is_tried() {
+        // the first of three crashes as its device, surface or pipelines are made, or before the
+        // window's first frame: started again, one tried
+        let mut run = trying(3, 0);
+        assert_eq!(run.stop(3, true), Stop::Again(1));
+        run.made(0);
+        assert_eq!(run.stop(3, true), Stop::Again(1));
+        run.show();
+        assert_eq!(run.stop(3, true), Stop::Again(1));
+        // the next start (one tried): the second crashes too, started again, two tried
+        assert_eq!(trying(3, 1).stop(3, true), Stop::Again(2));
+        // the last crashes: each has been tried, so it says so instead of going round
+        assert_eq!(trying(3, 2).stop(3, true), Stop::SayAllTried);
+        // on Linux or a Mac alike
+        assert_eq!(trying(2, 0).stop(2, false), Stop::Again(1));
+        assert_eq!(trying(2, 1).stop(2, false), Stop::SayAllTried);
+        // a backend failing with an error in the same start counts as tried
+        let mut run = trying(3, 0);
+        run.try_backend(1);
+        assert_eq!(run.stop(3, true), Stop::Again(2));
+    }
+
+    #[test]
+    fn a_crash_as_a_canvas_first_draws_starts_the_app_again_too() {
+        let mut run = started_on("", true);
+        run.tried = 1;
+        assert!(run.open_canvas());
+        assert_eq!(run.stop(2, true), Stop::Again(1));
+        assert_eq!(run.stop(2, false), Stop::Again(1));
+        // on the last backend left: said
+        run.tried = 2;
+        assert_eq!(run.stop(2, true), Stop::SayAllTried);
+    }
+
+    #[test]
+    fn a_crash_once_started_is_said_as_before() {
+        // in the gallery, the backend's try over, before any canvas: on Windows the next start
+        // takes the next backend, so it says so; elsewhere it keeps it
+        let mut run = started_on("", true);
+        run.tried = 1;
+        assert_eq!(run.stop(2, true), Stop::SayAnother);
+        assert_eq!(run.stop(2, false), Stop::Say);
+        // after a canvas has drawn
+        run.open_canvas();
+        run.canvas_frame(Some(true));
+        assert_eq!(run.stop(2, true), Stop::SayAnother);
+        assert_eq!(run.stop(2, false), Stop::Say);
+        // on a backend a canvas has drawn on before, a canvas opening isn't a start's
+        let mut run = started_on("0 ended drew", true);
+        run.tried = 1;
+        assert!(!run.open_canvas());
+        assert_eq!(run.stop(2, false), Stop::Say);
+        // ending as it should
+        run.end();
+        assert_eq!(run.stop(2, true), Stop::Say);
+    }
+
+    #[test]
+    fn a_process_that_ends_with_no_word_moves_the_next_start_on_as_a_crash_does() {
+        // nothing runs as the process goes (a driver's own abort, a stack overflow): what counts
+        // is what the record already says
+        for ends_told in [false, true] {
+            let mut run = trying(2, 0);
+            assert_eq!(next_start(&left(&run), &[0, 1], ends_told), 1);
+            run.made(0);
+            run.show();
+            assert_eq!(next_start(&left(&run), &[0, 1], ends_told), 1);
+        }
+        // once started, in the gallery or a canvas: on Windows
+        assert_eq!(next_start(&left(&started_on("", true)), &[0, 1], true), 1);
+    }
+
+    #[test]
+    fn a_backend_losing_its_device_as_it_starts_stays_tried_however_the_app_ends() {
+        let mut run = trying(2, 0);
+        run.made(0);
+        run.show();
+        assert_eq!(run.stop(2, true), Stop::Again(1));
+        // as `device_lost` marks it; the app then ends as it should, to start on the next
+        run.prepare(false);
+        run.end();
+        assert_eq!(next_start(&left(&run), &[0, 1], true), 1);
+    }
+
+    #[test]
+    fn with_one_backend_or_none_tried_yet_a_crash_is_only_said() {
+        // one backend (named by WGPU_BACKEND): nothing to go on to
+        assert_eq!(trying(1, 0).stop(1, true), Stop::Say);
+        // before any backend is tried
+        let (run, _) = Run::after("", &[0, 1], true);
+        assert_eq!(run.stop(2, true), Stop::Say);
     }
 }
