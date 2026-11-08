@@ -142,6 +142,10 @@ pub struct StrokeStyle {
     /// Wet mix: how much of the colour under the brush mixes into its paint, 0..1; none paints
     /// plainly.
     pub wet_pull: Option<f32>,
+    /// Wet pickup: how much of the paint already on the layer is dragged into the stroke's own
+    /// colour, where the two meet, 0..1 (none at 0). Unlike `wet_pull` it works on a dry brush
+    /// whose file gave it wet accumulation, mixing the layer as it was before the stroke.
+    pub pickup: f32,
     /// Wet paint mixes with the layer as it was before the stroke (a glaze), not with the stroke
     /// as it goes (a blending mode).
     pub wet_from_before: bool,
@@ -228,6 +232,7 @@ impl StrokeStyle {
     pub fn dry(self) -> StrokeStyle {
         StrokeStyle {
             wet_pull: None,
+            pickup: 0.0,
             wet_from_before: false,
             load: 0.0,
             dilution: 0.0,
@@ -266,6 +271,7 @@ impl StrokeStyle {
             grain_brightness: 0.0,
             grain_contrast: 0.0,
             wet_pull: None,
+            pickup: 0.0,
             wet_from_before: false,
             load: 0.0,
             dilution: 0.0,
@@ -304,6 +310,14 @@ impl StrokeStyle {
         preserve_alpha: bool,
     ) -> StrokeStyle {
         let wet = brush.mixes_wet();
+        // a brush file's wet accumulation, which pulls the paint under a stroke into its own even
+        // when the file gives it no dilution (a dry, smudging brush). A dual brush's second is
+        // where a file often keeps the smudge, so the stroke carries it even when the second is
+        // dropped (a shape made from it) or drawn apart.
+        let wetness = |b: &Brush| {
+            if b.extra.contains_key("wet_pull") { b.setting("wet_pull").clamp(0.0, 1.0) } else { 0.0 }
+        };
+        let pickup = wetness(brush).max(brush.secondary.as_deref().map_or(0.0, wetness));
         StrokeStyle {
             tool,
             color,
@@ -328,6 +342,7 @@ impl StrokeStyle {
             grain_contrast: brush.setting("grain_contrast").clamp(-1.0, 1.0),
             // wet mix once any of its settings is set
             wet_pull: wet.then(|| brush.setting("wet_pull").clamp(0.0, 1.0)),
+            pickup,
             wet_from_before: wet && !brush.mixes_with_stroke(),
             load: if wet { brush.setting("wet_charge").clamp(0.0, 1.0) } else { 0.0 },
             dilution: if wet { brush.setting("wet_dilution").clamp(0.0, 1.0) } else { 0.0 },
@@ -717,6 +732,8 @@ struct LayerUniform {
     /// Impasto: how strongly the stroke's height is lit (none at 0), and how deep it runs.
     height_amount: f32,
     height_scale: f32,
+    /// Wet pickup: how much of the paint under the stroke it drags into its own colour, 0..1.
+    pickup: f32,
 }
 
 impl Default for LayerUniform {
@@ -750,6 +767,7 @@ impl Default for LayerUniform {
             grain_side: TEXTURE_SIZE as f32,
             height_amount: 0.0,
             height_scale: 0.1,
+            pickup: 0.0,
         }
     }
 }
@@ -772,6 +790,12 @@ impl LayerUniform {
             Some(d) => LayerUniform { dual: d.mode + 1, dual_threshold: d.threshold, ..self },
             None => self,
         }
+    }
+
+    /// With the stroke's wet pickup: the first's or its second's, whichever is wetter.
+    fn with_pickup(self, stroke: Option<&ActiveStroke>) -> LayerUniform {
+        let pickup = stroke.map_or(0.0, |s| s.style.pickup.max(s.second.map_or(0.0, |d| d.style.pickup)));
+        LayerUniform { pickup, ..self }
     }
 
     /// With the stroke's look: its canvas grain, if it has one, and its edges and threshold.
@@ -5282,7 +5306,14 @@ impl Canvas {
                 quad_bind(device, &self.pipelines.quad_layout, views, self.height_view(), grain, &self.grain_sampler)
             };
             let laid = stroke.style.tool == StrokeTool::Laid;
-            match (stroke.style.tool, laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
+            // pickup reads the layer the paint goes over, so the stroke is put into the scratch
+            // first (a pass cannot read the layer it writes)
+            let pickup = stroke.style.tool == StrokeTool::Paint
+                && stroke.style.pickup.max(stroke.second.map_or(0.0, |d| d.style.pickup)) > 0.0;
+            match (
+                stroke.style.tool,
+                laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance || pickup,
+            ) {
                 (StrokeTool::Paint | StrokeTool::Laid, true) => {
                     // recolour where the layer has alpha, or blend by a mode or burn edges (which
                     // read the layer): into scratch, then back
@@ -5298,7 +5329,8 @@ impl Canvas {
                             ..Default::default()
                         }
                         .with_grain(Some(&stroke.style))
-                        .with_dual(Some(&stroke)),
+                        .with_dual(Some(&stroke))
+                        .with_pickup(Some(&stroke)),
                     );
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let bind = quad(&layer.view);
@@ -5321,7 +5353,8 @@ impl Canvas {
                     let offset = uniforms.push(
                         &LayerUniform { opacity: 1.0, stroke_opacity: opacity, ..Default::default() }
                             .with_grain(Some(&stroke.style))
-                            .with_dual(Some(&stroke)),
+                            .with_dual(Some(&stroke))
+                            .with_pickup(Some(&stroke)),
                     );
                     let dual = (stroke.second.is_some()
                         || stroke.style.full_grain.is_some()
@@ -5334,7 +5367,8 @@ impl Canvas {
                             StrokeTool::Erase => &self.pipelines.commit_erase,
                         });
                         scissor(&mut pass, rect);
-                        pass.set_bind_group(0, dual.as_ref().unwrap_or(&self.stroke_bind), &[]);
+                        let bind = dual.as_ref().unwrap_or(&self.stroke_bind);
+                        pass.set_bind_group(0, bind, &[]);
                         pass.set_bind_group(1, &self.uniform_bind, &[offset]);
                         pass.draw(0..3, 0..1);
                     }
@@ -6891,7 +6925,8 @@ impl Canvas {
             ..Default::default()
         }
         .with_grain(stroke.as_ref().map(|s| &s.style))
-        .with_dual(stroke.as_ref());
+        .with_dual(stroke.as_ref())
+        .with_pickup(stroke.as_ref());
         let mask_view = mask_view.unwrap_or(&self.stroke_view);
         self.draw_onto(
             device,

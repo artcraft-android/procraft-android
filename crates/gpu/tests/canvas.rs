@@ -3536,3 +3536,31 @@ fn a_height_brush_lights_its_paint_and_a_flat_one_does_not() {
     assert!(spread(&layer(1.0)) > 24, "the height lights the paint");
     assert!(spread(&layer(0.0)) <= 3, "a brush without height stays flat");
 }
+
+#[test]
+fn wet_pickup_drags_the_paint_under_a_stroke_into_its_colour() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let painted = |pickup: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        // a patch of orange, then a blue dab over it and another on the bare layer beside it
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.9, 0.4, 0.1], 1.0));
+        canvas.add_stamps(&[dot(Vec2::new(20.0, 32.0), 10.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let blue = StrokeStyle { pickup, ..StrokeStyle::new(StrokeTool::Paint, [0.1, 0.2, 0.9], 1.0) };
+        canvas.begin_stroke(doc.current(), blue);
+        canvas.add_stamps(&[dot(Vec2::new(20.0, 32.0), 8.0), dot(Vec2::new(50.0, 32.0), 8.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 64, 20, 32), pixel(&layer, 64, 50, 32))
+    };
+    let (over, bare) = painted(0.6);
+    // over the orange the blue takes some of it (more red and green than on bare paint)
+    assert!(over[0] > bare[0] + 30 && over[1] > bare[1] + 20, "{over:?} vs {bare:?}");
+    // with no pickup the same blue is the same blue either way
+    let (over, bare) = painted(0.0);
+    assert!(over[0].abs_diff(bare[0]) < 4 && over[1].abs_diff(bare[1]) < 4, "{over:?} vs {bare:?}");
+}

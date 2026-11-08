@@ -51,6 +51,8 @@ struct LayerUniform {
     // impasto: how strongly the stroke's height is lit (none at 0), and how deep it runs
     height_amount: f32,
     height_scale: f32,
+    // wet pickup: how much of the paint under the stroke it drags into its own colour, 0..1
+    pickup: f32,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -184,6 +186,16 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         // the first's colour where it is, else the second's (drawn in the stroke's colour too)
         let colour = select(t.rgb / max(t.a, 1e-6), s.rgb / max(s.a, 1e-6), s.a > 0.0);
         s = vec4<f32>(colour * a, a);
+    }
+    // wet pickup: the paint the stroke goes over is dragged into its own colour, as much as its
+    // brush says, and only where there is paint under it
+    if (lu.pickup > 0.0 && s.a > 0.0 && lu.stroke_on_mask < 0.5) {
+        let under = textureLoad(layer_tex, p, 0);
+        let pull = clamp(lu.pickup * under.a, 0.0, 1.0);
+        if (pull > 0.0) {
+            let c = mix(unpremultiply(s), unpremultiply(under), pull);
+            s = vec4<f32>(c * s.a, s.a);
+        }
     }
     // burnt edges show where the stroke is thin: where its paper grain or its second took paint
     // away, or without either wherever it is less than full
