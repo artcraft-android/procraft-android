@@ -19,6 +19,7 @@ mod animation;
 mod brush_files;
 mod brush_library;
 mod brushes;
+mod bundled;
 mod clipboard;
 mod colour;
 mod colour_drag;
@@ -44,11 +45,11 @@ mod layers;
 mod liquify;
 mod modes;
 mod palettes;
-mod patch_run;
 mod pick;
 mod pickers;
 mod plugin_file;
 mod plugin_filter;
+mod plugin_run;
 mod plugins;
 mod pour;
 mod presets;
@@ -58,6 +59,7 @@ mod quick_menu;
 mod quickshape;
 mod recolor;
 mod reference_view;
+mod reference_window;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod render;
 mod scene3d;
@@ -121,7 +123,7 @@ pub use history::ColourHistory;
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
 pub use keys::{KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
 pub use layers::{
-    BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
+    BlendModeInfo, Blocked, HiddenBy, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
     brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for, set_resident_budget,
 };
 pub use liquify::liquify_reach;
@@ -135,7 +137,7 @@ pub use pickers::{
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
 pub use plugins::{
-    PluginControl, PluginInfo, PluginKind, PluginOffer, PluginSlider, PluginSource, PluginSwitch, Plugins,
+    PluginControl, PluginInfo, PluginOffer, PluginPart, PluginSlider, PluginSource, PluginSwitch, Plugins,
     plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown, plugin_slider_whole,
 };
 pub use presets::{
@@ -154,11 +156,17 @@ pub use quickshape::{QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{
     ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect, reference_view_pinched,
 };
-pub use scene3d::{ModelFile, ModelInfo, ModelLight, ModelTextureFile, SubmeshInfo, Turntable, zip_model_name};
+pub use reference_window::{
+    ReferencePlace, ReferenceShows, ReferenceSize, ReferenceWindowState, reference_window_fitted, reference_window_size,
+};
+pub use scene3d::{
+    ModelFile, ModelInfo, ModelLight, ModelTextureFile, ModelWarning, SubmeshInfo, Turntable, model_warning_name,
+    unpack_model_artwork, zip_model_name,
+};
 pub use selection::{SelectionDisplay, SelectionJoin};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
-    source_from_picture, source_library, source_size,
+    small_source, source_from_picture, source_library, source_size,
 };
 pub use text::{TextAlignment, TextDraw, TextDrawn, TextInfo, TextSide};
 pub use text_draw::{
@@ -390,8 +398,6 @@ pub(crate) struct State {
     /// Brush scaling relative to the screen: the brush keeps its size on the screen as the canvas
     /// zooms (else it keeps its size on the canvas).
     pub(crate) brush_on_screen: bool,
-    /// ColorDrop keeps out of gaps up to this many pixels wide in what bounds it (0: none).
-    pub(crate) fill_gap: u32,
     /// What samples go through on their way to a stroke, if anything.
     pub(crate) hooks: Option<Arc<hooks::Hooks>>,
     /// Crops kept for undo: the canvas and document from before; and one undone, for redo, with
@@ -496,6 +502,8 @@ pub(crate) struct State {
     /// A model open to paint on, in place of the flat canvas (the document is its current
     /// texture set's).
     pub(crate) scene: Option<scene3d::Scene>,
+    /// A selection drawn on a model reaches every surface under it, not only the nearest.
+    pub(crate) x_ray: bool,
     /// What fitting the canvas keeps clear of (left, top, right, bottom, window pixels).
     fit_insets: [f32; 4],
     /// Frosted panels open over the canvas: left, top, right, bottom and corner radius (window
@@ -506,6 +514,10 @@ pub(crate) struct State {
     pub(crate) backdrop_windows: Vec<[f32; 6]>,
     /// The view kept with the artwork, shown when the window first comes.
     pub(crate) saved_view: Option<project::SavedView>,
+    /// The Reference window as the artwork keeps it, and its imported picture (a PNG, upright):
+    /// apart from the document, so that undoing never moves it.
+    pub(crate) reference_window: procraft_engine::reference_window::ReferenceWindow,
+    pub(crate) reference_picture: Option<Arc<Vec<u8>>>,
     pub(crate) revision: u64,
     /// The open transform, how its handles act and how it resamples.
     transform: Option<procraft_engine::transform::Transform>,
@@ -728,7 +740,18 @@ impl State {
         {
             canvas.use_full_grain(gpu, &mut style, full.id, full.side, &pixels);
         }
+        self.use_full_shape(&mut style, &brush);
         (brush, style, diameter)
+    }
+
+    /// `style` reads `brush`'s shape from its file's image at its own size, if it has one.
+    fn use_full_shape(&mut self, style: &mut StrokeStyle, brush: &Brush) {
+        if let Some(full) = brush.shape_file_now().map(|f| &f.full)
+            && let Some(pixels) = self.grain_store.pixels(full)
+            && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
+        {
+            canvas.use_full_shape(gpu, style, full.id, full.side, &pixels);
+        }
     }
 
     /// A dual brush's second for a stroke of `tool` on `layer` with `first` (as
@@ -765,6 +788,7 @@ impl State {
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &second);
         }
+        self.use_full_shape(&mut style, &second);
         let mode = first.setting("dual_blend").round().max(0.0) as u32;
         Some((second, SecondStroke { style, mode, threshold: style.alpha_threshold }, diameter))
     }
@@ -1231,7 +1255,6 @@ impl CanvasSession {
             crop_undo: None,
             selection_visibility: 0.25,
             brush_on_screen: false,
-            fill_gap: 0,
             hooks: None,
             input: procraft_engine::stroke::InputSettings::default(),
             crop_redo: None,
@@ -1256,6 +1279,7 @@ impl CanvasSession {
             gpu: None,
             canvas: None,
             scene: None,
+            x_ray: false,
             needs_frame: false,
             holding_frames: false,
             frame_held: false,
@@ -1331,6 +1355,8 @@ impl CanvasSession {
             backdrops: Vec::new(),
             backdrop_windows: Vec::new(),
             saved_view: None,
+            reference_window: Default::default(),
+            reference_picture: None,
         };
         Arc::new(CanvasSession {
             shared: Arc::new(Shared {
@@ -1423,6 +1449,11 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // the graphics stopped (perhaps while the app was away, its notice long gone): nothing
+        // drawn will show, so each stroke tells it again
+        if st.gpu.as_ref().is_some_and(Gpu::is_lost) {
+            st.crop_edit.lost_told = false;
+        }
         if let Some(kept) = st.pad_strokes.as_mut() {
             kept.push((pointer, samples.clone()));
         }
@@ -1444,12 +1475,14 @@ impl CanvasSession {
         let current = st.doc.current();
         st.finish_stroke();
         st.settle();
-        // locked and hidden layers, groups and text layers take no paint
+        // locked layers, those that don't show (hidden themselves or by a group, or left out
+        // while another is shown alone), groups and text layers take no paint
         if st.doc.is_locked(current)
+            || st.doc.unseen(current).is_some()
             || st
                 .doc
                 .layer(current)
-                .is_none_or(|l| !l.visible || l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some())
+                .is_none_or(|l| l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some())
         {
             return;
         }
@@ -1645,6 +1678,11 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         // the fingers take the canvas from wherever it was settling to
         st.view_motion = None;
+        if st.scene_picture_under((pivot_x, pivot_y)) == Some(true) {
+            drop(st);
+            self.model_picture_move(pan_x, pan_y, scale, rotation);
+            return;
+        }
         if st.scene_shown() {
             st.scene_gesture(Vec2::new(pan_x, pan_y), scale);
             self.shared.frame(&mut st);
@@ -1883,6 +1921,12 @@ impl CanvasSession {
 
     /// Undoes the last step; returns what it was called, if it was named.
     pub fn undo(&self) -> Option<String> {
+        self.await_pour();
+        // a picture being placed on a model goes first
+        if self.model_picture_box().is_some() {
+            self.model_picture_end(false);
+            return Some("new layer".to_owned());
+        }
         // editing text, a change to its box's width goes back first, the text still edited
         if let Some(name) = self.text_box_undo() {
             return Some(name);
@@ -1914,6 +1958,7 @@ impl CanvasSession {
 
     /// Redoes the last step undone; returns what it was called, if it was named.
     pub fn redo(&self) -> Option<String> {
+        self.await_pour();
         if let Some(name) = self.text_box_redo() {
             return Some(name);
         }
@@ -1953,7 +1998,7 @@ impl CanvasSession {
             return;
         }
         // with a selection, only what is selected is cleared
-        if let Some(mask) = st.selection.clone() {
+        if let Some(mask) = st.reach_selection() {
             let Some(rect) = layer_ops::mask_rect(&mask) else { return };
             let pixels = st.layer_part(current, rect);
             if let (Some(mut pixels), Some(canvas)) = (pixels, st.canvas.as_mut()) {
@@ -2041,6 +2086,7 @@ impl CanvasSession {
             if let Some(before) = before {
                 st.follow_joint_step(before);
                 st.follow_tile_step(before);
+                st.follow_look_step(before);
             }
             st.sync_selection();
             st.revision += 1;

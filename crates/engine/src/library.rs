@@ -16,7 +16,7 @@ pub struct BrushSet {
 /// to what they started from, so new sets and brushes only ever go at the end; [`SHELF`] is the
 /// order a new library shows them in.
 pub fn library() -> Vec<BrushSet> {
-    vec![
+    let mut sets = vec![
         BrushSet {
             name: "Sketching",
             brushes: vec![
@@ -291,7 +291,12 @@ pub fn library() -> Vec<BrushSet> {
                 overlay_light(),
             ],
         },
-    ]
+    ];
+    // a brush that mixes wet shows it in its preview
+    for brush in sets.iter_mut().flat_map(|set| set.brushes.iter_mut()).filter(|b| b.mixes_wet()) {
+        brush.set_setting("preview_wet_mix", 1.0);
+    }
+    sets
 }
 
 /// The order a new library shows the sets in, by their place in [`library`].

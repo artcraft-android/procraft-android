@@ -7,8 +7,8 @@ use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder
 use procraft_core::CanvasSession;
 
 use super::{
-    Colours, EMPTY_SLOT, GRABBER, HarmonyKind, Mode, PALETTE_TILE, colours_in_p3, hex_pad, hue_slider, of_hex,
-    rgb_to_hsv, srgb, take_rgb,
+    Colours, EMPTY_SLOT, GRABBER, HarmonyKind, Mode, PALETTE_TILE, colours_in_p3, hex_pad, of_hex, rgb_to_hsv, srgb,
+    take_rgb,
 };
 use crate::compact_colours::{tabs_row, value_view};
 use crate::icons;
@@ -95,9 +95,9 @@ impl Colours {
                     }
                     Mode::Classic => {
                         let square = Rect::from_min_size(pos2(at.x + 6.0, at.y + 50.0), vec2(248.0, 248.0));
-                        self.pickers.square(ui, &mut self.hsv, square);
+                        self.model_square(ui, square);
                         let row = Rect::from_min_size(pos2(at.x + 10.0, at.y + 298.0), vec2(240.0, 40.0));
-                        hue_slider(ui, row, "floating hue", &mut self.hsv);
+                        self.model_slider(ui, row, "floating hue", 0);
                     }
                     Mode::Harmony => {
                         // the kind (its menu the panel's), the wheel, then the brightness

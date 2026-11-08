@@ -1,14 +1,15 @@
 //! The reference window, as the Android app's (ui/ReferenceUi.kt): the whole canvas as it is, or a
 //! picture to work from, floating over the canvas. Its grab line drags it; the round button closes
 //! it (Reference off); unseen handles over its bottom corners size it. Its bars lie over the
-//! picture, and a click on it slides them away and back.
+//! picture, and a click on it slides them away and back. Each artwork keeps its own window (the
+//! core saves it with the artwork): shown, what it shows, its size and place, and its picture.
 
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2, pos2, vec2};
 use procraft_core::{
-    CanvasSession, ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect,
-    reference_view_pinched,
+    CanvasSession, ReferenceShows, ReferenceSizes, ReferenceView, ReferenceWindowState, reference_picture_point,
+    reference_picture_rect, reference_view_pinched, reference_window_fitted, reference_window_size,
 };
 
 use crate::icons;
@@ -37,15 +38,14 @@ const BARS_SLIDE: f32 = 0.3;
 const SECOND_CLICK: Duration = Duration::from_millis(300);
 /// How many pixels a picture's longer side has as the bars' glass: drawn back up, that's its blur.
 const GLASS_SIDE: usize = 24;
-/// Its picture's size at first, the least and most it is sized to, and how far up from the
-/// screen's bottom it first sits.
+/// Its picture's size at first, and how far up from the screen's bottom it first sits.
 const START: Vec2 = Vec2 { x: 350.0, y: 423.0 };
-const LEAST: f32 = 150.0;
-const MOST: f32 = 700.0;
 const ABOVE_BOTTOM: f32 = 50.0;
 /// The canvas is read again at most this often while it changes, this large.
 const REFRESH: Duration = Duration::from_millis(300);
 const CANVAS_PIXELS: u32 = 700;
+/// The side of the picture of a model it shows.
+const MODEL_PIXELS: u32 = 720;
 /// A picture imported is kept at most this large.
 const MOST_PICTURE: u32 = 2048;
 
@@ -57,6 +57,20 @@ struct Pixels {
     width: usize,
     height: usize,
     rgba: Vec<u8>,
+}
+
+/// The window's picture sized `size` (between the bars) as it shows on `screen`: within its least
+/// and most, and no bigger than the screen.
+fn shown_size(size: Vec2, screen: Rect) -> Vec2 {
+    let fitted = reference_window_size(size.x, size.y, screen.width(), screen.height());
+    vec2(fitted.width, fitted.height)
+}
+
+/// Where a window `size` big at `at` goes to be all on `screen` (its top left, if it is bigger).
+fn on_screen(at: Pos2, size: Vec2, screen: Rect) -> Pos2 {
+    let o = screen.min;
+    let fitted = reference_window_fitted(at.x - o.x, at.y - o.y, size.x, size.y, screen.width(), screen.height());
+    pos2(fitted.x + o.x, fitted.y + o.y)
 }
 
 /// The picture of `width` x `height` `rgba` pixels made a few pixels across, inside a clear pixel
@@ -102,11 +116,16 @@ enum Mode {
     Canvas,
     Image,
     Face,
+    /// The model, turned by a finger or the mouse.
+    Model,
 }
 
 pub struct Reference {
     pub on: bool,
     mode: Mode,
+    /// How far the model has been turned since it was last drawn (pixels).
+    turned: (f32, f32),
+    turn_from: Option<Pos2>,
     /// Where the window is (its top left, points), once placed, and its picture's size.
     at: Option<Pos2>,
     size: Vec2,
@@ -132,6 +151,10 @@ pub struct Reference {
     /// The bars are slid out of the way; a click that may yet be the first of two came then.
     bars_hidden: bool,
     click: Option<Instant>,
+    /// The window as the artwork last had it, and its picture (a PNG), to be shown when it next
+    /// shows.
+    kept: Option<ReferenceWindowState>,
+    picture_due: Option<Vec<u8>>,
 }
 
 impl Default for Reference {
@@ -139,6 +162,8 @@ impl Default for Reference {
         Reference {
             on: false,
             mode: Mode::Canvas,
+            turned: (0.0, 0.0),
+            turn_from: None,
             at: None,
             size: START,
             canvas: None,
@@ -156,11 +181,78 @@ impl Default for Reference {
             picking: false,
             bars_hidden: false,
             click: None,
+            kept: None,
+            picture_due: None,
         }
     }
 }
 
 impl Reference {
+    /// The window as artwork `session` left it, nothing of another's kept (none if it never had
+    /// one).
+    pub fn restore(&mut self, session: &CanvasSession) {
+        let w = session.reference_window();
+        *self = Reference {
+            on: w.shown,
+            mode: match w.shows {
+                ReferenceShows::Canvas => Mode::Canvas,
+                ReferenceShows::Image => Mode::Image,
+                ReferenceShows::Face => Mode::Face,
+                ReferenceShows::Model => Mode::Model,
+            },
+            at: w.placed.then(|| pos2(w.x, w.y)),
+            size: if w.sized { vec2(w.width, w.height) } else { START },
+            canvas_view: w.canvas_view,
+            image_view: w.image_view,
+            kept: Some(w),
+            picture_due: session.reference_picture(),
+            ..Reference::default()
+        };
+    }
+
+    /// The window as it is now, as the artwork keeps it.
+    fn state(&self) -> ReferenceWindowState {
+        let at = self.at.unwrap_or_default();
+        ReferenceWindowState {
+            shown: self.on,
+            shows: match self.mode {
+                Mode::Canvas => ReferenceShows::Canvas,
+                Mode::Image => ReferenceShows::Image,
+                Mode::Face => ReferenceShows::Face,
+                Mode::Model => ReferenceShows::Model,
+            },
+            sized: self.size != START,
+            width: self.size.x,
+            height: self.size.y,
+            placed: self.at.is_some(),
+            x: at.x,
+            y: at.y,
+            canvas_view: self.canvas_view,
+            image_view: self.image_view,
+        }
+    }
+
+    /// Tells the artwork of any change to the window since it last was.
+    pub fn keep(&mut self, session: &CanvasSession) {
+        let now = self.state();
+        if self.kept != Some(now) {
+            session.set_reference_window(now);
+            self.kept = Some(now);
+        }
+    }
+
+    /// `picture` is the window's picture now.
+    fn take_picture(&mut self, ctx: &egui::Context, picture: &image::DynamicImage) {
+        let rgba = picture.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+        let flat: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+        let glass = glass_of(size[0], size[1], &flat);
+        self.image_glass = Some(ctx.load_texture("reference picture glass", glass, egui::TextureOptions::LINEAR));
+        self.image = Some(ctx.load_texture("reference picture", image, egui::TextureOptions::LINEAR));
+        self.image_pixels = Some(Pixels { width: size[0], height: size[1], rgba: rgba.into_raw() });
+    }
+
     fn read_canvas(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let edits = session.edits();
         if self.canvas_edits == Some(edits) {
@@ -172,7 +264,12 @@ impl Reference {
             ctx.request_repaint_after(REFRESH - at.elapsed());
             return;
         }
-        if let Some(t) = session.canvas_thumbnail(CANVAS_PIXELS) {
+        let picture = if self.mode == Mode::Model {
+            session.reference_model_picture(MODEL_PIXELS)
+        } else {
+            session.canvas_thumbnail(CANVAS_PIXELS)
+        };
+        if let Some(t) = picture {
             let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
             let crisp =
                 egui::TextureOptions { magnification: egui::TextureFilter::Nearest, ..egui::TextureOptions::LINEAR };
@@ -187,7 +284,7 @@ impl Reference {
         }
     }
 
-    fn import(&mut self, ctx: &egui::Context) {
+    fn import(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Import Image")
             .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"])
@@ -202,16 +299,13 @@ impl Reference {
                 } else {
                     picture
                 };
-                let rgba = picture.to_rgba8();
-                let size = [rgba.width() as usize, rgba.height() as usize];
-                let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                let flat: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
-                let glass = glass_of(size[0], size[1], &flat);
-                self.image_glass =
-                    Some(ctx.load_texture("reference picture glass", glass, egui::TextureOptions::LINEAR));
-                self.image = Some(ctx.load_texture("reference picture", image, egui::TextureOptions::LINEAR));
-                self.image_pixels = Some(Pixels { width: size[0], height: size[1], rgba: rgba.into_raw() });
+                self.take_picture(ctx, &picture);
                 self.image_view = ReferenceView::default();
+                // kept with the artwork as a PNG, whatever kind of file it came from
+                let mut png = std::io::Cursor::new(Vec::new());
+                if picture.to_rgba8().write_to(&mut png, image::ImageFormat::Png).is_ok() {
+                    session.set_reference_picture(png.into_inner());
+                }
             }
             Err(_) => crate::files::tell("Can't import it", "This picture can't be opened."),
         }
@@ -229,16 +323,31 @@ impl Reference {
         if !self.on {
             return None;
         }
-        if self.mode == Mode::Canvas {
+        // the model turned since it was last drawn: drawn again at once
+        let (dx, dy) = std::mem::take(&mut self.turned);
+        if dx != 0.0 || dy != 0.0 {
+            session.reference_model_turn(dx, dy, self.size.x);
+            (self.canvas_edits, self.read_at) = (None, None);
+        }
+        if matches!(self.mode, Mode::Canvas | Mode::Model) {
             self.read_canvas(ctx, session);
         }
         let screen = ctx.content_rect();
-        let tall = TOP_BAR + self.size.y + BOTTOM_BAR;
-        // the first time: in the middle near the bottom of the screen
-        let at = *self.at.get_or_insert_with(|| {
-            pos2(screen.center().x - self.size.x / 2.0, (screen.bottom() - ABOVE_BOTTOM - tall).max(screen.top()))
-        });
-        let window = Rect::from_min_size(at, vec2(self.size.x, tall));
+        // as big as it was sized, within its least and most, and no bigger than the screen
+        let size = shown_size(self.size, screen);
+        let tall = TOP_BAR + size.y + BOTTOM_BAR;
+        if let Some(png) = self.picture_due.take()
+            && let Ok(picture) = image::load_from_memory(&png)
+        {
+            self.take_picture(ctx, &picture);
+        }
+        // the first time: in the middle near the bottom of the screen; then where it was put, all
+        // of it on the screen (an artwork may have left it on a screen of another shape, or the
+        // window may have shrunk)
+        let first =
+            || pos2(screen.center().x - size.x / 2.0, (screen.bottom() - ABOVE_BOTTOM - tall).max(screen.top()));
+        let at = on_screen(*self.at.get_or_insert_with(first), vec2(size.x, tall), screen);
+        let window = Rect::from_min_size(at, vec2(size.x, tall));
         // room round it for the handles, which reach past its corners
         let reach = window.expand2(vec2(HANDLE / 2.0 - 12.0, 0.0)).with_max_y(window.bottom() + HANDLE / 2.0 - 15.0);
         let shown_bars = ctx.animate_bool_with_time(Id::unique("reference bars"), !self.bars_hidden, BARS_SLIDE);
@@ -256,7 +365,7 @@ impl Reference {
             // the picture: the whole window's, under the bars
             let area = window;
             let shown = match self.mode {
-                Mode::Canvas => self.canvas.as_ref(),
+                Mode::Canvas | Mode::Model => self.canvas.as_ref(),
                 Mode::Image => self.image.as_ref(),
                 Mode::Face => None,
             };
@@ -376,6 +485,7 @@ impl Reference {
                             } else {
                                 self.image = None;
                                 self.image_pixels = None;
+                                session.clear_reference_picture();
                                 self.image_glass = None;
                                 self.image_view = ReferenceView::default();
                             }
@@ -390,8 +500,10 @@ impl Reference {
                 let track = Rect::from_center_size(bottom.center(), vec2(270.0, 35.0));
                 ui.painter().rect_filled(track, 17.5, argb(SEGMENT_TRACK));
                 let item = (track.width() - 4.0 - 22.0) / 3.0;
+                // on a model the third is the model itself
+                let third = if session.model_info().is_some() { (Mode::Model, "3D") } else { (Mode::Face, "Face") };
                 for (i, (mode, label)) in
-                    [(Mode::Canvas, "Canvas"), (Mode::Image, "Image"), (Mode::Face, "Face")].into_iter().enumerate()
+                    [(Mode::Canvas, "Canvas"), (Mode::Image, "Image"), third].into_iter().enumerate()
                 {
                     let cell =
                         Rect::from_min_size(track.min + vec2(2.0 + (item + 11.0) * i as f32, 2.0), vec2(item, 31.0));
@@ -403,6 +515,7 @@ impl Reference {
                     text(ui.painter(), cell.center(), Align2::CENTER_CENTER, label, 15.0, Weight::Regular, ink);
                     if ui.interact(cell, ui.scope_id().with(("mode", i)), Sense::click()).clicked() {
                         self.mode = mode;
+                        self.read_at = None;
                         self.canvas_edits = None;
                     }
                 }
@@ -416,7 +529,7 @@ impl Reference {
             let strip = Rect::from_min_size(window.min, vec2(window.width(), GRAB));
             let dragged = ui.interact(strip, ui.scope_id().with("move"), Sense::drag());
             if dragged.dragged() {
-                self.at = Some(at + dragged.drag_delta());
+                self.at = Some(on_screen(at + dragged.drag_delta(), vec2(size.x, tall), screen));
             }
             // the size handles, unseen, centred 12 in from the window's bottom corners and 15 up
             for left in [true, false] {
@@ -424,14 +537,13 @@ impl Reference {
                 let handle = Rect::from_center_size(pos2(x, window.bottom() - 15.0), vec2(HANDLE, HANDLE));
                 let drag = ui.interact(handle, ui.scope_id().with(("size", left)), Sense::drag());
                 if drag.dragged() {
+                    // from the size it shows at, as far as its least, its most and the screen let it
                     let d = drag.drag_delta();
-                    let old = self.size;
-                    let w = (old.x + if left { -d.x } else { d.x }).clamp(LEAST, MOST);
-                    let h = (old.y + d.y).clamp(LEAST, MOST);
+                    let new = shown_size(vec2(size.x + if left { -d.x } else { d.x }, size.y + d.y), screen);
                     if left {
-                        self.at = Some(at + vec2(old.x - w, 0.0));
+                        self.at = Some(at + vec2(size.x - new.x, 0.0));
                     }
-                    self.size = vec2(w, h);
+                    self.size = new;
                 }
             }
         });
@@ -439,7 +551,7 @@ impl Reference {
             self.on = false;
         }
         if import {
-            self.import(ctx);
+            self.import(ctx, session);
         }
         picked
     }
@@ -470,6 +582,10 @@ impl Reference {
     }
 
     fn set_view(&mut self, view: ReferenceView) {
+        // the model turns under the pointer, and doesn't move in the window
+        if self.mode == Mode::Model {
+            return;
+        }
         if self.mode == Mode::Image {
             self.image_view = view;
         } else {
@@ -504,6 +620,15 @@ impl Reference {
             }
             (spread, i.multi_touch(), i.pointer.latest_pos())
         });
+        if self.mode == Mode::Model {
+            let pressed =
+                ui.input(|i| i.pointer.press_origin().filter(|p| i.pointer.primary_down() && area.contains(*p)));
+            let at = ui.input(|i| i.pointer.interact_pos()).filter(|_| pressed.is_some());
+            if let (Some(at), Some(from)) = (at, self.turn_from) {
+                self.turned = (self.turned.0 + at.x - from.x, self.turned.1 + at.y - from.y);
+            }
+            self.turn_from = at;
+        }
         let local = |p: Pos2| p - area.min;
         if let Some(t) = touch.filter(|_| touched.hovered() || touched.dragged()) {
             // two fingers or more: no eyedropper
@@ -582,6 +707,20 @@ const SCROLL_ZOOM: f32 = 0.005;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_shows_on_a_short_screen_whole_and_where_its_handles_reach() {
+        // a window under the menu bar, 500 tall: the picture shrinks so the whole window fits, and
+        // one left below the screen comes back up onto it
+        let screen = Rect::from_min_size(pos2(0.0, 30.0), vec2(1000.0, 500.0));
+        let size = shown_size(vec2(700.0, 700.0), screen);
+        assert_eq!(size, vec2(650.0, 500.0 - TOP_BAR - BOTTOM_BAR));
+        let tall = TOP_BAR + size.y + BOTTOM_BAR;
+        assert_eq!(on_screen(pos2(600.0, 400.0), vec2(size.x, tall), screen), pos2(350.0, 30.0));
+        assert_eq!(on_screen(pos2(100.0, 30.0), vec2(size.x, tall), screen), pos2(100.0, 30.0));
+        // a big screen keeps the size given
+        assert_eq!(shown_size(START, Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0))), START);
+    }
 
     #[test]
     fn the_bars_glass_is_the_picture_a_few_pixels_across_in_a_clear_rim() {

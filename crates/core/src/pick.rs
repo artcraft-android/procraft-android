@@ -8,7 +8,7 @@ use crate::CanvasSession;
 /// What the eyedropper sees.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Pick {
-    /// The colour under the point (0xRRGGBB): the canvas's, or the current layer's when a patch
+    /// The colour under the point (0xRRGGBB): the canvas's, or the current layer's when a plugin
     /// says to read that (none where it is clear); none when the point is off the canvas.
     pub rgb: Option<u32>,
     /// The window around the point as it is shown, `side` × `side` RGBA8, rows top to bottom.
@@ -25,6 +25,9 @@ impl CanvasSession {
         let side = side.clamp(1, 1024);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.scene_shown() {
+            return st.scene_pick(x, y, side);
+        }
         let view = st.view?;
         // the window shifted so that the point lands in the middle of the small target
         let corner = Vec2::new(x - side as f32 / 2.0, y - side as f32 / 2.0);

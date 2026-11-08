@@ -321,12 +321,20 @@ impl CanvasInfo {
                 rows(ui, width, &[("Maximum layers", l.maximum.to_string())], 50.0);
                 ui.add_space(21.0);
                 let available = l.maximum.saturating_sub(l.used);
-                rows(
-                    ui,
-                    width,
-                    &[("Layers used", l.used.to_string()), ("Layers available", available.to_string())],
-                    50.0,
-                );
+                let sets = session.texture_set_stats();
+                if sets.is_empty() {
+                    rows(
+                        ui,
+                        width,
+                        &[("Layers used", l.used.to_string()), ("Layers available", available.to_string())],
+                        50.0,
+                    );
+                } else {
+                    // a model's layers are held by its texture sets, each up to the maximum
+                    let each: Vec<_> =
+                        sets.iter().map(|s| (s.name.as_str(), format!("{} of {}", s.used, s.maximum))).collect();
+                    rows(ui, width, &each, 50.0);
+                }
                 ui.add_space(21.0);
                 let kinds = [
                     ("Assisted layers", l.assisted.to_string()),
@@ -334,7 +342,9 @@ impl CanvasInfo {
                     ("Layer masks", l.masks.to_string()),
                     ("Layer groups", l.groups.to_string()),
                 ];
-                rows(ui, width, &kinds, 50.0);
+                // a model has no drawing guide to assist with
+                let shown = usize::from(session.model_info().is_some());
+                rows(ui, width, kinds.get(shown..).unwrap_or(&kinds), 50.0);
             }
             3 => {
                 let current = session.profile();

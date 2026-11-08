@@ -413,6 +413,7 @@ impl CanvasSession {
         let mut t = Transform::new(x, y, w, h, hull);
         t.set_snap_targets(&bounds);
         st.transform = Some(t);
+        st.scene_flat_for_tool();
         self.shared.frame(st);
         st.transform_box()
     }
@@ -592,6 +593,7 @@ impl CanvasSession {
                 st.record_selection(before, "move");
             }
             st.revision += 1;
+            st.scene_back_from_tool();
             self.shared.frame(st);
         }
     }

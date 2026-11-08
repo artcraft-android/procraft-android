@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use procraft_engine::brush::{Brush, MaterialSource, ResetPoint, Source, StockImage};
+use procraft_engine::brush::{
+    Brush, FULL_GRAIN_MOST, FullGrain, GrainFile, MaterialSource, ResetPoint, ShapeFile, Source, StockImage,
+};
 use procraft_engine::curve::Curve;
 use procraft_engine::geom::{Affine, Vec2};
 use procraft_engine::studio::{MAX_GRAIN_SCALE, SliderCurve};
@@ -46,7 +48,7 @@ pub fn source_library(grain: bool) -> Vec<SourceImage> {
         .collect()
 }
 
-/// `pixels` (a `source_size` square greyscale image) made to repeat without seams: the grain
+/// `pixels` (a square greyscale image, of any size) made to repeat without seams: the grain
 /// editor's Auto repeat, the image `scale` times across (1 to 4), turned `rotation_degrees`,
 /// faded at its edges over `overlap` of the way in (0..1) as sharply as `hardness` (0..1), into
 /// its shifted copy, turned round with `mirror`, fine detail apart with `pyramid`.
@@ -65,15 +67,27 @@ pub fn repeatable_source(
     textures::repeatable(&pixels, repeat)
 }
 
+/// A square source image at `source_size`, however big it is: what a brush always holds of it,
+/// and quick enough to make repeat as a slider moves. Anything else comes back as it was.
+#[uniffi::export]
+pub fn small_source(pixels: Vec<u8>) -> Vec<u8> {
+    let n = pixels.len().isqrt();
+    if n <= textures::TEXTURE_SIZE || n * n != pixels.len() {
+        return pixels;
+    }
+    crate::brush_files::gray_square((n, n, 1), &pixels, false, textures::TEXTURE_SIZE)
+}
+
 /// A picture (`width` by `height`, RGBA) as a source image: its lightness over black (what
-/// shows through it counting as black), fitted into the `source_size` square, centred.
-/// Empty if the pixels aren't that size.
+/// shows through it counting as black), fitted into a square, centred. The square is as big as
+/// a brush file's image of that size would be, and `source_size` at the least. Empty if the
+/// pixels aren't that size.
 #[uniffi::export]
 pub fn source_from_picture(rgba: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
-    let n = textures::TEXTURE_SIZE as u32;
     if width == 0 || height == 0 || rgba.len() as u64 != u64::from(width) * u64::from(height) * 4 {
         return Vec::new();
     }
+    let n = crate::brush_files::image_side(width.max(height) as usize) as u32;
     let lightness: Vec<u8> = rgba
         .as_chunks::<4>()
         .0
@@ -316,16 +330,55 @@ impl CanvasSession {
         shipped.and_then(|i| images.into_iter().nth(i as usize)).map_or_else(Vec::new, |i| i.pixels)
     }
 
-    /// The brush's `kind` of source becomes an image of the user's own (`source_size` square
-    /// greyscale, white = paint). False if the pixels aren't that size.
+    /// [`Self::studio_source`] at all the size it has, whatever square that is: a shape or grain
+    /// from a brush file or the user's own picture, to show and to edit.
+    pub fn studio_source_picture(&self, kind: SourceKind) -> Vec<u8> {
+        let own = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let full = st.studio_brush().and_then(|b| match kind {
+                SourceKind::Shape => b.shape_file_now().map(|f| f.full.clone()),
+                SourceKind::Grain => b.grain_file_now().and_then(|f| f.full.clone()),
+                SourceKind::Metallic | SourceKind::Roughness => None,
+            });
+            full.and_then(|f| st.grain_store.pixels(&f))
+        };
+        own.map_or_else(|| self.studio_source(kind), |pixels| pixels.to_vec())
+    }
+
+    /// The brush's `kind` of source becomes an image of the user's own (a greyscale square, white =
+    /// paint): `source_size`, or a power of two more up to the most kept, of which a shape or grain
+    /// keeps all, as a brush file's does. False if the pixels are no such square, or are what it
+    /// uses now (a brush left as it was keeps what its file gave it).
     pub fn set_studio_source(&self, kind: SourceKind, pixels: Vec<u8>) -> bool {
-        let Some(source) = Source::new(pixels) else { return false };
-        let mut st = self.shared.lock();
+        let n = pixels.len().isqrt();
+        let fits = n * n == pixels.len() && n.is_power_of_two();
+        if !fits || !(textures::TEXTURE_SIZE..=FULL_GRAIN_MOST).contains(&n) {
+            return false;
+        }
+        if pixels == self.studio_source_picture(kind) {
+            return false;
+        }
+        let Some(source) = Source::new(small_source(pixels.clone())) else { return false };
+        let id = source.id;
+        let mut full = (n > textures::TEXTURE_SIZE).then(|| FullGrain::new(n as u32, pixels)).flatten();
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if let Some(full) = &mut full {
+            st.grain_store.keep(full);
+        }
         let Some(brush) = st.studio_change() else { return false };
         // an image of the user's own: no longer the stock one its file named
         let (own, _, stock) = sources(brush, kind);
         *own = Some(source);
         *stock = None;
+        if let Some(full) = full {
+            match kind {
+                SourceKind::Shape => brush.shape_file = Some(ShapeFile { source: id, full }),
+                SourceKind::Grain => brush.grain_file = Some(GrainFile { source: id, width: 0, full: Some(full) }),
+                SourceKind::Metallic | SourceKind::Roughness => {}
+            }
+        }
         true
     }
 

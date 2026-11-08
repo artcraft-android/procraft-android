@@ -34,6 +34,8 @@ pub const RAPID_UNDO_MAX_S: f32 = 1.5;
 pub struct Prefs {
     /// Panels and bars light grey with dark text.
     pub light_interface: bool,
+    /// A selection drawn on a model reaches every surface under it.
+    pub selection_x_ray: bool,
     /// The side bar on the right edge instead of the left.
     pub right_handed: bool,
     /// Brush sizes relative to the screen (else to the canvas).
@@ -60,7 +62,7 @@ pub struct Prefs {
     pub pad_3d: bool,
     /// The canvas shown on a second display too.
     pub project_canvas: bool,
-    /// The Patches and Plugins pages' lists, their values kept here with the rest.
+    /// The Plugins page's list, its values kept here with the rest.
     pub plugins: Arc<Plugins>,
     /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
     /// the top bar and the side bar; new artworks don't record their time-lapse; strokes made in
@@ -92,6 +94,7 @@ impl Default for Prefs {
     fn default() -> Prefs {
         Prefs {
             light_interface: false,
+            selection_x_ray: false,
             right_handed: false,
             brush_on_screen: false,
             brush_cursor: true,
@@ -139,7 +142,7 @@ impl Prefs {
     /// As kept (anything missing or unreadable as it starts).
     pub fn kept() -> Prefs {
         let store = crate::files::app_dir().join("plugins").to_string_lossy().into_owned();
-        let mut p = Prefs { plugins: Plugins::with_store(store), ..Prefs::default() };
+        let mut p = Prefs { plugins: Plugins::with_bundled(store), ..Prefs::default() };
         let text = std::fs::read_to_string(crate::files::app_dir().join("interface")).unwrap_or_default();
         for line in text.lines() {
             let Some((name, value)) = line.split_once(' ') else { continue };
@@ -148,6 +151,7 @@ impl Prefs {
             let unit = number.map(|v| v.clamp(0.0, 1.0));
             match name {
                 "light_interface" => p.light_interface = on,
+                "selection_x_ray" => p.selection_x_ray = on,
                 "right_handed" => p.right_handed = on,
                 "brush_on_screen" => p.brush_on_screen = on,
                 "brush_cursor" => p.brush_cursor = on,
@@ -204,6 +208,7 @@ impl Prefs {
         let curve: Vec<String> = self.curve.iter().map(|[x, y]| format!("{x},{y}")).collect();
         let lines = [
             format!("light_interface {}", self.light_interface),
+            format!("selection_x_ray {}", self.selection_x_ray),
             format!("right_handed {}", self.right_handed),
             format!("brush_on_screen {}", self.brush_on_screen),
             format!("brush_cursor {}", self.brush_cursor),
@@ -243,10 +248,10 @@ impl Prefs {
     pub fn apply(&self, session: &CanvasSession) {
         crate::look::set_light(self.light_interface);
         session.set_light_interface(self.light_interface);
+        session.set_selection_x_ray(self.selection_x_ray);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_selection_visibility(self.selection_visibility);
-        session.set_fill_gap(self.plugins.fill_gap());
-        session.use_patches(Arc::clone(&self.plugins));
+        session.use_plugins(Arc::clone(&self.plugins));
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);
         session.set_input_settings(

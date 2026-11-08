@@ -99,6 +99,9 @@ pub enum StrokeTool {
     Erase,
     /// Drags colour along: the layer itself changes as the stroke goes.
     Smudge,
+    /// The stroke's pixels take the layer's place where they reach (their alpha marked by 1): what
+    /// a change made elsewhere brings back to the layer. Drawn in, never stamped.
+    Laid,
 }
 
 /// How a stroke is drawn.
@@ -173,6 +176,9 @@ pub struct StrokeStyle {
     /// [`Canvas::use_full_grain`]), and pixels a side of the image the grain is read from.
     pub full_grain: Option<u64>,
     pub grain_side: f32,
+    /// The brush file's shape it reads at its own size, if it does (see
+    /// [`Canvas::use_full_shape`]).
+    pub full_shape: Option<u64>,
     /// No shape filtering: the shape image read pixel by pixel, its edges and specks hard.
     pub shape_sharp: bool,
     /// The coarsest mip level a small stamp reads its shape from, so a thin shape keeps its
@@ -208,6 +214,23 @@ impl StrokeStyle {
     /// never laid in place or mixed wet, whatever its own settings say.
     pub fn as_second(self) -> StrokeStyle {
         StrokeStyle { laid_in_place: false, wet_pull: None, wet_from_before: false, ..self }
+    }
+
+    /// The style without its wet mix: dry, as the brush would be with none set (a preview that
+    /// shows it dry).
+    pub fn dry(self) -> StrokeStyle {
+        StrokeStyle {
+            wet_pull: None,
+            wet_from_before: false,
+            load: 0.0,
+            dilution: 0.0,
+            attack: 0.0,
+            grade: 0.0,
+            blur: 0.0,
+            wet_jitter: 0.0,
+            blur_jitter: 0.0,
+            ..self
+        }
     }
 
     /// Whether the stroke paints its layer as it goes: wet paint, or dry paint laid in place.
@@ -253,6 +276,7 @@ impl StrokeStyle {
             grain_sharp: false,
             full_grain: None,
             grain_side: TEXTURE_SIZE as f32,
+            full_shape: None,
             shape_sharp: false,
             shape_lod_cap: SHAPE_LOD_CAP,
             secondary: [1.0, 1.0, 1.0],
@@ -316,6 +340,7 @@ impl StrokeStyle {
             grain_sharp: brush.setting("grain_filtering") < 0.5,
             full_grain: None,
             grain_side: TEXTURE_SIZE as f32,
+            full_shape: None,
             shape_sharp: brush.setting("shape_filtering") < 0.5,
             shape_lod_cap: if brush.setting("shape_filtering").round() == 1.0 {
                 SHAPE_LOD_CAP_CLASSIC
@@ -816,6 +841,7 @@ const STROKE_NONE: u32 = 0;
 const STROKE_PAINT: u32 = 1;
 const STROKE_ERASE: u32 = 2;
 const STROKE_PAINT_LOCKED: u32 = 3;
+const STROKE_LAID: u32 = 4;
 
 /// How much of what it carries a smudge brush keeps at each stamp.
 const DEFAULT_PULL: f32 = 0.93;
@@ -1741,6 +1767,7 @@ pub struct Canvas {
     stroke_grain: Option<wgpu::TextureView>,
     /// Brush files' grains at their own size, and the one the stroke's bind reads.
     full_grains: FullGrains,
+    full_shapes: FullGrains,
     bound_full_grain: Option<u64>,
     shape_sources: SourceSlots,
     grain_sources: SourceSlots,
@@ -2131,6 +2158,7 @@ impl Canvas {
             brush_images: images,
             stroke_grain: None,
             full_grains: FullGrains::default(),
+            full_shapes: FullGrains::default(),
             bound_full_grain: None,
             shape_sources: SourceSlots::after(shape_images.len()),
             grain_sources: SourceSlots::after(grain_images.len()),
@@ -2219,6 +2247,15 @@ impl Canvas {
         }
     }
 
+    /// `style` reads the brush file's shape `id` (`pixels`, `side` square) in place of the brush
+    /// images: each stroke its own, kept on the GPU while it is among the last few used.
+    pub fn use_full_shape(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, pixels: &[u8]) {
+        if self.full_shapes.hold(gpu, id, side, pixels) {
+            style.shape = Some(0);
+            style.full_shape = Some(id);
+        }
+    }
+
     /// The open stroke's grain fixed to the canvas is read from `grain` from now on, in place of a
     /// brush image: a picture the canvas's size (square), one grey per pixel, viewed as an array
     /// of one, such as 3D painting reads along a model's three axes. How the grain shows (its
@@ -2256,14 +2293,19 @@ impl Canvas {
         }
     }
 
-    /// The bind of the shape and grain arrays for a stroke in `style` that reads its own grain.
+    /// The bind of the shape and grain arrays for a stroke in `style` that reads its own grain or
+    /// shape.
     fn full_grain_bind(&self, device: &wgpu::Device, style: &StrokeStyle) -> Option<wgpu::BindGroup> {
-        let grain = style.full_grain.and_then(|id| self.full_grains.view(id))?;
+        let grain = style.full_grain.and_then(|id| self.full_grains.view(id));
+        let shape = style.full_shape.and_then(|id| self.full_shapes.view(id));
+        if grain.is_none() && shape.is_none() {
+            return None;
+        }
         let mask = self.selection.as_ref().map_or(&self.everything, |s| &s.view);
         Some(brush_bind(
             device,
             &self.pipelines.brush_layout,
-            [&self.shapes_view, grain, mask],
+            [shape.unwrap_or(&self.shapes_view), grain.unwrap_or(&self.grains_view), mask],
             [&self.shape_sampler, &self.grain_sampler],
         ))
     }
@@ -3250,6 +3292,32 @@ impl Canvas {
             flip: None,
         });
         self.set_selection(gpu, coverage);
+    }
+
+    /// Layer `layer`'s pixels as they are on the GPU, if it has any there.
+    pub fn layer_view(&self, layer: LayerId) -> Option<&wgpu::TextureView> {
+        self.layers.get(&layer).map(|l| &l.view)
+    }
+
+    /// Replaces layer `layer`'s pixels with `source` (premultiplied, the layer's format and the
+    /// canvas's size), on the GPU, with no undo step. False if the layer has none there yet.
+    pub fn copy_to_layer(&mut self, gpu: &Gpu, layer: LayerId, source: &wgpu::Texture) -> bool {
+        let Some(target) = self.layers.get(&layer) else { return false };
+        let mut encoder =
+            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("to layer") });
+        encoder.copy_texture_to_texture(
+            source.as_image_copy(),
+            target.texture.as_image_copy(),
+            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        self.invalidate();
+        true
+    }
+
+    /// The selection's texture (coverage in its red), or none when nothing is selected.
+    pub fn selection_view(&self) -> Option<&wgpu::TextureView> {
+        self.selection.as_ref().map(|s| &s.view)
     }
 
     /// The selection's coverage, one byte a canvas pixel, or none when nothing is selected.
@@ -5064,14 +5132,19 @@ impl Canvas {
                 let grain = self.grain_view_of(&stroke.style);
                 quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler)
             };
-            match (stroke.style.tool, locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
-                (StrokeTool::Paint, true) => {
+            let laid = stroke.style.tool == StrokeTool::Laid;
+            match (stroke.style.tool, laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
+                (StrokeTool::Paint | StrokeTool::Laid, true) => {
                     // recolour where the layer has alpha, or blend by a mode or burn edges (which
                     // read the layer): into scratch, then back
                     let offset = uniforms.push(
                         &LayerUniform {
                             opacity: 1.0,
-                            stroke_mode: if locked { STROKE_PAINT_LOCKED } else { STROKE_PAINT },
+                            stroke_mode: match (laid, locked) {
+                                (true, _) => STROKE_LAID,
+                                (_, true) => STROKE_PAINT_LOCKED,
+                                _ => STROKE_PAINT,
+                            },
                             stroke_opacity: opacity,
                             ..Default::default()
                         }
@@ -5106,7 +5179,7 @@ impl Canvas {
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let mut pass = render_pass(encoder, "commit", &layer.view, wgpu::LoadOp::Load);
                         pass.set_pipeline(match tool {
-                            StrokeTool::Paint | StrokeTool::Smudge => &self.pipelines.commit_paint,
+                            StrokeTool::Paint | StrokeTool::Smudge | StrokeTool::Laid => &self.pipelines.commit_paint,
                             StrokeTool::Erase => &self.pipelines.commit_erase,
                         });
                         scissor(&mut pass, rect);
@@ -6606,6 +6679,7 @@ impl Canvas {
                 Some(StrokeTool::Paint) if stroke.is_some_and(|s| s.style.preserve_alpha) => STROKE_PAINT_LOCKED,
                 Some(StrokeTool::Paint) => STROKE_PAINT,
                 Some(StrokeTool::Erase) => STROKE_ERASE,
+                Some(StrokeTool::Laid) => STROKE_LAID,
                 // the smudge changes the layer itself
                 Some(StrokeTool::Smudge) => STROKE_NONE,
             },
@@ -6700,6 +6774,9 @@ impl Canvas {
             selection_module,
             ..
         } = &*self.pipelines;
+        // the images a predicted tail reads, if they are a brush file's own
+        let own_images =
+            self.active.filter(|_| !predicted.is_empty()).and_then(|a| self.full_grain_bind(device, &a.style));
         let ScreenPipelines {
             display,
             surround: surround_pipelines,
@@ -6872,7 +6949,7 @@ impl Canvas {
             let size = size_of::<StampInstance>() as u64;
             pass.set_pipeline(overlay_pipeline);
             pass.set_bind_group(0, &self.uniform_bind, &[offset]);
-            pass.set_bind_group(1, &self.brush_bind, &[]);
+            pass.set_bind_group(1, own_images.as_ref().unwrap_or(&self.brush_bind), &[]);
             pass.set_vertex_buffer(
                 0,
                 self.stamp_buffer.slice(u64::from(predicted.start) * size..u64::from(predicted.end) * size),
@@ -8998,7 +9075,7 @@ const SOURCE_SLOTS: usize = 8;
 /// How many brush files' grains stay on the GPU at their own size.
 const FULL_GRAINS_HELD: usize = 3;
 
-/// Brush files' grains at their own size, each an array with its mip levels, the image in its first
+/// Brush files' grains or shapes at their own size, each an array with its mip levels, the image in its first
 /// layer: only the last few used, so that their memory doesn't grow with the brushes.
 #[derive(Default)]
 struct FullGrains {

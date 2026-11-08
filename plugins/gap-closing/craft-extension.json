@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.gap-closing",
+  "name": "ColorDrop gap closing",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Keeps ColorDrop from running out through gaps in your lines, up to this wide.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["fill_mask"],
+  "controls": [
+    {
+      "key": "gap", "type": "slider", "label": "Gap", "least": 0, "most": 32, "step": 1, "starts": 0,
+      "unit": " px", "at_least": "Off", "keeps": "fill_gap"
+    }
+  ]
+}

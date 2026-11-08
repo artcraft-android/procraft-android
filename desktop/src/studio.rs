@@ -780,7 +780,7 @@ impl Studio {
     fn read_sources(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         self.sources.clear();
         for kind in [SourceKind::Shape, SourceKind::Grain, SourceKind::Metallic, SourceKind::Roughness] {
-            let pixels = session.studio_source(kind);
+            let pixels = session.studio_source_picture(kind);
             let n = (pixels.len() as f64).sqrt() as usize;
             if n == 0 || n * n != pixels.len() {
                 continue;

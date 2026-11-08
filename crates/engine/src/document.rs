@@ -334,6 +334,21 @@ impl Layer {
     }
 }
 
+/// Why a change to a layer would go unseen (see [`Document::unseen`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unseen {
+    /// Its own box is off.
+    Itself,
+    /// A mask whose layer is hidden.
+    MaskLayer,
+    /// A group it is in is hidden.
+    Group,
+    /// A group with something hidden in it (a layer, a group or a mask, at any depth).
+    Inside,
+    /// Left out while another layer is shown alone, and so is every layer picked with it.
+    Solo,
+}
+
 /// Largest canvas edge, pixels.
 pub const MAX_CANVAS_EDGE: u32 = 16384;
 
@@ -655,13 +670,70 @@ impl Document {
     }
 
     /// Whether layer `id` is left out of the picture while another is shown alone (solo): all
-    /// but that layer, its mask and the groups it is in.
+    /// but that layer with its mask, what is in it (a group shown alone shows its layers as they
+    /// are set) and the groups it is in. A mask shown alone shows its layer with it.
     pub fn soloed_out(&self, id: LayerId) -> bool {
         let Some(solo) = self.solo.filter(|s| self.layer(*s).is_some()) else { return false };
-        if id == solo || self.mask_of(solo) == Some(id) {
+        let solo = self.mask_owner(solo).unwrap_or(solo);
+        if id == solo || self.mask_of(solo) == Some(id) || self.is_inside(id, solo) {
             return false;
         }
         !(self.layer(id).is_some_and(|l| l.kind == LayerKind::Group) && self.is_inside(solo, id))
+    }
+
+    /// Whether what is drawn on layer `id` is seen: it can show ([`Document::shows`]) and isn't
+    /// left out while another layer is shown alone.
+    pub fn in_picture(&self, id: LayerId) -> bool {
+        self.shows(id) && !self.soloed_out(id)
+    }
+
+    /// Why a change to layer `id` (a stroke, a transform, an adjustment...) would go unseen, if it
+    /// would, as such a change is told: its box is off; a mask on a hidden layer; in a hidden
+    /// group; a group with something hidden in it; or left out while another layer is shown
+    /// alone, and so is every layer picked with it.
+    pub fn unseen(&self, id: LayerId) -> Option<Unseen> {
+        let l = self.layer(id)?;
+        if !l.visible {
+            return Some(Unseen::Itself);
+        }
+        if self.mask_owner(id).is_some_and(|o| self.layer(o).is_none_or(|o| !o.visible)) {
+            return Some(Unseen::MaskLayer);
+        }
+        if !self.shows(id) {
+            return Some(Unseen::Group);
+        }
+        if l.kind == LayerKind::Group && self.layers.iter().any(|o| !o.visible && self.is_inside(o.id, id)) {
+            return Some(Unseen::Inside);
+        }
+        (self.soloed_out(id) && self.picked().iter().all(|p| self.soloed_out(*p))).then_some(Unseen::Solo)
+    }
+
+    /// The layer mask `id` belongs to, if it is a mask.
+    fn mask_owner(&self, id: LayerId) -> Option<LayerId> {
+        let l = self.layer(id).filter(|l| l.kind == LayerKind::Mask)?;
+        l.parent.filter(|p| self.mask_of(*p) == Some(id))
+    }
+
+    /// Whether layer `id` can show: it is visible, and so is every group it is in (and a mask's
+    /// layer).
+    pub fn shows(&self, id: LayerId) -> bool {
+        if self.layer(id).is_none_or(|l| !l.visible) {
+            return false;
+        }
+        if let Some(owner) = self.mask_owner(id)
+            && self.layer(owner).is_none_or(|l| !l.visible)
+        {
+            return false;
+        }
+        let mut at = self.group_of(id);
+        for _ in 0..self.layers.len() {
+            let Some(g) = at else { return true };
+            if self.layer(g).is_none_or(|l| !l.visible) {
+                return false;
+            }
+            at = self.group_of(g);
+        }
+        true
     }
 
     /// The reference layer, if one is set.
@@ -1552,7 +1624,9 @@ impl Document {
         if self.layer(self.current).is_none() {
             self.current = self.layers.last().map_or(LayerId(0), |l| l.id);
         }
-        if self.solo.is_some_and(|s| self.layer(s).is_none()) {
+        // a layer shown alone that can't show (hidden, or in a hidden group) leaves only the
+        // background, the panel's boxes still ticked: such an artwork opens with every layer shown
+        if self.solo.is_some_and(|s| !self.shows(s)) {
             self.solo = None;
         }
         // drawing assist was once the guide's, not each layer's: it goes to the current layer
@@ -1877,6 +1951,121 @@ mod tests {
         let fixed = looped.repaired();
         assert_eq!(fixed.layers().len(), 6);
         assert!(fixed.max_depth() <= 2);
+    }
+
+    #[test]
+    fn a_group_shown_alone_shows_what_is_in_it_and_one_that_cant_show_opens_without_solo() {
+        let mut d = Document::new(10, 10);
+        let below = d.current();
+        let a = d.add_layer();
+        let b = d.add_layer();
+        let m = d.add_mask(b).unwrap();
+        assert!(d.set_current(a));
+        assert!(d.toggle_pick(b));
+        let g = d.group_chosen().unwrap();
+        assert!(d.set_current(g));
+        let above = d.add_layer();
+        d.solo = Some(g);
+        for id in [g, a, b, m] {
+            assert!(!d.soloed_out(id), "{id:?} is in the group shown alone");
+        }
+        assert!(d.soloed_out(below) && d.soloed_out(above));
+        // nested: the outer group's layers show, the group around it too
+        assert!(d.set_current(g));
+        assert!(d.toggle_pick(below));
+        let outer = d.group_chosen().unwrap();
+        assert!(!d.soloed_out(outer) && !d.soloed_out(a) && d.soloed_out(below));
+        d.solo = Some(outer);
+        assert!(!d.soloed_out(below) && !d.soloed_out(a) && d.soloed_out(above));
+        // saved shown alone and showing: kept
+        d.solo = Some(g);
+        assert_eq!(d.clone().repaired().solo, Some(g));
+        // saved shown alone but hidden, or in a hidden group: every layer shows again on opening
+        let mut hidden = d.clone();
+        hidden.set_visible(g, false);
+        assert_eq!(hidden.repaired().solo, None);
+        let mut inside = d.clone();
+        inside.solo = Some(a);
+        assert_eq!(inside.clone().repaired().solo, Some(a));
+        inside.set_visible(outer, false);
+        let fixed = inside.repaired();
+        assert_eq!(fixed.solo, None);
+        assert_eq!(fixed.layers().len(), d.layers().len());
+    }
+
+    #[test]
+    fn what_is_drawn_on_a_layer_is_seen_only_if_nothing_hides_it_or_leaves_it_out() {
+        let mut d = Document::new(10, 10);
+        let below = d.current();
+        let a = d.add_layer();
+        let m = d.add_mask(a).unwrap();
+        assert!(d.set_current(a));
+        let g = d.group_chosen().unwrap();
+        for id in [below, a, m, g] {
+            assert!(d.in_picture(id), "{id:?}");
+        }
+        // a group it is in hidden, or for a mask its layer
+        d.set_visible(g, false);
+        assert!(!d.in_picture(a) && !d.in_picture(m) && d.layer(a).unwrap().visible);
+        d.set_visible(g, true);
+        d.set_visible(a, false);
+        assert!(!d.in_picture(m) && d.layer(m).unwrap().visible);
+        d.set_visible(a, true);
+        // another layer shown alone
+        d.solo = Some(below);
+        assert!(d.in_picture(below) && !d.in_picture(a) && !d.in_picture(m));
+        // a mask shown alone shows its layer with it (not only the background)
+        d.solo = Some(m);
+        assert!(d.in_picture(a) && d.in_picture(m) && d.in_picture(g) && !d.in_picture(below));
+        // one shown alone on a hidden layer can't show: it opens with every layer shown
+        d.set_visible(a, false);
+        assert_eq!(d.clone().repaired().solo, None);
+    }
+
+    #[test]
+    fn a_change_goes_unseen_on_a_hidden_layer_in_a_hidden_group_or_a_group_holding_one() {
+        let mut d = Document::new(10, 10);
+        let below = d.current();
+        let a = d.add_layer();
+        let m = d.add_mask(a).unwrap();
+        assert!(d.set_current(a));
+        let inner = d.group_chosen().unwrap();
+        assert!(d.set_current(inner));
+        let outer = d.group_chosen().unwrap();
+        for id in [below, a, m, inner, outer] {
+            assert_eq!(d.unseen(id), None, "{id:?}");
+        }
+        // hidden itself; a mask on a hidden layer; anything in a hidden group, at any depth
+        d.set_visible(a, false);
+        assert_eq!(d.unseen(a), Some(Unseen::Itself));
+        assert_eq!(d.unseen(m), Some(Unseen::MaskLayer));
+        // a group with something hidden in it, at any depth, a mask too
+        assert_eq!(d.unseen(inner), Some(Unseen::Inside));
+        assert_eq!(d.unseen(outer), Some(Unseen::Inside));
+        d.set_visible(a, true);
+        d.set_visible(m, false);
+        assert_eq!(d.unseen(outer), Some(Unseen::Inside));
+        assert_eq!(d.unseen(a), None, "a hidden mask leaves its layer seen");
+        d.set_visible(m, true);
+        d.set_visible(outer, false);
+        assert_eq!(d.unseen(outer), Some(Unseen::Itself));
+        for id in [a, m, inner] {
+            assert_eq!(d.unseen(id), Some(Unseen::Group), "{id:?}");
+        }
+        d.set_visible(outer, true);
+        // left out while another is shown alone, unless a layer picked with it shows
+        d.solo = Some(below);
+        assert_eq!(d.unseen(a), Some(Unseen::Solo));
+        assert_eq!(d.unseen(below), None);
+        assert!(d.set_current(a));
+        assert!(d.toggle_pick(below));
+        assert_eq!(d.unseen(a), None);
+        d.solo = Some(outer);
+        assert!(d.set_current(below));
+        assert!(d.toggle_pick(a));
+        assert_eq!(d.unseen(below), None);
+        d.clear_picks();
+        assert_eq!(d.unseen(below), Some(Unseen::Solo));
     }
 
     #[test]

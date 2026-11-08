@@ -535,6 +535,13 @@ fn cursor_turn(session: &CanvasSession) -> f32 {
     if let Some(azimuth) = crate::pen::azimuth().filter(|_| setting("input_style") >= 0.5) {
         turn += azimuth;
     }
+    // turned by the barrel from its zero, as the stamps will be (relative to the stroke, the first
+    // stamp isn't)
+    if let Some(barrel) =
+        crate::pen::barrel().filter(|_| setting("input_style") >= 1.5 && setting("relative_to_stroke") < 0.5)
+    {
+        turn += barrel;
+    }
     turn
 }
 

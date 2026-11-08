@@ -246,7 +246,7 @@ mod tests {
     use crate::{Adjustment, PenSample, PointerKind};
 
     /// Clears what isn't dark, by the amount of `cut`.
-    const LINES: &str = "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
+    const LINES: &str = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
         let dark = 1.0 - dot(colour.rgb, vec3<f32>(0.299, 0.587, 0.114));
         let shade = select(vec3<f32>(0.0), colour.rgb, v.keep_colour > 0.5);
         return vec4<f32>(shade, step(v.cut, dark) * colour.a);
@@ -265,6 +265,22 @@ mod tests {
         let mut manifest = manifest(id);
         manifest["files"] = json!([{ "path": "filter.wgsl", "sha256": sha256(code.as_bytes()), "size": code.len() }]);
         pack(&manifest, &[("filter.wgsl", code.as_bytes())])
+    }
+
+    /// `file_of`, but with code beside the filter.
+    fn with_code(id: &str, code: &str) -> Vec<u8> {
+        let module = crate::plugin_run::tests::position_module(
+            r#"(func (export "procraft_control") (param i32 f32))"#,
+            "(i64.const 0)",
+        );
+        let mut manifest = manifest(id);
+        manifest["holds"] = json!(["filter", "hooks"]);
+        manifest["hooks"] = json!(["position"]);
+        manifest["files"] = json!([
+            { "path": "filter.wgsl", "sha256": sha256(code.as_bytes()), "size": code.len() },
+            { "path": crate::plugin_run::MODULE, "sha256": sha256(&module), "size": module.len() },
+        ]);
+        pack(&manifest, &[("filter.wgsl", code.as_bytes()), (crate::plugin_run::MODULE, &module)])
     }
 
     /// A session on a headless GPU with a black stroke down the middle, or none without a GPU.
@@ -492,15 +508,15 @@ mod tests {
             told
         };
         for code in [
-            "fn filter(",
-            "@group(0) @binding(0) var t: texture_2d<f32>;\nfn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }",
+            "fn pixel(",
+            "@group(0) @binding(0) var t: texture_2d<f32>;\nfn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }",
             "@fragment fn main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }",
         ] {
             assert_eq!(refused(code).as_deref(), Some("This filter's code can't run in ProCraft."), "{code}");
         }
         // the text is held to its size at the door too
         let huge = format!(
-            "// {}\nfn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {{ return colour; }}",
+            "// {}\nfn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {{ return colour; }}",
             "x".repeat(70_000)
         );
         assert!(refused(&huge).is_some());
@@ -508,6 +524,21 @@ mod tests {
 
     /// Every sample in the repo's plugins/ folder, as a file imported and opened on a real canvas:
     /// a wgpu upgrade can change what WGSL is accepted, and this is what would show it.
+    #[test]
+    fn a_filter_beside_code_opens_on_a_layer_as_any_other() {
+        let Some(s) = session() else { return };
+        let dir = store("beside-code");
+        let plugins = Plugins::with_store(dir.clone());
+        assert_eq!(plugins.install(with_code(ID, LINES)), None);
+        // off as it starts, so it isn't there to open
+        assert!(plugins.filters().is_empty());
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!(plugins.filters().len(), 1);
+        assert_eq!(s.plugin_filter_start(Arc::clone(&plugins), ID.to_owned(), None), None);
+        assert_eq!(s.adjustment_shown().plugin.unwrap().controls.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_samples_compile_and_draw() {
         let Some(s) = session() else { return };
@@ -533,6 +564,10 @@ mod tests {
         }
         for sample in std::fs::read_dir(root).unwrap() {
             let folder = sample.unwrap().path();
+            // the plugins with code are looked at by their own crates
+            if !folder.join("filter.wgsl").exists() {
+                continue;
+            }
             let code = std::fs::read(folder.join("filter.wgsl")).unwrap();
             let manifest = std::fs::read(folder.join("craft-extension.json")).unwrap();
             let mut manifest: Value = serde_json::from_slice(&manifest).unwrap();

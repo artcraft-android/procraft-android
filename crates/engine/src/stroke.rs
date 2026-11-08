@@ -782,8 +782,10 @@ pub struct StrokeBuilder {
     /// How far the canvas is turned on screen, for a brush whose shapes keep to the screen.
     screen_turn: f32,
     /// The brush's input style is azimuth and barrel roll: its stamps turn as the pen's barrel
-    /// does, from how it was turned as the stroke began.
+    /// does; set relative to the stroke, from how it was turned as the stroke began, else from
+    /// the barrel's own zero (a turn held from before the stroke counts).
     roll_turns: bool,
+    roll_relative: bool,
     roll_from: Option<f32>,
     /// Screen points a canvas pixel spans, for the speed dynamics.
     points_per_pixel: f32,
@@ -935,8 +937,10 @@ impl StrokeBuilder {
     pub fn with_seed(brush: Brush, diameter: f32, pointer: Pointer, seed: u32) -> StrokeBuilder {
         let diameter = if diameter.is_finite() { diameter.max(0.5) } else { 1.0 };
         let roll_turns = brush.setting("input_style") >= 1.5;
+        let roll_relative = brush.setting("relative_to_stroke") >= 0.5;
         StrokeBuilder {
             roll_turns,
+            roll_relative,
             roll_from: None,
             brush,
             diameter,
@@ -1247,7 +1251,7 @@ impl StrokeBuilder {
         self.pressure = Some(pressure);
         let (tilt, azimuth) = if pen { (s.tilt, s.azimuth) } else { (0.0, 0.0) };
         let roll = if pen && s.roll.is_finite() { s.roll } else { 0.0 };
-        // a brush turned by the barrel turns from where it was as the stroke began
+        // a brush turned by the barrel notes where it was as the stroke began
         if self.roll_turns && self.roll_from.is_none() {
             self.roll_from = Some(roll);
         }
@@ -2015,7 +2019,7 @@ impl StrokeBuilder {
                 own += p.azimuth;
             }
             if let Some(from) = self.roll_from {
-                own += p.roll - from;
+                own += if self.roll_relative { p.roll - from } else { p.roll };
             }
             if shape.scatter > 0.0 {
                 own += (self.random.next() * 2.0 - 1.0) * shape.scatter * scatter_by * std::f32::consts::PI;
@@ -3962,9 +3966,10 @@ mod tests {
     #[test]
     fn a_brush_set_to_azimuth_and_barrel_roll_turns_its_stamps_as_the_barrel_turns() {
         let quarter = std::f32::consts::FRAC_PI_2;
-        let angles = |style: f32, pointer: Pointer| {
+        let angles_from = |style: f32, relative: f32, pointer: Pointer| {
             let mut b = plain();
             b.set_setting("input_style", style);
+            b.set_setting("relative_to_stroke", relative);
             let mut s = StrokeBuilder::new(b, 10.0, pointer);
             let samples: Vec<Sample> = (0..=20u8)
                 .map(|i| {
@@ -3976,10 +3981,17 @@ mod tests {
             let stamps = s.finish();
             (stamps.first().map(|s| s.angle), stamps.last().map(|s| s.angle))
         };
-        // from how the barrel was turned as the stroke began, as far as it turns on
+        // relative to the stroke: from how the barrel was turned as the stroke began, as far as it
+        // turns on
+        let angles = |style: f32, pointer: Pointer| angles_from(style, 1.0, pointer);
         let (first, last) = angles(2.0, Pointer::Stylus);
         assert!(first.is_some_and(|a| a.abs() < 1e-3), "{first:?}");
         assert!(last.is_some_and(|a| (a - quarter).abs() < 0.05), "{last:?}");
+        // not: as the barrel is turned from its zero, the turn it was held at from the first stamp
+        let (first, last) = angles_from(2.0, 0.0, Pointer::Stylus);
+        assert!(first.is_some_and(|a| (a - 1.0).abs() < 1e-3), "{first:?}");
+        assert!(last.is_some_and(|a| (a - 1.0 - quarter).abs() < 0.05), "{last:?}");
+        assert_eq!(angles_from(2.0, 0.0, Pointer::Finger), (Some(0.0), Some(0.0)));
         // the azimuth alone, or a finger: no turn
         assert_eq!(angles(1.0, Pointer::Stylus), (Some(0.0), Some(0.0)));
         assert_eq!(angles(2.0, Pointer::Finger), (Some(0.0), Some(0.0)));

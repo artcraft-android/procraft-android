@@ -39,6 +39,7 @@ mod lighting;
 mod liquify;
 mod look;
 mod menu;
+mod model_picture;
 mod overlays;
 mod panel;
 mod pdf;
@@ -195,6 +196,7 @@ fn main() {
         started: Instant::now(),
         last_frame: Instant::now(),
         again: None,
+        finishing_since: None,
         opening: None,
         importing: None,
         reading_artwork: None,
@@ -240,6 +242,8 @@ struct App {
     /// moving, or a hold to be timed).
     last_frame: Instant,
     again: Option<Instant>,
+    /// Since when a plugin has been finishing a fill.
+    finishing_since: Option<Instant>,
     /// An artwork's canvas being made on a thread of its own as it opens, and since when.
     opening: Option<(Instant, std::thread::JoinHandle<()>)>,
     /// Artworks being brought in, read on a thread of their own one after another.
@@ -401,9 +405,12 @@ impl ApplicationHandler for App {
                 let Some(session) = session else { return };
                 // with a popover open, a press on the canvas only closes it (a panel alone lets it
                 // through, to wait there to be a tap or a drag); while the artwork is being
-                // exported none reaches it (nothing the export would end is started)
+                // exported, or a plugin finishes a fill, none reaches it (nothing either would end is
+                // started)
                 let through = self.ui.popover_open && self.ui.panel_lets_through;
-                let blocked = (self.ui.popover_open && !through) || files::exporting_since().is_some();
+                let blocked = (self.ui.popover_open && !through)
+                    || files::exporting_since().is_some()
+                    || session.pour_finishing();
                 session.set_touch_panel_open(through);
                 let canvas = self.ui.canvas_rect;
                 let over = |p: (f32, f32)| blocked || screen.over_interface(p, canvas);
@@ -482,7 +489,9 @@ impl ApplicationHandler for App {
         // the touches' waits (a hold, a repeat) run out
         if self.input.tick(session) || !self.input.commands.is_empty() {
             screen.window.request_redraw();
-        } else if let Some(due) = self.again.or_else(|| session.wants_frame().then(Instant::now)) {
+        } else if let Some(due) =
+            self.again.or_else(|| (session.wants_frame() && !screen.minimised()).then(Instant::now))
+        {
             // what moves by itself (the selection's bands, a fade) draws once a refresh, not as
             // fast as frames can be made
             let due = due.max(self.last_frame + frame_gap(&screen.window));
@@ -587,6 +596,10 @@ impl App {
         {
             zoom.hold();
         }
+        // a plugin finishing a fill: after a moment it says so
+        let finishing = session.pour_finishing();
+        self.finishing_since = finishing.then(|| self.finishing_since.unwrap_or_else(Instant::now));
+        let finishing_slowly = self.finishing_since.is_some_and(|since| since.elapsed() >= SLOW_OPENING);
         // an export shows its own card; the veil is for a slow save
         let exporting = !self.ui.export_card.busy()
             && files::exporting_since().is_some_and(|since| since.elapsed() >= SLOW_OPENING);
@@ -602,6 +615,8 @@ impl App {
                 opening_veil(ui.ctx());
             } else if exporting {
                 veil(ui.ctx(), "Exporting…");
+            } else if finishing_slowly {
+                veil(ui.ctx(), "Finishing the fill…");
             }
         });
         let pad_soon = self.studio_pad(&session);
@@ -610,8 +625,9 @@ impl App {
         if pad_soon {
             self.again = Some(Instant::now());
         }
-        // looked at again soon while the canvas is being made, an artwork read or saved as
-        if self.ui.saved_as() || self.opening.is_some() || self.importing.is_some() {
+        // looked at again soon while the canvas is being made, an artwork read or saved as, or a
+        // fill finished
+        if self.ui.saved_as() || self.opening.is_some() || self.importing.is_some() || finishing {
             let soon = Instant::now() + Duration::from_millis(50);
             self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }

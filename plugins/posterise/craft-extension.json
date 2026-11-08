@@ -3,7 +3,7 @@
   "id": "io.github.artcraftandroid.posterise",
   "name": "Posterise",
   "version": "1.0.0",
-  "kind": "filter",
+  "holds": ["filter"],
   "publisher": { "name": "ProCraft" },
   "description": "Holds each colour to a few flat steps.",
   "compat": { "procraft": { "interface": 1 } },

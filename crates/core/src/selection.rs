@@ -94,6 +94,17 @@ impl State {
         self.feather_base = None;
     }
 
+    /// The canvas pixel under window point (`x`, `y`), if there is one: through the view, or on a
+    /// shown model the texel of the texture set painted on.
+    pub(crate) fn window_texel(&self, x: f32, y: f32) -> Option<(u32, u32)> {
+        if self.scene_shown() {
+            return self.scene_texel(x, y);
+        }
+        let p = self.view?.screen_to_canvas(Vec2::new(x, y))?;
+        let (w, h) = (self.doc.width() as f32, self.doc.height() as f32);
+        (p.x >= 0.0 && p.y >= 0.0 && p.x < w && p.y < h).then_some((p.x as u32, p.y as u32))
+    }
+
     /// Window points to canvas points.
     fn to_canvas_points(&self, window: &[Vec2]) -> Option<Vec<Vec2>> {
         let view = self.view?;
@@ -143,13 +154,9 @@ impl CanvasSession {
     pub fn select_by_colour(&self, x: f32, y: f32, threshold: f32, join: SelectionJoin, live: bool) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(p) = st.view.and_then(|v| v.screen_to_canvas(Vec2::new(x, y))) else { return };
+        let Some(seed) = st.window_texel(x, y) else { return };
         let (w, h) = (st.doc.width(), st.doc.height());
-        if !(p.x >= 0.0 && p.y >= 0.0 && p.x < w as f32 && p.y < h as f32) {
-            return;
-        }
         // the layer is read and measured from the seed once for the whole drag
-        let seed = (p.x as u32, p.y as u32);
         let (pixels, flood) = match st.colour_source.take() {
             Some((px, flood)) if flood.seed() == seed => (px, Some(flood)),
             Some((px, _)) => (px, None),
@@ -409,8 +416,13 @@ impl CanvasSession {
     fn select_window_polygon(&self, window: &[Vec2], join: SelectionJoin) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(points) = st.to_canvas_points(window) else { return };
-        let shape = Mask::polygon(st.doc.width(), st.doc.height(), &points);
+        let shape = if st.scene_shown() {
+            let Some(shape) = st.scene_mask(window) else { return };
+            shape
+        } else {
+            let Some(points) = st.to_canvas_points(window) else { return };
+            Mask::polygon(st.doc.width(), st.doc.height(), &points)
+        };
         st.join(shape, join, true);
         self.shared.frame(st);
     }

@@ -19,7 +19,9 @@ pub use canvas::{
     Thumbnail, most_resident, read_texture, start_reading, textures_bytes,
 };
 pub use lighting::Lighting;
-pub use scene::{GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, SurfaceMap, material_source};
+pub use scene::{
+    GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, ShownSelection, SurfaceMap, material_source,
+};
 pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use wgpu;
 

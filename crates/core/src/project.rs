@@ -34,11 +34,12 @@ const PACKAGE_PREVIEW_SIDE: u32 = 1024;
 const FORMAT: &str = "procraft-artwork";
 const VERSION: u32 = 1;
 
-/// Whether the artwork in `dir` plays: Animation Assist or Page Assist on, from its file alone.
+/// Whether the artwork in `dir` plays: a model, which turns, or Animation Assist or Page Assist on, from its file alone.
 #[uniffi::export]
 pub fn artwork_plays(dir: String) -> bool {
     let text = fs::read_to_string(Path::new(&dir).join("artwork.json"));
-    text.ok().and_then(|t| serde_json::from_str::<ArtworkFile>(&t).ok()).is_some_and(|f| f.document.animation.is_some())
+    let file = text.ok().and_then(|t| serde_json::from_str::<ArtworkFile>(&t).ok());
+    file.is_some_and(|f| f.document.animation.is_some() || f.model.is_some())
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -60,6 +61,13 @@ struct ArtworkFile {
     /// The model painted on, if it is one (its current texture set is `document`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<crate::scene3d::SavedModel>,
+    /// The Reference window as it was left, if it was ever used (its picture beside the layers).
+    #[serde(
+        default,
+        deserialize_with = "procraft_engine::document::or_default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    reference: Option<procraft_engine::reference_window::ReferenceWindow>,
 }
 
 /// A view kept with an artwork: the canvas point in the middle of the window, the zoom and the
@@ -158,6 +166,8 @@ pub(crate) struct SaveSnapshot {
     model: Option<crate::scene3d::ModelSnapshot>,
     /// The device read from, to tell whether it was lost meanwhile.
     gpu: Option<procraft_gpu::Gpu>,
+    /// The Reference window's picture, if it has one.
+    reference_picture: Option<Arc<Vec<u8>>>,
 }
 
 /// How much of a save's layers may still be on their way back from the GPU when the lock is let
@@ -174,6 +184,8 @@ pub(crate) struct Saved {
     sets: crate::scene3d::SavedSets,
     /// Which autosave may save: one started under another number has been stopped.
     autosave: u64,
+    /// A hash of the Reference window's picture as the folder has it, if it has one.
+    reference_picture: Option<u64>,
 }
 
 impl Saved {
@@ -187,6 +199,7 @@ impl Saved {
     pub(crate) fn opened(&mut self, dir: &Path) {
         self.dir = dir.to_path_buf();
         self.layers.clear();
+        self.reference_picture = None;
     }
 
     /// Layer `id` read from its file, its pixels' [`pixels_hash`]: a save that finds it unchanged
@@ -262,6 +275,7 @@ impl crate::State {
                 .and_then(|v| SavedView::of(v, self.window_size))
                 .or(self.saved_view),
             model: model.as_ref().map(|m| m.saved.clone()),
+            reference: Some(self.reference_window.clone()).filter(|w| !w.is_unused()),
         };
         let mut layers = Vec::new();
         let mut reading = Vec::new();
@@ -328,7 +342,19 @@ impl crate::State {
             }
         }
         let gpu = self.gpu.clone();
-        Ok(SaveSnapshot { changed: changed_ids, file, layers, reading, files, composite, unshown, model, gpu })
+        let reference_picture = self.reference_picture.clone();
+        Ok(SaveSnapshot {
+            changed: changed_ids,
+            file,
+            layers,
+            reading,
+            files,
+            composite,
+            unshown,
+            model,
+            gpu,
+            reference_picture,
+        })
     }
 }
 
@@ -429,7 +455,8 @@ impl CanvasSession {
 /// Writes a save into `dir` (made if missing): the layers that changed since the last save there,
 /// the thumbnail and the document.
 fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Result<(), MobileError> {
-    let SaveSnapshot { file, mut layers, reading, files, composite, unshown, model, gpu, .. } = snapshot;
+    let SaveSnapshot { file, mut layers, reading, files, composite, unshown, model, gpu, reference_picture, .. } =
+        snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
     for (id, read) in reading {
         let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
@@ -449,6 +476,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         saved.dir = dir.to_path_buf();
         saved.layers.clear();
         saved.sets.clear();
+        saved.reference_picture = None;
     }
     let (w, h) = (file.document.width(), file.document.height());
     fs::create_dir_all(dir.join("layers")).map_err(|e| file_error("making the folder", e))?;
@@ -504,6 +532,16 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             let icc = file.document.picture_icc();
             stage(write_beside(&thumb, |p| write_png(p, tw, th, &small, &icc)), thumb, &mut staged)?;
         }
+        // the Reference window's picture, unless the folder has it already
+        let picture_path = dir.join(crate::reference_window::REFERENCE_PICTURE);
+        if let Some(png) = reference_picture.as_deref()
+            && (saved.reference_picture != Some(pixels_hash(png)) || !picture_path.exists())
+        {
+            let written = write_beside(&picture_path, |p| {
+                fs::write(p, png).map_err(|e| file_error("writing the reference picture", e))
+            });
+            stage(written, picture_path, &mut staged)?;
+        }
         let json = serde_json::to_string(&file).map_err(|e| file_error("writing the artwork", e))?;
         let doc = dir.join("artwork.json");
         stage(
@@ -524,6 +562,11 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     }
     for (id, hash, _) in &layers {
         saved.layers.insert(*id, *hash);
+    }
+    // a picture taken away goes once the document without it is in place
+    saved.reference_picture = reference_picture.as_deref().map(|png| pixels_hash(png));
+    if reference_picture.is_none() {
+        let _ = fs::remove_file(dir.join(crate::reference_window::REFERENCE_PICTURE));
     }
     for (id, _) in &files {
         // its pixels' hash isn't known: the next save writes it again
@@ -643,13 +686,20 @@ impl CanvasSession {
         let scene = file.model.as_ref().map(|m| crate::scene3d::open_saved_model(&dir, m)).transpose()?;
         let session = CanvasSession::with_document(doc, file.name, Vec::new());
         // its files are as the last save left them: one unchanged since isn't written again
-        session.shared.saving.lock().unwrap_or_else(|e| e.into_inner()).opened(&dir);
+        let reference_picture = fs::read(dir.join(crate::reference_window::REFERENCE_PICTURE)).ok();
+        {
+            let mut saving = session.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
+            saving.opened(&dir);
+            saving.reference_picture = reference_picture.as_deref().map(pixels_hash);
+        }
         {
             let mut st = session.shared.lock();
             st.pending_pixels = pngs;
             st.info = file.info;
             st.saved_view = file.view;
             st.scene = scene;
+            st.reference_window = file.reference.unwrap_or_default();
+            st.reference_picture = reference_picture.map(Arc::new);
         }
         Ok(session)
     }
@@ -779,6 +829,9 @@ impl CanvasSession {
             st.info.strokes = imported.strokes;
             st.info.tracked_ms = (imported.tracked_seconds * 1000.0) as u64;
             st.info.author = imported.author;
+            st.reference_window = imported.reference;
+            st.reference_picture =
+                imported.reference_picture.map(|(png, turn)| Arc::new(crate::reference_window::upright(png, turn)));
         }
         Ok(session)
     }
@@ -810,7 +863,7 @@ impl CanvasSession {
             None => None,
         };
         self.exported(0.0);
-        let (doc, pixels, composite, name, info) = {
+        let (doc, pixels, composite, name, info, reference, reference_picture) = {
             let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
             st.finish_stroke();
@@ -831,7 +884,8 @@ impl CanvasSession {
                 }
                 self.exported(0.1 + 0.6 * (i + 1) as f32 / count as f32);
             }
-            (st.doc.clone(), pixels, composite, st.name.clone(), st.info.clone())
+            let reference = (st.reference_window.clone(), st.reference_picture.clone());
+            (st.doc.clone(), pixels, composite, st.name.clone(), st.info.clone(), reference.0, reference.1)
         };
         let (w, h) = (doc.width(), doc.height());
         let (tw, th, mut thumb) = thumbnail(&straight_alpha(&composite), w, h, PACKAGE_PREVIEW_SIDE);
@@ -850,6 +904,8 @@ impl CanvasSession {
             tracked_seconds: info.tracked_ms as f64 / 1000.0,
             seed,
             time_lapse: time_lapse.as_ref(),
+            reference: Some(&reference),
+            reference_picture: reference_picture.as_deref().map(Vec::as_slice),
         });
         self.exported(0.95);
         write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;

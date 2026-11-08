@@ -1,7 +1,7 @@
 //! Layers: the list the layers panel shows and every change to it, each one undoable. A slider
 //! drag (opacity, background colour) is one undo step from where it began to `done`.
 
-use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind};
+use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind, Unseen};
 
 use crate::CanvasSession;
 
@@ -34,6 +34,9 @@ pub struct LayerInfo {
     pub text: bool,
     /// How many groups it is inside.
     pub depth: u32,
+    /// Left out of the picture while another layer is shown alone (solo visibility): its box
+    /// shows it hidden, whatever it is set to.
+    pub soloed_out: bool,
     /// Whether Merge Down, Combine Down and Clipping Mask apply to it.
     pub can_merge: bool,
     pub can_combine: bool,
@@ -229,7 +232,8 @@ pub(crate) fn resident_budget() -> u64 {
 /// How many layers a canvas holds, has, and of which kinds.
 #[derive(uniffi::Record)]
 pub struct LayerStats {
-    /// Layers with pixels (paint layers and masks) the canvas can hold.
+    /// Layers with pixels (paint layers and masks) the canvas can hold; each of a model's texture
+    /// sets holds this many. The counts below are of all of them.
     pub maximum: u32,
     /// Layers with pixels it has.
     pub used: u32,
@@ -299,14 +303,9 @@ impl CanvasSession {
     pub fn layers_at(&self, x: f32, y: f32) -> Vec<u64> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(p) = st.view.and_then(|v| v.screen_to_canvas(procraft_engine::geom::Vec2::new(x, y))) else {
-            return Vec::new();
-        };
-        if p.x < 0.0 || p.y < 0.0 {
-            return Vec::new();
-        }
+        let Some((px, py)) = st.window_texel(x, y) else { return Vec::new() };
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Vec::new() };
-        let Ok(alphas) = canvas.alphas_at(gpu, &mut st.doc, p.x as u32, p.y as u32) else { return Vec::new() };
+        let Ok(alphas) = canvas.alphas_at(gpu, &mut st.doc, px, py) else { return Vec::new() };
         let doc = &st.doc;
         alphas
             .into_iter()
@@ -318,14 +317,15 @@ impl CanvasSession {
 
     pub fn layer_stats(&self) -> LayerStats {
         let st = self.shared.lock();
-        let d = &st.doc;
+        let docs = st.colour_docs();
         let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-        let kind = |k: LayerKind| count(d.layers().iter().filter(|l| l.kind == k).count());
+        let all = |of: &dyn Fn(&Document) -> usize| count(docs.iter().map(|d| of(d)).sum());
+        let kind = |k: LayerKind| all(&|d| d.layers().iter().filter(|l| l.kind == k).count());
         LayerStats {
-            maximum: count(d.layer_cap()),
-            used: count(d.pixel_layer_ids().count()),
-            assisted: count(d.layers().iter().filter(|l| l.assisted).count()),
-            clipping: count(d.layers().iter().filter(|l| l.clipped).count()),
+            maximum: count(st.doc.layer_cap()),
+            used: all(&|d| d.pixel_layer_ids().count()),
+            assisted: all(&|d| d.layers().iter().filter(|l| l.assisted).count()),
+            clipping: all(&|d| d.layers().iter().filter(|l| l.clipped).count()),
             masks: kind(LayerKind::Mask),
             groups: kind(LayerKind::Group),
         }
@@ -377,6 +377,7 @@ impl CanvasSession {
                 collapsed: l.collapsed,
                 text: l.text.is_some(),
                 depth: u32::try_from(st.doc.depth(l.id)).unwrap_or(u32::MAX),
+                soloed_out: st.doc.soloed_out(l.id),
                 // as measured, not onto a locked layer: both left out of its menu then
                 can_merge: st.doc.merge_target(l.id).is_some_and(|b| !st.doc.is_locked(b)),
                 can_combine: l.kind != LayerKind::Mask && st.doc.below(l.id).is_some_and(|b| !st.doc.is_locked(b)),
@@ -587,19 +588,61 @@ impl CanvasSession {
     }
 
     /// Why the current layer takes no change (a stroke, a transform, an adjustment, clearing,
-    /// cutting): it is locked, hidden, or a group with nothing in it. None if it takes them.
+    /// cutting): it is locked, hidden (itself, by a group it is in, or left out while another
+    /// layer is shown alone), or a group with nothing in it. None if it takes them.
     pub fn why_blocked(&self) -> Option<Blocked> {
+        if let Some(why) = self.shared.lock().scene_blocked() {
+            return Some(why);
+        }
         let layers = self.layers();
         let l = layers.iter().find(|l| l.current)?;
+        let unseen = self.shared.lock().doc.unseen(LayerId(l.id));
         if l.locked {
             Some(Blocked::Locked)
-        } else if !l.visible {
-            Some(Blocked::Hidden)
+        } else if unseen.is_some() {
+            // the alert is a group's or a layer's by what is current, whatever hides it
+            Some(if l.kind == LayerType::Group { Blocked::GroupHidden } else { Blocked::Hidden })
         } else if l.kind == LayerType::Group && !layers.iter().any(|o| o.parent == Some(l.id)) {
             Some(Blocked::EmptyGroup)
         } else {
             None
         }
+    }
+
+    /// Why a change to the current layer would go unseen, if it would (what a hidden alert
+    /// says, [`Blocked::Hidden`] and [`Blocked::GroupHidden`]).
+    pub fn hidden_by(&self) -> Option<HiddenBy> {
+        let st = self.shared.lock();
+        Some(match st.doc.unseen(st.doc.current())? {
+            Unseen::Itself => HiddenBy::Itself,
+            Unseen::MaskLayer => HiddenBy::MaskLayer,
+            Unseen::Group => HiddenBy::Group,
+            Unseen::Inside => HiddenBy::Inside,
+            Unseen::Solo => HiddenBy::Solo,
+        })
+    }
+
+    /// Why a stroke or a fill on the current layer would leave nothing: why it takes no change
+    /// ([`CanvasSession::why_blocked`]), or a group is current, an empty one too (strokes and fills
+    /// go into layers). None if it takes paint.
+    pub fn why_unpainted(&self) -> Option<Blocked> {
+        let why = self.why_blocked();
+        let group = {
+            let st = self.shared.lock();
+            st.doc.layer(st.doc.current()).is_some_and(|l| l.kind == LayerKind::Group)
+        };
+        match why {
+            Some(Blocked::EmptyGroup) => Some(Blocked::Group),
+            None if group => Some(Blocked::Group),
+            other => other,
+        }
+    }
+
+    /// A hidden alert's Show: layer `id`'s own box ticked (one step), nothing else, so a layer kept
+    /// hidden by a group, by its layer (a mask) or by another shown alone stays so. Returns what
+    /// the notice band says, or None if its box was ticked already.
+    pub fn show_layer(&self, id: u64) -> Option<String> {
+        self.set_layer_visible(id, true).then(|| "Show layer".to_owned())
     }
 
     /// The rows a drag of layer `id` in the panel takes along (see
@@ -696,6 +739,25 @@ impl CanvasSession {
     pub fn solo(&self) -> Option<u64> {
         let st = self.shared.lock();
         st.doc.solo.filter(|s| st.doc.layer(*s).is_some()).map(|s| s.0)
+    }
+
+    /// Layer `id`'s visibility box tapped: while a layer is shown alone, every layer shows as it
+    /// is set again (the others' boxes showed them hidden); otherwise the layer shows or hides.
+    /// Returns what the notice band says, or None if nothing changed.
+    pub fn tap_visibility(&self, id: u64) -> Option<String> {
+        if self.solo().is_some() {
+            return self.set_solo(None).then(|| "Solo visibility off".to_owned());
+        }
+        let visible = self.shared.lock().doc.layer(LayerId(id))?.visible;
+        self.set_layer_visible(id, !visible).then(|| if visible { "Hide layer" } else { "Show layer" }.to_owned())
+    }
+
+    /// Layer `id`'s visibility box held: it shows alone, or, alone already, every layer shows as
+    /// it is set again. Returns what the notice band says, or None if nothing changed.
+    pub fn hold_visibility(&self, id: u64) -> Option<String> {
+        let on = self.solo() != Some(id);
+        self.set_solo(on.then_some(id))
+            .then(|| if on { "Solo visibility on" } else { "Solo visibility off" }.to_owned())
     }
 
     /// Opacity 0..1; `done` ends the drag (one undo step for the whole drag).
@@ -989,8 +1051,34 @@ impl CanvasSession {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Blocked {
     Locked,
+    /// A layer that doesn't show: hidden itself, in a hidden group (a mask, on a hidden layer),
+    /// or left out while another layer is shown alone.
     Hidden,
     EmptyGroup,
+    /// On a model, every mesh a stroke is meant for is hidden.
+    MeshHidden,
+    /// On a model, every mesh a stroke is meant for is hidden or locked.
+    MeshLocked,
+    /// A group that doesn't show (as [`Blocked::Hidden`] is a layer).
+    GroupHidden,
+    /// A group is current where a stroke or a fill takes a layer
+    /// ([`CanvasSession::why_unpainted`]).
+    Group,
+}
+
+/// Why a change to the current layer would go unseen (see [`CanvasSession::hidden_by`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum HiddenBy {
+    /// Its own box is off.
+    Itself,
+    /// A mask whose layer is hidden.
+    MaskLayer,
+    /// A group it is in is hidden.
+    Group,
+    /// A group with something hidden in it.
+    Inside,
+    /// Left out while another layer is shown alone, and so is every layer picked with it.
+    Solo,
 }
 
 /// What a drag of layer `id` takes along, and whether that is the chosen layers together: it with

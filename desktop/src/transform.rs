@@ -46,8 +46,8 @@ const BUTTON_TEXT: Themed = Themed(0xFFA3A3A3, 0xFF414141);
 const BUTTON_DIMMED: Themed = Themed(0xFF575757, 0xFF989898);
 const SEGMENT_GAP: f32 = 11.33;
 /// The toolbar's buttons with room, and where the window is narrow; the gap between roomy ones.
-const BUTTON_ROOMY: f32 = 89.0;
-const BUTTON_WIDTH: f32 = 83.0;
+pub(crate) const BUTTON_ROOMY: f32 = 89.0;
+pub(crate) const BUTTON_WIDTH: f32 = 83.0;
 const BUTTON_HEIGHT: f32 = 60.0;
 const BUTTON_GAP: f32 = 19.0;
 /// The popovers over the toolbar.

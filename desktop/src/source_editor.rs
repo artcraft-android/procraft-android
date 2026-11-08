@@ -94,7 +94,7 @@ impl SourceEditor {
     pub fn new(kind: SourceKind, session: &CanvasSession) -> SourceEditor {
         SourceEditor {
             kind,
-            image: session.studio_source(kind),
+            image: session.studio_source_picture(kind),
             shipped: None,
             importing: None,
             library: None,
@@ -117,18 +117,28 @@ impl SourceEditor {
         self.kind != SourceKind::Shape
     }
 
+    /// `pixels` made to repeat as Auto repeat's settings say.
+    fn repeated(&self, pixels: Vec<u8>) -> Vec<u8> {
+        procraft_core::repeatable_source(
+            pixels,
+            1.0 + self.scale * 3.0,
+            self.rotate * 360.0,
+            self.overlap,
+            self.hardness,
+            self.mirror,
+            self.pyramid,
+        )
+    }
+
     /// The image as it would be kept: made to repeat while Auto repeat is on.
     fn result(&self) -> Vec<u8> {
+        if self.repeating && !self.image.is_empty() { self.repeated(self.image.clone()) } else { self.image.clone() }
+    }
+
+    /// The image as it shows: Auto repeat's on the small image, quick enough to follow the sliders.
+    fn preview(&self) -> Vec<u8> {
         if self.repeating && !self.image.is_empty() {
-            procraft_core::repeatable_source(
-                self.image.clone(),
-                1.0 + self.scale * 3.0,
-                self.rotate * 360.0,
-                self.overlap,
-                self.hardness,
-                self.mirror,
-                self.pyramid,
-            )
+            self.repeated(procraft_core::small_source(self.image.clone()))
         } else {
             self.image.clone()
         }
@@ -160,7 +170,7 @@ impl SourceEditor {
     pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, session: &CanvasSession, wide: bool) -> Option<bool> {
         if self.stale {
             self.stale = false;
-            self.shown = picture(ctx, &self.result(), self.kind == SourceKind::Shape, self.repeating);
+            self.shown = picture(ctx, &self.preview(), self.kind == SourceKind::Shape, self.repeating);
         }
         // Escape closes what is open over the editor, else the editor (as Cancel)
         let escape = crate::ui::escape(ctx) && ctx.memory(|m| m.focused().is_none());

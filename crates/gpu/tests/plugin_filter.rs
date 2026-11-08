@@ -64,7 +64,7 @@ fn a_filter_redraws_the_layer_from_its_copy() {
     // red in place of black, as far as the value says; each draw starts from the copy
     let red = program(
         &gpu,
-        "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
+        "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
             return vec4<f32>(v.amount, colour.g, colour.b, colour.a);
         }",
         &["amount"],
@@ -90,7 +90,7 @@ fn a_filter_is_kept_to_the_alpha_lock_and_sees_its_neighbours() {
     let (mut canvas, mut doc) = with_a_dot(&gpu, 64);
     let clears = program(
         &gpu,
-        "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 0.5); }",
+        "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 0.5); }",
         &[],
     );
     canvas.begin_transform(doc.current());
@@ -108,7 +108,7 @@ fn a_filter_is_kept_to_the_alpha_lock_and_sees_its_neighbours() {
     // the pixel to the left, past the canvas's edge the edge's own
     let left = program(
         &gpu,
-        "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return pixel(at - vec2<f32>(canvas_size().x / 2.0, 0.0)); }",
+        "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return layer_at(at - vec2<f32>(canvas_size().x / 2.0, 0.0)); }",
         &[],
     );
     canvas.set_plugin_filter(&left, &[], false);
@@ -127,7 +127,7 @@ fn a_filter_is_kept_to_the_selection() {
     let (mut canvas, mut doc) = with_a_dot(&gpu, 64);
     let red = program(
         &gpu,
-        "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }",
+        "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }",
         &[],
     );
     // the left half chosen: the right half never knows
@@ -153,7 +153,7 @@ fn a_filter_with_a_loop_goes_in_pieces_and_comes_out_whole() {
     let size = 700;
     let (mut canvas, mut doc) = with_a_dot(&gpu, size);
     // ten rounds of nothing much: a loop, so the pieces are small and the probe looks first
-    let code = "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
+    let code = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
         var total = 0.0;
         for (var i = 0; i < 10; i += 1) { total += 0.1; }
         return vec4<f32>(total, 0.0, 0.0, 1.0);
@@ -202,7 +202,7 @@ fn a_filter_that_never_ends_is_stopped_before_it_meets_the_layer() {
     let before = layer(&mut canvas, &gpu, &doc);
     let forever = program(
         &gpu,
-        "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
+        "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
             var x = colour.r + at.x;
             loop { x = fract(x * 1.37 + sin(x * 3.1) * 0.5); if (x > 2.0) { break; } }
             return vec4<f32>(x);
@@ -233,7 +233,7 @@ fn a_filter_costing_all_it_may_never_holds_the_gpu_for_long() {
     // just under the budget on every pixel, so the probe lets it by
     let heavy = program(
         &gpu,
-        "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
+        "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
             var x = colour.r + at.x * 0.001;
             for (var i = 0; i < 2500; i += 1) { x = fract(x * 1.37 + sin(x * 3.1) * 0.5); }
             return vec4<f32>(x, x, x, 1.0);

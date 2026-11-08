@@ -478,6 +478,8 @@ impl ArtworkStore {
 /// isn't read to find out): how Import takes it.
 #[derive(uniffi::Enum, Debug, PartialEq, Eq)]
 pub enum ZipKind {
+    /// A model's artwork, whole.
+    ModelArtwork,
     /// Not an archive that can be read.
     NotZip,
     Brushes,
@@ -498,6 +500,8 @@ pub fn zip_file_kind(path: String) -> ZipKind {
         ZipKind::Brushes
     } else if names().any(|n| n.rsplit('/').next() == Some(procraft_engine::palette::SWATCHES_ENTRY)) {
         ZipKind::Swatches
+    } else if crate::scene3d::is_model_artwork(names()) {
+        ZipKind::ModelArtwork
     } else if let Some(name) = crate::scene3d::model_name_among(names()) {
         ZipKind::Model { name }
     } else {
