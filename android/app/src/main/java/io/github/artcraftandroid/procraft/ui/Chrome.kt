@@ -149,8 +149,11 @@ private fun ColorButton(vm: CanvasViewModel, width: Dp) {
     // held, the colour painted with before
     // dragged out onto the canvas, it fills there (ColorDrop)
     Box(Modifier.size(width, Pc.BarButtonHeight).dropSource(vm, onHold = { vm.previousColor() }) { vm.toggle(Panel.COLOR) }, contentAlignment = Alignment.Center) {
-        val dot = Modifier.size(Pc.ColorDot).clip(CircleShape).background(CanvasSpace.color(rgb))
-        Box(if (ringed) dot.border(1.dp, Pc.ColorRing, CircleShape) else dot)
+        // pulled out of it, the drop draws this dot itself, so it goes with the finger
+        if (!vm.dropSwatchAway) {
+            val dot = Modifier.size(Pc.ColorDot).clip(CircleShape).background(CanvasSpace.color(rgb))
+            Box(if (ringed) dot.border(1.dp, Pc.ColorRing, CircleShape) else dot)
+        }
     }
 }
 

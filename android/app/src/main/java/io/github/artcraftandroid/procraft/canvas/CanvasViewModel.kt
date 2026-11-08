@@ -6376,8 +6376,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var dropDot by mutableStateOf<Pair<Offset, Int>?>(null)
         private set
 
-    /** Where it was picked up from - the button or swatch it came out of - window pixels. */
-    var dropFrom by mutableStateOf<Offset?>(null)
+    /** The pull itself: the two ends, the button's dot dragged after the pointer, and what is left once they part. */
+    internal val dropBlob = io.github.artcraftandroid.procraft.ui.DropBlob()
+
+    /** Whether the drop is drawing the colour button's own dot, so the bar leaves it be. */
+    var dropSwatchAway by mutableStateOf(false)
         private set
 
     /** The threshold the colour fills with (0..1), kept from one drop to the next. */
@@ -6404,18 +6407,30 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * A colour starts being dragged from the colour button, or [swatch] from the palette, at
-     * uptime [ms], by a pen or not ([pen]).
+     * uptime [ms], by a pen or not ([pen]). [centre] is the middle of the button or swatch it came
+     * out of.
      */
-    fun dropDragStart(at: Offset, swatch: Int? = null, pen: Boolean = false, ms: Long = android.os.SystemClock.uptimeMillis()) {
+    fun dropDragStart(
+        at: Offset,
+        centre: Offset,
+        swatch: Int? = null,
+        pen: Boolean = false,
+        ms: Long = android.os.SystemClock.uptimeMillis(),
+    ) {
         if (swatch == null) closePanels()
         dropBandTimer?.cancel()
         dropSwatch = swatch
         dropDot = at to (swatch ?: colorRgb())
-        dropFrom = at
+        dropBlob.start(centre, swatch == null)
         dropBand = DropBand.DRAGGING
         dropPoured = false
         dropPourRefused = false
         colourDrag = io.github.artcraftandroid.procraft.core.ColourDrag(at.x / density, at.y / density, ms.toDouble(), pen, dropThreshold)
+    }
+
+    /** [away]: whether the drop is drawing the colour button's own dot this frame. */
+    fun dropAway(away: Boolean) {
+        dropSwatchAway = away
     }
 
     /** The dragged colour's pointer moved to [at] at uptime [ms]: the dot follows, or, resting, the threshold slides. */
@@ -6433,7 +6448,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             dropPoured = pourBegin(dot)
             dropPourRefused = !dropPoured
             if (dropPoured) dropDot = null
-            if (dropPoured) dropFrom = null
         }
     }
 
@@ -6462,7 +6476,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropPoured = pourBegin(dot)
         dropPourRefused = !dropPoured
         if (dropPoured) dropDot = null
-        if (dropPoured) dropFrom = null
     }
 
     /** The dragged colour let go at [at] (null: somewhere it doesn't fill, like the top bar). */
@@ -6474,7 +6487,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (dropPoured) {
             dropPoured = false
             dropDot = null
-            dropFrom = null
             pourEnd(keep = true)
             dropBand = DropBand.DROPPED
             dropBandTimer = viewModelScope.launch {
@@ -6485,7 +6497,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val at = if (at != null) rested ?: at else null
         dropDot = null
-        dropFrom = null
         if (at != null && dropAvoid?.contains(at) != true && pourBegin(at)) {
             pourEnd(keep = true)
             // the band offers to go on filling for a moment

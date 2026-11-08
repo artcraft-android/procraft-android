@@ -35,25 +35,31 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel.DropBand
+import kotlin.math.PI
+import kotlin.math.acos
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /** What a touch on a colour that can be dragged out turned out to be. */
 private enum class DropTouch { TAP, HOLD, DRAG, GONE }
@@ -68,7 +74,11 @@ internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = nul
     val hold by rememberUpdatedState(onHold)
     val colour by rememberUpdatedState(swatch)
     var origin by remember { mutableStateOf(Offset.Zero) }
-    onGloballyPositioned { origin = it.positionInRoot() }.pointerInput(vm) {
+    var extent by remember { mutableStateOf(IntSize.Zero) }
+    onGloballyPositioned {
+        origin = it.positionInRoot()
+        extent = it.size
+    }.pointerInput(vm) {
         awaitEachGesture {
             val down = awaitFirstDown()
             down.consume()
@@ -93,7 +103,10 @@ internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = nul
                 DropTouch.GONE -> Unit
                 DropTouch.DRAG -> {
                     var at = origin + down.position
-                    vm.dropDragStart(at, colour?.invoke(), down.type == PointerType.Stylus || down.type == PointerType.Eraser, down.uptimeMillis)
+                    // the middle of the button or swatch it came out of, which is where the pull is
+                    // measured from - the touch itself can land anywhere on it
+                    val centre = origin + Offset(extent.width / 2f, extent.height / 2f)
+                    vm.dropDragStart(at, centre, colour?.invoke(), down.type == PointerType.Stylus || down.type == PointerType.Eraser, down.uptimeMillis)
                     var lifted = false
                     while (true) {
                         // held still a moment, the colour comes to rest (a slide then sets the threshold)
@@ -125,31 +138,275 @@ internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = nul
 }
 
 /**
- * The colour being dragged out, drawn out of the button it came from: full size while it is still
- * over it, smaller the further it is pulled, and gone by the time it is well away. It stretches
- * along the way it is going as it comes away, the way a drop pulled out of something would.
+ * The colour pulled out of a button, drawn as the pull it is: the button's own dot and the colour out
+ * of it, each a drop pointing at the other while they hold together. Close in the two cross into each
+ * other rather than meeting on a point; the button's dot is dragged a little after the pointer and
+ * goes back the moment they part; and once it is free the colour carries its own velocity, so whirled
+ * about it swings wide of the pointer, squashed along the way it is going and drawn out across it.
  */
 @Composable
 fun DropDot(vm: CanvasViewModel) {
-    val (at, rgb) = vm.dropDot ?: return
-    val from = vm.dropFrom
-    val ink = CanvasSpace.color(rgb)
-    Canvas(Modifier.fillMaxSize()) {
-        val radius = DotSize.toPx() / 2f
-        val pull = if (from == null) 0f else ((((at - from).getDistance() - 40f) / 80f)).coerceIn(0f, 1f)
-        val size = radius * (1f - pull)
-        if (size <= 0.4f) return@Canvas
-        if (from == null || pull <= 0.001f) {
-            drawCircle(ink, size, at)
-            return@Canvas
-        }
-        val long = size * (1f + 0.55f * pull)
-        val wide = size * (1f - 0.22f * pull)
-        val turn = Math.toDegrees(kotlin.math.atan2((at - from).y, (at - from).x).toDouble()).toFloat()
-        rotate(turn, pivot = at) {
-            drawOval(ink, topLeft = at - Offset(long, wide), size = Size(long * 2f, wide * 2f))
+    val away = vm.dropSwatchAway
+    if (vm.dropDot == null && !away) return
+    val across = with(LocalDensity.current) { Pc.ColorDot.toPx() }
+    val blob = vm.dropBlob
+    var drawn by remember { mutableStateOf(DropDrawn()) }
+    LaunchedEffect(Unit) {
+        var last = -1.0
+        while (true) {
+            val now = androidx.compose.runtime.withFrameNanos { it } / 1_000_000_000.0
+            val dt = if (last < 0.0) 0f else (now - last).toFloat().coerceIn(0f, 0.05f)
+            last = now
+            val dot = vm.dropDot
+            if (dot != null) blob.step(dot.first, across, now) else blob.settle(dt)
+            vm.dropAway(blob.swatchAway)
+            drawn = blob.shape(dot?.second ?: vm.colorRgb(), dot != null)
         }
     }
+    val shape = drawn
+    Canvas(Modifier.fillMaxSize()) {
+        val ink = CanvasSpace.color(shape.rgb)
+        if (shape.swatchRadius > 0.2f) {
+            drawPath(dropPath(shape.swatch, shape.swatchRadius, shape.colour, shape.swatchTail), ink)
+        }
+        if (shape.colourRadius <= 0.2f) return@Canvas
+        if (shape.pointed) {
+            drawPath(dropPath(shape.colour, shape.colourRadius, shape.swatch, shape.colourTail), ink)
+        } else {
+            drawPath(squashedPath(shape.colour, shape.colourRadius, shape.heading, shape.stretch), ink)
+        }
+    }
+}
+
+/** What the pull looks like this frame: its two ends, or the colour on its own. */
+internal data class DropDrawn(
+    val rgb: Int = 0,
+    val swatch: Offset = Offset.Zero,
+    val swatchRadius: Float = 0f,
+    val swatchTail: Float = 0f,
+    val colour: Offset = Offset.Zero,
+    val colourRadius: Float = 0f,
+    val colourTail: Float = 0f,
+    val heading: Float = 0f,
+    val stretch: Float = 0f,
+    val pointed: Boolean = false,
+)
+
+/**
+ * The state of one pull out of a button, a frame at a time: where each end is, how much of them is
+ * still holding together, how far the button's dot has been dragged after the pointer, and - once
+ * they have parted - the colour's own velocity and how far that has drawn it out of shape.
+ */
+internal class DropBlob {
+    var home = Offset.Zero
+    var swing = Offset.Zero
+    var near = Offset.Zero
+    var far = Offset.Zero
+    var target = Offset.Zero
+    var reach = 1f
+    var link = 1f
+    var holding = true
+    var moving = Offset.Zero
+    var heading = 0f
+    var stretch = 0f
+    var drawn = 0f
+    var radius = 1f
+    var bar = true
+    private var last = -1.0
+
+    /** Whether it is drawing the button's own dot off its place, so the bar leaves it be. */
+    val swatchAway: Boolean get() = bar && (link > 0.05f || swing.getDistance() > radius * HOME)
+
+    /** Starts afresh at the middle of the button the colour is pulled out of. */
+    fun start(centre: Offset, fromBar: Boolean) {
+        home = centre
+        bar = fromBar
+        swing = Offset.Zero
+        near = centre
+        far = centre
+        target = centre
+        reach = 1f
+        link = 1f
+        holding = true
+        moving = Offset.Zero
+        heading = 0f
+        stretch = 0f
+        drawn = 0f
+        last = -1.0
+    }
+
+    /** One frame, `now` seconds since the app started, the pointer at [at], the dot [across] wide. */
+    fun step(at: Offset, across: Float, now: Double) {
+        radius = across / 2f
+        target = at
+        val dt = if (last < 0.0) 0f else (now - last).toFloat().coerceIn(0f, 0.05f)
+        last = now
+        reach = radius * 2f * REACH
+        val off = at - home
+        val to = off.getDistance()
+        // dragged a little after the pointer while they hold on, and let go back home once they part
+        val sway = if (bar) unit(off) * (min(to * SWAY, radius * SWAY_MAX) * link) else Offset.Zero
+        swing += (sway - swing) * (dt * 12f).coerceIn(0f, 1f)
+        near = home + swing
+        if (holding) {
+            far = at
+            moving = Offset.Zero
+        } else {
+            moving += ((at - far) * SPRING - moving * DAMPING) * dt
+            far += moving * dt
+        }
+        val gap = (near - far).getDistance()
+        val pulled = (gap / reach).coerceIn(0f, 1f)
+        // it thins as it is pulled, and comes up a little again once it is free
+        val wanted = if (gap < reach) radius * (1f - (1f - THINNEST) * pulled) else radius * SETTLED
+        drawn += (wanted - drawn) * (dt * 14f).coerceIn(0f, 1f)
+        // the point it had goes quickly once they part: what is left of it is a ball of liquid
+        val wantedLink = if (gap < reach) 1f else 0f
+        val givenUp = if (wantedLink > 0f) 18f else 42f
+        link += (wantedLink - link) * (dt * givenUp).coerceIn(0f, 1f)
+        holding = gap < reach
+        // squashed along the way it is going by how fast that is and drawn out across it, but only
+        // once its point has gone, so the shape it is already drawing does not jump when it changes
+        val speed = moving.getDistance()
+        val wantedStretch = if (holding || tail(drawn) > 0.05f) 0f else min(speed / (radius * SPEED), STRETCH)
+        stretch += (wantedStretch - stretch) * (dt * 20f).coerceIn(0f, 1f)
+        if (speed > 1f) heading += wrapped(atan2(moving.y, moving.x) - heading) * (dt * 14f).coerceIn(0f, 1f)
+    }
+
+    /**
+     * How far the end of [at] is drawn out: as much as it takes to reach the middle of the gap
+     * between the two of them, and none while that middle is still inside it. Both ends ask for the
+     * same middle, which is what brings their points onto each other.
+     */
+    fun tail(at: Float): Float {
+        val gap = (near - far).getDistance()
+        val slack = ((1f - gap / reach.coerceAtLeast(1f)) / CLOSING).coerceIn(0f, 1f)
+        return (gap * 0.5f - at + at * OVERLAP * slack).coerceAtLeast(0f) * link
+    }
+
+    /** Let go of mid-pull: the rest of the way home, on its own. */
+    fun settle(dt: Float) {
+        swing *= 1f - (dt * 12f).coerceIn(0f, 1f)
+        link = 0f
+        holding = true
+    }
+
+    /** What to draw this frame, for a pull out of the top bar's button or out of a palette. */
+    fun shape(rgb: Int, live: Boolean): DropDrawn {
+        if (!bar) {
+            // a palette draws its own swatch and it does not bend, so the colour is a plain ball
+            if (!live) return DropDrawn(rgb = rgb)
+            return DropDrawn(rgb = rgb, colour = target, colourRadius = drawn)
+        }
+        val colourTail = tail(drawn)
+        return DropDrawn(
+            rgb = rgb,
+            swatch = near,
+            swatchRadius = radius,
+            swatchTail = tail(radius),
+            colour = far,
+            // let go of, there is no colour out any more: only the button's dot is still on its way back
+            colourRadius = if (live) drawn else 0f,
+            colourTail = colourTail,
+            heading = heading,
+            stretch = stretch,
+            pointed = colourTail > 0.05f,
+        )
+    }
+}
+
+/** How far it can be pulled before the two let go, as a share of the button's dot across. */
+private const val REACH = 1.8f
+
+/** How far each point runs past the middle of the gap while they are still close, as a share of itself. */
+private const val OVERLAP = 0.65f
+
+/** How much of the pull, at its far end, the crossing takes to close up. */
+private const val CLOSING = 0.22f
+
+/** How thin it gets while it is still holding on. */
+private const val THINNEST = 0.55f
+
+/** What the dragged one is worth once they are apart, against the button's dot. */
+private const val SETTLED = 0.72f
+
+/** How far the button's dot is dragged after the pointer, as a share of the gap and of its radius. */
+private const val SWAY = 0.21f
+private const val SWAY_MAX = 0.9f
+
+/** Under this, of the dot's radius, the button's dot is back on its own place. */
+private const val HOME = 0.02f
+
+/** How fast the colour goes, in dot radii a second, to be drawn right out of shape, and how far out. */
+private const val SPEED = 116f
+private const val STRETCH = 0.35f
+
+/** How hard the colour is pulled after the pointer once it is free, and how hard that is damped. */
+private const val SPRING = 256f
+private const val DAMPING = 10f
+
+/** [v] made a length of one, or nothing at all if it has no length. */
+private fun unit(v: Offset): Offset {
+    val length = v.getDistance()
+    return if (length > 0.0001f) v / length else Offset.Zero
+}
+
+/** [turn] brought into -pi..pi. */
+private fun wrapped(turn: Float): Float {
+    val full = (2f * PI).toFloat()
+    return ((turn + PI.toFloat()) % full + full) % full - PI.toFloat()
+}
+
+/**
+ * A drop: the ball of [radius] at [at], drawn out to a point [tail] beyond it toward [toward]. The
+ * point is where the two lines off the ball, run straight in to it, meet, so the outline comes to a
+ * corner there rather than ending in a nose.
+ */
+private fun dropPath(at: Offset, radius: Float, toward: Offset, tail: Float): Path {
+    val path = Path()
+    val off = toward - at
+    val span = off.getDistance()
+    if (span < 0.01f || tail <= 0.05f) {
+        path.addOval(Rect(center = at, radius = radius))
+        return path
+    }
+    val dir = off / span
+    val out = radius + tail
+    // how far round the ball the point is seen to sit, which is where its two lines touch
+    val edge = acos((radius / out).coerceIn(-1f, 1f))
+    val base = atan2(dir.y, dir.x)
+    val full = (2f * PI).toFloat()
+    val steps = 64
+    for (i in 0..steps) {
+        val angle = base + edge + (full - 2f * edge) * (i.toFloat() / steps)
+        val x = at.x + cos(angle) * radius
+        val y = at.y + sin(angle) * radius
+        if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+    }
+    path.lineTo(at.x + dir.x * out, at.y + dir.y * out)
+    path.close()
+    return path
+}
+
+/** A ball drawn out of true: shorter along [heading], wider across it. */
+private fun squashedPath(at: Offset, radius: Float, heading: Float, stretch: Float): Path {
+    val path = Path()
+    val along = radius * (1f - stretch * 0.7f)
+    val across = radius * (1f + stretch)
+    val turnSin = sin(heading)
+    val turnCos = cos(heading)
+    val full = (2f * PI).toFloat()
+    val steps = 48
+    for (i in 0 until steps) {
+        val angle = full * i / steps
+        val x = cos(angle) * along
+        val y = sin(angle) * across
+        val px = at.x + x * turnCos - y * turnSin
+        val py = at.y + x * turnSin + y * turnCos
+        if (i == 0) path.moveTo(px, py) else path.lineTo(px, py)
+    }
+    path.close()
+    return path
 }
 
 /**
@@ -232,9 +489,6 @@ fun DropSpread(vm: CanvasViewModel) {
 private fun Modifier.press(onClick: () -> Unit): Modifier = composed {
     clickable(remember { MutableInteractionSource() }, indication = null, onClick = onClick)
 }
-
-/** The dragged colour's dot, across. */
-private val DotSize = 55.5.dp
 
 /** The band, translucent over the canvas, dark and light. */
 private val BandDark = Color(0xD63B3B3B)
