@@ -53,6 +53,8 @@ struct LayerUniform {
     height_scale: f32,
     // wet pickup: how much of the paint under the stroke it drags into its own colour, 0..1
     pickup: f32,
+    // 1 when the stroke's height texture holds the direction the paint is dragged
+    motion: u32,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -188,9 +190,16 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         s = vec4<f32>(colour * a, a);
     }
     // wet pickup: the paint the stroke goes over is dragged into its own colour, as much as its
-    // brush says, and only where there is paint under it
+    // brush says, and only where there is paint under it. The drag direction carries the paint
+    // from behind the stamp to where it is now, so a stroke pulls colour along with it.
     if (lu.pickup > 0.0 && s.a > 0.0 && lu.stroke_on_mask < 0.5) {
-        let under = textureLoad(layer_tex, p, 0);
+        var offset = vec2<i32>(0);
+        if (lu.motion != 0u) {
+            let held = textureLoad(height_tex, p, 0);
+            offset = vec2<i32>(round(held.gb / max(held.a, 1e-3)));
+        }
+        let dims = vec2<i32>(textureDimensions(layer_tex));
+        let under = textureLoad(layer_tex, clamp(p - offset, vec2<i32>(0), dims - 1), 0);
         let pull = clamp(lu.pickup * under.a, 0.0, 1.0);
         if (pull > 0.0) {
             let c = mix(unpremultiply(s), unpremultiply(under), pull);

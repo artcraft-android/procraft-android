@@ -3567,3 +3567,33 @@ fn wet_pickup_drags_the_paint_under_a_stroke_into_its_colour() {
     let (over, bare) = painted(0.0);
     assert!(over[0].abs_diff(bare[0]) < 4 && over[1].abs_diff(bare[1]) < 4, "{over:?} vs {bare:?}");
 }
+
+#[test]
+fn wet_pickup_carries_colour_along_the_stroke() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let painted = |pickup: f32| {
+        let mut doc = Document::new(96, 96);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        // a vertical orange bar at x = 40
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.9, 0.4, 0.1], 1.0));
+        let bar: Vec<Stamp> = (4..92).step_by(4).map(|y| dot(Vec2::new(40.0, y as f32), 6.0)).collect();
+        canvas.add_stamps(&bar);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        // a wide blue stroke left to right: it should drag the orange past the bar
+        let blue = StrokeStyle { pickup, ..StrokeStyle::new(StrokeTool::Paint, [0.1, 0.2, 0.9], 1.0) };
+        canvas.begin_stroke(doc.current(), blue);
+        let across: Vec<Stamp> = (20..=76).step_by(2).map(|x| dot(Vec2::new(x as f32, 48.0), 20.0)).collect();
+        canvas.add_stamps(&across);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        // right of the orange bar, and left of it (where the paint behind is empty)
+        (pixel(&layer, 96, 50, 48), pixel(&layer, 96, 30, 48))
+    };
+    let (ahead, behind) = painted(0.6);
+    assert!(ahead[0] > behind[0] + 20, "orange is dragged forward: {ahead:?} vs {behind:?}");
+    let (ahead, behind) = painted(0.0);
+    assert!(ahead[0].abs_diff(behind[0]) < 4, "no pickup, no drag: {ahead:?} vs {behind:?}");
+}

@@ -21,5 +21,11 @@ fn fs_merge(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<i32>(pos.xy);
     let a = textureLoad(layer_height, p, 0);
     let b = textureLoad(stroke_height, p, 0);
-    return select(a, b, height_of(b) > height_of(a));
+    // the paint the stroke dragged from behind it: its ridges follow the stroke a little way
+    let dims = vec2<i32>(textureDimensions(layer_height));
+    let drag = vec2<i32>(round(b.gb / max(b.a, 1e-3)));
+    let behind = textureLoad(layer_height, clamp(p - drag, vec2<i32>(0), dims - 1), 0);
+    let dragged = behind * 0.8;
+    let top = select(a, b, height_of(b) > height_of(a));
+    return select(top, dragged, height_of(dragged) > height_of(top));
 }

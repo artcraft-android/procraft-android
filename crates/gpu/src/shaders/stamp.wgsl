@@ -34,6 +34,8 @@ struct StampUniform {
     grain_side: f32,
     // impasto: how strongly the shape is also a height (none at 0)
     height_amount: f32,
+    // 1 when the stroke drags the paint under it, so the height texture keeps the direction
+    drag: f32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -62,6 +64,8 @@ struct StampIn {
     @location(10) brightness_add: f32,
     // how far the grain's patch under the stamp turns, where it is read from staying put
     @location(11) grain_turn: f32,
+    // which way the stroke moved to this stamp, a unit vector (none at its first)
+    @location(12) motion: vec2<f32>,
 }
 
 struct StampOut {
@@ -83,6 +87,8 @@ struct StampOut {
     @location(6) look: vec4<f32>,
     // what light pressure lets through: the most a capped stroke builds up to
     @location(7) transfer: f32,
+    // which way the stroke moved to this stamp, a unit vector (none at its first)
+    @location(9) motion: vec2<f32>,
 }
 
 @vertex
@@ -115,6 +121,7 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     o.grain_press = inst.more.x;
     o.grain_bleed = inst.more.y;
     o.transfer = inst.more.z;
+    o.motion = inst.motion;
     return o;
 }
 
@@ -236,13 +243,11 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
 }
 
 // The same stamp as a height: the shape's own luminance (its ridges high, its valleys low), the
-// round tip's profile, scaled by the stamp's pressure and kept inside the selection. Written to
-// the stroke's height texture, the tallest stamp at each pixel.
+// round tip's profile, and the direction the paint is dragged, so that a stroke over old paint
+// moves its ridges instead of only painting over them. Height is red, the drag in green and blue
+// (pixels, premultiplied), coverage in alpha.
 @fragment
 fn fs_height(i: StampOut) -> @location(0) vec4<f32> {
-    if (su.height_amount <= 0.0) {
-        return vec4<f32>(0.0);
-    }
     let r = i.radius;
     var h = 0.0;
     // how much paint the stamp lays here: the height only arrives with the paint
@@ -267,8 +272,13 @@ fn fs_height(i: StampOut) -> @location(0) vec4<f32> {
         let height_lod = min(lod + 2.0, su.shape_lod_cap + log2(side / 256.0));
         h = select(0.0, textureSampleLevel(shapes, shape_smp, uv, su.shape, height_lod).r, inside);
     }
+    if (su.height_amount <= 0.0) {
+        h = 0.0;
+    }
     let inside_selection = textureSampleLevel(selected, shape_smp, i.pos.xy / su.canvas_size, 0.0).r;
     let a = clamp(0.22 * i.alpha * inside_selection * cover, 0.0, 1.0);
-    // premultiplied, so where stamps meet the height that arrives last (or strongest) shows
-    return vec4<f32>(h * a, h * a, h * a, a);
+    // drag a little less than a quarter of the stamp, no more than a dozen pixels
+    let motion = i.motion * min(r * 0.25, 12.0) * su.drag;
+    // premultiplied, so where stamps meet the height and drag that arrive last show
+    return vec4<f32>(h * a, motion.x * a, motion.y * a, a);
 }

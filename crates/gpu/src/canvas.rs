@@ -54,9 +54,9 @@ const _: () = assert!(
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 
 /// The vertex layout of a stamp instance (stroke stamps and the predicted tail).
-const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
+const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 13] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32x2, 6 => Float32x2, 7 => Float32x4,
-    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32
+    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32, 12 => Float32x2
 ];
 
 #[repr(C)]
@@ -310,12 +310,14 @@ impl StrokeStyle {
         preserve_alpha: bool,
     ) -> StrokeStyle {
         let wet = brush.mixes_wet();
-        // a brush file's wet accumulation, which pulls the paint under a stroke into its own even
-        // when the file gives it no dilution (a dry, smudging brush). A dual brush's second is
-        // where a file often keeps the smudge, so the stroke carries it even when the second is
-        // dropped (a shape made from it) or drawn apart.
+        // a brush file's wet accumulation, which pulls the paint under a stroke into its own: the
+        // pull only counts when the brush has some water or paint load behind it (a file's
+        // accumulation alone is a default on most brushes). A dual brush's second is where a file
+        // often keeps the smudge, so the stroke carries it even when the second is dropped (a
+        // shape made from it) or drawn apart.
         let wetness = |b: &Brush| {
-            if b.extra.contains_key("wet_pull") { b.setting("wet_pull").clamp(0.0, 1.0) } else { 0.0 }
+            let loaded = b.setting("wet_charge") > 0.02 || b.setting("wet_dilution") > 0.02;
+            if loaded && b.extra.contains_key("wet_pull") { b.setting("wet_pull").clamp(0.0, 1.0) } else { 0.0 }
         };
         let pickup = wetness(brush).max(brush.secondary.as_deref().map_or(0.0, wetness));
         StrokeStyle {
@@ -604,6 +606,8 @@ struct StampInstance {
     brightness_add: f32,
     /// How far the grain's patch turns (see `Stamp::grain_turn`).
     grain_turn: f32,
+    /// The direction the stroke moved to this stamp, a unit vector (none for its first).
+    motion: [f32; 2],
 }
 
 /// How much work stamp `s` is on a canvas `full`: the pixels it covers there, more for one
@@ -688,6 +692,9 @@ struct StampUniform {
     grain_side: f32,
     /// Impasto: how strongly the shape's height is kept (none at 0).
     height_amount: f32,
+    /// 1 when the stroke drags the paint under it (wet pickup), so its height texture keeps the
+    /// direction.
+    drag: f32,
 }
 
 #[repr(C)]
@@ -734,6 +741,8 @@ struct LayerUniform {
     height_scale: f32,
     /// Wet pickup: how much of the paint under the stroke it drags into its own colour, 0..1.
     pickup: f32,
+    /// 1 when the stroke's height texture holds the drag direction (green and blue).
+    motion: u32,
 }
 
 impl Default for LayerUniform {
@@ -768,6 +777,7 @@ impl Default for LayerUniform {
             height_amount: 0.0,
             height_scale: 0.1,
             pickup: 0.0,
+            motion: 0,
         }
     }
 }
@@ -796,6 +806,11 @@ impl LayerUniform {
     fn with_pickup(self, stroke: Option<&ActiveStroke>) -> LayerUniform {
         let pickup = stroke.map_or(0.0, |s| s.style.pickup.max(s.second.map_or(0.0, |d| d.style.pickup)));
         LayerUniform { pickup, ..self }
+    }
+
+    /// With whether the stroke's height texture holds the direction its paint is dragged.
+    fn with_motion(self, motion: bool) -> LayerUniform {
+        LayerUniform { motion: u32::from(motion), ..self }
     }
 
     /// With the stroke's look: its canvas grain, if it has one, and its edges and threshold.
@@ -1273,6 +1288,8 @@ struct ActiveStroke {
     pencil: bool,
     /// A dual brush's second stroke, if it has one.
     second: Option<SecondStroke>,
+    /// Where the last stamp of the first stroke was put, for the direction the paint is dragged.
+    last_stamp: Option<procraft_engine::geom::Vec2>,
 }
 
 /// A dual brush's second stroke, drawn along the open stroke's path into a texture of its own
@@ -2534,7 +2551,8 @@ impl Canvas {
     pub fn begin_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None });
+        self.active =
+            Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None, last_stamp: None });
         // impasto paint starts from the height already on its layer, so a stroke over old paint
         // builds on its ridges
         if style.height_amount > 0.0 && self.layers.get(&layer).is_some_and(|l| l.height.is_some()) {
@@ -2676,9 +2694,37 @@ impl Canvas {
                 distance: if s.distance.is_finite() { s.distance } else { 0.0 },
             })
             .collect();
-        let instances: Vec<StampInstance> = drawn
+        // which way the paint is dragged, stamp to stamp: the second has no height of its own,
+        // and a stroke redrawn from scratch starts its direction again
+        let mut last = if second || clear { None } else { active.last_stamp };
+        let motions: Vec<[f32; 2]> = drawn
             .iter()
             .map(|s| {
+                let Some(previous) = last else {
+                    if !second {
+                        last = Some(s.center);
+                    }
+                    return [0.0; 2];
+                };
+                let step = s.center - previous;
+                let length = step.length();
+                if length > 1e-3 {
+                    if !second {
+                        last = Some(s.center);
+                    }
+                    [step.x / length, step.y / length]
+                } else {
+                    [0.0; 2]
+                }
+            })
+            .collect();
+        if !second {
+            active.last_stamp = last;
+        }
+        let instances: Vec<StampInstance> = drawn
+            .iter()
+            .zip(motions)
+            .map(|(s, motion)| {
                 let radius = drawn_radius(&style, s.radius, s.taper);
                 let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
                 bounds = bounds.union(IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2));
@@ -2704,6 +2750,7 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
+                    motion,
                 }
             })
             .collect();
@@ -2767,6 +2814,7 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
+                    motion: [0.0; 2],
                 }
             }),
         );
@@ -3530,7 +3578,8 @@ impl Canvas {
     pub fn begin_pencil_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None });
+        self.active =
+            Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None, last_stamp: None });
     }
 
     /// A step of the liquify brush: `stamps` added up, then the field carried along by them.
@@ -3964,6 +4013,7 @@ impl Canvas {
                         shape_lod_cap: style.shape_lod_cap,
                         grain_side: style.grain_side,
                         height_amount: style.height_amount,
+                        drag: if style.pickup > 0.0 { 1.0 } else { 0.0 },
                         secondary: [style.secondary[0], style.secondary[1], style.secondary[2], 1.0],
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
@@ -3990,7 +4040,7 @@ impl Canvas {
                     // impasto: the shape's height into the stroke's height texture (the height
                     // each stamp lays), cleared or kept with the colour. A dual brush's second
                     // adds no height of its own: the paint's body is the first stroke's.
-                    if !pencil && !second && style.height_amount > 0.0 {
+                    if !pencil && !second && (style.height_amount > 0.0 || style.pickup > 0.0) {
                         let (height_texture, height) = self.stroke_height.get(device);
                         // redrawing the stroke starts its height from the layer's again, so what
                         // this stroke laid before doesn't double and the paint under it stays
@@ -5330,7 +5380,8 @@ impl Canvas {
                         }
                         .with_grain(Some(&stroke.style))
                         .with_dual(Some(&stroke))
-                        .with_pickup(Some(&stroke)),
+                        .with_pickup(Some(&stroke))
+                        .with_motion(self.stroke_height.made().is_some()),
                     );
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let bind = quad(&layer.view);
@@ -5354,7 +5405,8 @@ impl Canvas {
                         &LayerUniform { opacity: 1.0, stroke_opacity: opacity, ..Default::default() }
                             .with_grain(Some(&stroke.style))
                             .with_dual(Some(&stroke))
-                            .with_pickup(Some(&stroke)),
+                            .with_pickup(Some(&stroke))
+                            .with_motion(self.stroke_height.made().is_some()),
                     );
                     let dual = (stroke.second.is_some()
                         || stroke.style.full_grain.is_some()
@@ -6926,7 +6978,8 @@ impl Canvas {
         }
         .with_grain(stroke.as_ref().map(|s| &s.style))
         .with_dual(stroke.as_ref())
-        .with_pickup(stroke.as_ref());
+        .with_pickup(stroke.as_ref())
+        .with_motion(self.stroke_height.made().is_some());
         let mask_view = mask_view.unwrap_or(&self.stroke_view);
         self.draw_onto(
             device,
@@ -10049,5 +10102,26 @@ mod tests {
         assert_eq!(final_mixture(0.4, 0.9, 1.0, (0, 4), false), 0.4);
         // neither picking up nor mixing: what it carries, whole
         assert_eq!(final_mixture(0.0, 0.9, 0.0, (1, 4), false), 1.0);
+    }
+
+    #[test]
+    fn only_a_loaded_wet_brush_drags_the_paint_under_it() {
+        use procraft_engine::brush::Brush;
+        let style = |b: &Brush| StrokeStyle::for_brush(b, StrokeTool::Paint, [0.0; 3], 1.0, false);
+        let mut b = Brush::round_pen();
+        // a file's pull alone is a default on most brushes: no water, no load, no drag
+        b.set_setting("wet_pull", 0.5);
+        assert_eq!(style(&b).pickup, 0.0);
+        // a little charge behind it drags
+        b.set_setting("wet_charge", 0.05);
+        assert!((style(&b).pickup - 0.5).abs() < 1e-5);
+        // and so does dilution
+        b.set_setting("wet_charge", 0.0);
+        b.set_setting("wet_dilution", 0.3);
+        assert!((style(&b).pickup - 0.5).abs() < 1e-5);
+        // a trace of load (a file's near-zero) is not enough
+        b.set_setting("wet_dilution", 0.0);
+        b.set_setting("wet_charge", 0.01);
+        assert_eq!(style(&b).pickup, 0.0);
     }
 }
