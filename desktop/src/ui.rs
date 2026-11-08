@@ -2543,8 +2543,8 @@ impl Interface {
             KeyShortcut::CopyLayer => self.copy_layer(session),
             KeyShortcut::CutLayer => self.cut_layer(session),
             KeyShortcut::Paste => self.paste(ctx, false),
-            KeyShortcut::Paint => self.choose_tool(session, ToolKind::Paint),
-            KeyShortcut::Erase => self.choose_tool(session, ToolKind::Erase),
+            KeyShortcut::Paint => self.tool_key(session, ToolKind::Paint),
+            KeyShortcut::Erase => self.tool_key(session, ToolKind::Erase),
             KeyShortcut::Eyedropper => session.set_pick_next(!session.pick_next()),
             KeyShortcut::Selection => self.toggle_selection(session),
             KeyShortcut::Transform => self.toggle_transform(session),
@@ -2565,6 +2565,12 @@ impl Interface {
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
             KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
         }
+    }
+
+    /// A tool's key: whatever mode is open ends, keeping what it made, as for the tool's button.
+    fn tool_key(&mut self, session: &CanvasSession, tool: ToolKind) {
+        self.switch_modes(session, ModeButton::Tool);
+        self.choose_tool(session, tool);
     }
 
     /// A tool chosen (as its button does when it isn't the current one).

@@ -2873,8 +2873,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             KeyShortcut.CopyLayer -> copyLayer()
             KeyShortcut.CutLayer -> cutLayer()
             KeyShortcut.Paste -> paste()
-            KeyShortcut.Paint -> select(ToolKind.PAINT)
-            KeyShortcut.Erase -> select(ToolKind.ERASE)
+            KeyShortcut.Paint -> toolKey(ToolKind.PAINT)
+            KeyShortcut.Erase -> toolKey(ToolKind.ERASE)
             KeyShortcut.Eyedropper -> pickNext = !pickNext
             KeyShortcut.Selection -> toggleSelecting()
             KeyShortcut.Transform -> toggleTransform()
@@ -3352,6 +3352,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         quickShape = null
         quickShapeEditing = false
         refreshFlags()
+    }
+
+    /** A tool's key: whatever mode is open ends, keeping what it made, as for the tool's button. */
+    private fun toolKey(tool: ToolKind) {
+        switchModes(ModeButton.Tool)
+        select(tool)
     }
 
     fun toolPressed(tool: ToolKind) {
