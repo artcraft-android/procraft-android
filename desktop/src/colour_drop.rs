@@ -84,6 +84,8 @@ pub struct ColourDrop {
     /// The dragged colour came to rest and its slid threshold began filling (or was refused).
     poured: bool,
     refused: bool,
+    /// A clock for the fill coming in to run against.
+    clock: Instant,
 }
 
 impl Default for ColourDrop {
@@ -98,6 +100,7 @@ impl Default for ColourDrop {
             sliding: false,
             poured: false,
             refused: false,
+            clock: Instant::now(),
         }
     }
 }
@@ -282,6 +285,11 @@ impl ColourDrop {
     /// Draws the band hanging from `top` and the dragged colour's dot; keeps the touches filling
     /// with the colour (`current`, unless a swatch was dropped) while filling goes on.
     pub fn show(&mut self, ctx: &egui::Context, session: &CanvasSession, current: u32, top: f32) {
+        // a fill coming in where it was dropped draws itself a frame at a time until it is all there
+        if session.pour_spreading() {
+            session.pour_tick(self.clock.elapsed().as_secs_f64() * 1000.0);
+            ctx.request_repaint();
+        }
         // a press whose colour went away (a swatch taken out, a panel closed) ends with the pointer
         if self.press.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
             let at = ctx.input(|i| i.pointer.interact_pos());
@@ -306,11 +314,17 @@ impl ColourDrop {
             self.shown = self.band;
         }
         if let Some((at, rgb)) = self.dot {
-            ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("colour drop dot"))).circle_filled(
-                at,
-                DOT / 2.0,
-                srgb(of_hex(rgb)),
-            );
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("colour drop dot")));
+            let colour = srgb(of_hex(rgb));
+            // dragged, it stays joined to where it came from by a neck that thins as it stretches
+            match self.press.as_ref().map(|p| (p.origin, p.dragging)) {
+                Some((from, true)) => {
+                    bridge(&painter, from, at, DOT / 2.0, colour);
+                }
+                _ => {
+                    painter.circle_filled(at, DOT / 2.0, colour);
+                }
+            }
         }
         let out = ease(ctx.animate_bool_with_time(Id::unique("colour drop band"), self.band != Band::None, SLIDE));
         if out <= 0.0 {
@@ -386,4 +400,45 @@ impl ColourDrop {
             ctx.request_repaint();
         }
     }
+}
+
+/// The dragged colour joined to where it was picked up: both circles, and a neck between them that
+/// thins as it is stretched, the way a drop of liquid holds on, and is gone once it is too far.
+fn bridge(painter: &egui::Painter, from: Pos2, to: Pos2, radius: f32, colour: Color32) {
+    /// How far past the two circles touching the neck lasts.
+    const STRETCH: f32 = 140.0;
+    painter.circle_filled(from, radius, colour);
+    painter.circle_filled(to, radius, colour);
+    let d = from.distance(to);
+    let slack = 1.0 - ((d - 2.0 * radius) / STRETCH).clamp(0.0, 1.0);
+    if slack <= 0.02 || d <= 1e-3 {
+        return;
+    }
+    let dir = (to - from) / d;
+    let perp = vec2(-dir.y, dir.x);
+    // where the neck meets each circle: near their middles as it stretches, so it comes off a point
+    let grip = radius * slack * 0.95;
+    let (over, under) = (perp * grip, perp * -grip);
+    let mid = from.lerp(to, 0.5);
+    // and the waist, drawn in from that, so the neck is pinched rather than a tube
+    let waist = perp * (grip * (0.30 + 0.35 * slack));
+    let mut points = Vec::with_capacity(28);
+    points.extend(bend(from + over, mid + waist, to + over));
+    points.extend(bend(from + under, mid - waist, to + under));
+    painter.add(egui::Shape::convex_polygon(points, colour, Stroke::NONE));
+}
+
+/// A quadratic curve from `a` to `b` through `control`, as points to draw a shape with.
+fn bend(a: Pos2, control: Pos2, b: Pos2) -> Vec<Pos2> {
+    const STEPS: usize = 12;
+    (0..=STEPS)
+        .map(|i| {
+            let t = i as f32 / STEPS as f32;
+            let keep = 1.0 - t;
+            pos2(
+                keep * keep * a.x + 2.0 * keep * t * control.x + t * t * b.x,
+                keep * keep * a.y + 2.0 * keep * t * control.y + t * t * b.y,
+            )
+        })
+        .collect()
 }

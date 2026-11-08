@@ -18,6 +18,54 @@ use crate::{CanvasSession, Shared, State};
 /// What is said of a fill with more in it than can go through a plugin.
 const TOO_BIG: &str = "This fill is too big for a plugin: it stays as it is.";
 
+/// How long a fill takes to come in where it was dropped, in milliseconds.
+const SPREAD_MS: f64 = 190.0;
+
+/// A fill coming in: a front spreading out from where it was dropped to the whole of it, rather
+/// than all of it appearing at once.
+struct Spread {
+    /// When the front started moving, in milliseconds; set on the first frame it is asked about.
+    began: Option<f64>,
+    /// Where it was dropped, in canvas pixels, and how far the furthest of the fill is from there.
+    seed: (u32, u32),
+    most: f32,
+    /// All of it, as it is once the front has gone over everything.
+    all: Mask,
+    /// How far the front has reached.
+    reach: f32,
+}
+
+impl Spread {
+    /// What of it has come in so far: what is within the front's reach of where it was dropped.
+    fn partial(&self) -> Mask {
+        if self.reach >= self.most {
+            return self.all.clone();
+        }
+        let mut mask = self.all.clone();
+        let (sx, sy) = (self.seed.0 as f32, self.seed.1 as f32);
+        let width = self.all.width as usize;
+        for (y, row) in mask.data.chunks_exact_mut(width).enumerate() {
+            let down = y as f32 - sy;
+            let across =
+                if down.abs() >= self.reach { None } else { Some((self.reach * self.reach - down * down).sqrt()) };
+            match across {
+                Some(across) => {
+                    let from = ((sx - across).ceil().max(0.0) as usize).min(row.len());
+                    let upto = ((sx + across).floor().max(-1.0) as usize).saturating_add(1).min(row.len());
+                    if let Some(left) = row.get_mut(..from) {
+                        left.fill(0);
+                    }
+                    if let Some(right) = row.get_mut(upto..) {
+                        right.fill(0);
+                    }
+                }
+                None => row.fill(0),
+            }
+        }
+        mask
+    }
+}
+
 /// A pour a plugin is finishing: when it has, and whoever is waiting for that.
 #[derive(Default)]
 pub(crate) struct Finishing {
@@ -59,6 +107,10 @@ pub(crate) struct Pour {
     shown_mask: Option<Mask>,
     /// The flood as a plugin left it, once one has.
     closed: Option<Mask>,
+    /// Coming in where it was dropped, rather than already all there.
+    spread: Option<Spread>,
+    /// The undo step's name, kept while the fill comes in.
+    ending_name: Option<String>,
     /// Being finished by a plugin: nothing more changes it.
     finishing: Option<Arc<Finishing>>,
 }
@@ -70,19 +122,22 @@ impl Pour {
     /// the threshold changed since it was shown) only the rectangle where what it pours changed.
     /// Remembered as shown.
     fn pour_region(&mut self, width: u32, threshold: f32, same_flood: bool) -> Option<([u32; 4], Vec<u8>)> {
-        let mask = self.flood.as_ref().map(|flood| {
-            let mut mask = self.closed.clone().unwrap_or_else(|| flood.mask(threshold));
-            // poured into what is see-through, it goes on under the line it stopped at
-            if flood.colour[3] == 0 {
-                fill::under_edges(&mut mask, self.elsewhere.as_deref().unwrap_or(&self.before));
-            }
-            if let Some(sel) = &self.selection {
-                for (m, &s) in mask.data.iter_mut().zip(&sel.data) {
-                    *m = ((u16::from(*m) * u16::from(s) + 127) / 255) as u8;
+        let mask = match &self.spread {
+            Some(spread) => Some(spread.partial()),
+            None => self.flood.as_ref().map(|flood| {
+                let mut mask = self.closed.clone().unwrap_or_else(|| flood.mask(threshold));
+                // poured into what is see-through, it goes on under the line it stopped at
+                if flood.colour[3] == 0 {
+                    fill::under_edges(&mut mask, self.elsewhere.as_deref().unwrap_or(&self.before));
                 }
-            }
-            mask
-        });
+                if let Some(sel) = &self.selection {
+                    for (m, &s) in mask.data.iter_mut().zip(&sel.data) {
+                        *m = ((u16::from(*m) * u16::from(s) + 127) / 255) as u8;
+                    }
+                }
+                mask
+            }),
+        };
         let now = mask.as_ref().and_then(Mask::bounds);
         // the same colour poured from the same seed colour: the pixels change only where the
         // flood reaches differently (a threshold dragged over a large fill changes its edges)
@@ -294,6 +349,8 @@ impl CanvasSession {
             shown_region: None,
             shown_mask: None,
             closed: None,
+            spread: None,
+            ending_name: None,
             finishing: None,
         };
         pour.measure(w, h, seed);
@@ -368,12 +425,55 @@ impl CanvasSession {
     /// [`CanvasSession::pour_finishing`] until then.
     pub fn pour_end(&self, keep: bool, name: Option<String>) {
         self.await_pour();
+        self.spread_through();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if keep && self.begin_spread(st, name.clone()) {
+            self.shared.frame(st);
+            return;
+        }
         if keep && self.finish_pour(st, &name) {
             return;
         }
         end_pour(&self.shared, st, keep, name.as_deref());
+    }
+
+    /// Whether a fill let go is still coming in where it was dropped: the screen should keep
+    /// drawing itself until it has, [`CanvasSession::pour_tick`] each frame.
+    pub fn pour_spreading(&self) -> bool {
+        self.shared.lock().pour.as_ref().is_some_and(|pour| pour.spread.is_some())
+    }
+
+    /// Moves the fill coming in on, `now` in milliseconds: true while it is still coming in. The
+    /// frame it is all there, it is a pour again, and ends as it would have.
+    pub fn pour_tick(&self, now: f64) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let width = st.doc.width();
+        let done = {
+            let Some(pour) = st.pour.as_mut() else { return false };
+            let Some(spread) = pour.spread.as_mut() else { return false };
+            let began = *spread.began.get_or_insert(now);
+            let passed = ((now - began) / SPREAD_MS).clamp(0.0, 1.0) as f32;
+            // away from the drop quickly, easing as it comes to the far side
+            let eased = 1.0 - (1.0 - passed).powi(3);
+            spread.reach = spread.most * eased;
+            pour.show(width, st.canvas.as_mut(), false);
+            passed >= 1.0
+        };
+        if !done {
+            self.shared.frame(st);
+            return true;
+        }
+        let name = st.pour.as_mut().and_then(|pour| {
+            pour.spread = None;
+            pour.ending_name.take()
+        });
+        if self.finish_pour(st, &name) {
+            return false;
+        }
+        end_pour(&self.shared, st, true, name.as_deref());
+        false
     }
 
     /// Whether a fill let go is still being finished by a plugin: nothing should be started until
@@ -384,6 +484,33 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// Has a fill coming in come in: nothing else is started while one is on its way.
+    fn spread_through(&self) {
+        while self.pour_spreading() {
+            self.pour_tick(f64::INFINITY);
+        }
+    }
+
+    /// Starts the pour coming in where it was dropped rather than being there at once. False when
+    /// there is nothing already shown to come in, or it is already on its way.
+    fn begin_spread(&self, st: &mut State, name: Option<String>) -> bool {
+        let Some(pour) = st.pour.as_mut() else { return false };
+        if pour.spread.is_some() || pour.finishing.is_some() {
+            return false;
+        }
+        let Some(seed) = pour.flood.as_ref().map(Flood::seed) else { return false };
+        let Some(all) = pour.shown_mask.clone() else { return false };
+        let Some([x, y, w, h]) = all.bounds() else { return false };
+        let (sx, sy) = (seed.0 as f32, seed.1 as f32);
+        let most = [[x, y], [x + w, y + h]]
+            .iter()
+            .map(|&[cx, cy]| ((cx as f32 - sx).powi(2) + (cy as f32 - sy).powi(2)).sqrt())
+            .fold(0.0_f32, f32::max);
+        pour.ending_name = name;
+        pour.spread = Some(Spread { began: None, seed, most, all, reach: 0.0 });
+        true
+    }
+
     /// Waits for a fill a plugin is finishing, if there is one.
     pub(crate) fn await_pour(&self) {
         let finishing = self.shared.lock().pour.as_ref().and_then(|pour| pour.finishing.clone());

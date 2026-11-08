@@ -341,6 +341,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 PadMenu(vm, maxWidth)
                 // a colour dragged out goes over everything
                 DropDot(vm)
+                DropSpread(vm)
             }
         }
     }

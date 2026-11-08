@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -121,14 +122,47 @@ internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = nul
     }
 }
 
-/** The colour being dragged out: a flat dot under the finger. */
+/**
+ * The colour being dragged out: a droplet under the finger, still joined to where it was picked up
+ * from by a neck. It thins as it is stretched, the way a drop holds on, and is gone past its reach.
+ */
 @Composable
 fun DropDot(vm: CanvasViewModel) {
     val (at, rgb) = vm.dropDot ?: return
-    Box(
-        Modifier.offset { IntOffset((at.x - DotSize.toPx() / 2).roundToInt(), (at.y - DotSize.toPx() / 2).roundToInt()) }
-            .size(DotSize).clip(CircleShape).background(CanvasSpace.color(rgb)),
-    )
+    val from = vm.dropFrom
+    val ink = CanvasSpace.color(rgb)
+    Canvas(Modifier.fillMaxSize()) {
+        val radius = DotSize.toPx() / 2f
+        if (from != null) {
+            val away = (at - from).getDistance()
+            val slack = 1f - ((away - 2f * radius) / 140f).coerceIn(0f, 1f)
+            if (slack > 0.02f && away > 0.001f) {
+                val dir = (at - from) / away
+                val perp = Offset(-dir.y, dir.x)
+                // where the neck meets each circle: near their middles as it stretches, so it comes
+                // off a point; and the waist drawn in from that, so the neck is pinched, not a tube
+                val grip = radius * slack * 0.95f
+                val waist = grip * (0.30f + 0.35f * slack)
+                val mid = (from + at) / 2f
+                val path = Path().apply {
+                    val start = from + perp * grip
+                    moveTo(start.x, start.y)
+                    val over = mid + perp * waist
+                    val end = at + perp * grip
+                    quadraticTo(over.x, over.y, end.x, end.y)
+                    val under = at - perp * grip
+                    lineTo(under.x, under.y)
+                    val back = mid - perp * waist
+                    val home = from - perp * grip
+                    quadraticTo(back.x, back.y, home.x, home.y)
+                    close()
+                }
+                drawPath(path, ink)
+            }
+            drawCircle(ink, radius, from)
+        }
+        drawCircle(ink, radius, at)
+    }
 }
 
 /**
@@ -188,6 +222,21 @@ fun DropBandUi(vm: CanvasViewModel) {
             if (what == DropBand.DRAGGING || what == DropBand.FILLING) {
                 Box(Modifier.width(width * vm.dropThreshold).height(4.dp).background(blue))
             }
+        }
+    }
+}
+
+/**
+ * A fill let go is still coming in where it was dropped: keeps the frames coming and moves it on
+ * until it is all there.
+ */
+@Composable
+fun DropSpread(vm: CanvasViewModel) {
+    if (!vm.pourSpreading()) return
+    LaunchedEffect(Unit) {
+        while (vm.pourSpreading()) {
+            androidx.compose.runtime.withFrameNanos { }
+            vm.pourTick()
         }
     }
 }

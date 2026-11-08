@@ -6376,6 +6376,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var dropDot by mutableStateOf<Pair<Offset, Int>?>(null)
         private set
 
+    /** Where it was picked up from - the button or swatch it came out of - window pixels. */
+    var dropFrom by mutableStateOf<Offset?>(null)
+        private set
+
     /** The threshold the colour fills with (0..1), kept from one drop to the next. */
     var dropThreshold by mutableFloatStateOf(transformPrefs.getFloat(DROP_THRESHOLD, 0.5f))
         private set
@@ -6407,6 +6411,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropBandTimer?.cancel()
         dropSwatch = swatch
         dropDot = at to (swatch ?: colorRgb())
+        dropFrom = at
         dropBand = DropBand.DRAGGING
         dropPoured = false
         dropPourRefused = false
@@ -6428,6 +6433,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             dropPoured = pourBegin(dot)
             dropPourRefused = !dropPoured
             if (dropPoured) dropDot = null
+            if (dropPoured) dropFrom = null
         }
     }
 
@@ -6456,6 +6462,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropPoured = pourBegin(dot)
         dropPourRefused = !dropPoured
         if (dropPoured) dropDot = null
+        if (dropPoured) dropFrom = null
     }
 
     /** The dragged colour let go at [at] (null: somewhere it doesn't fill, like the top bar). */
@@ -6467,6 +6474,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (dropPoured) {
             dropPoured = false
             dropDot = null
+            dropFrom = null
             pourEnd(keep = true)
             dropBand = DropBand.DROPPED
             dropBandTimer = viewModelScope.launch {
@@ -6477,6 +6485,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val at = if (at != null) rested ?: at else null
         dropDot = null
+        dropFrom = null
         if (at != null && dropAvoid?.contains(at) != true && pourBegin(at)) {
             pourEnd(keep = true)
             // the band offers to go on filling for a moment
@@ -6576,6 +6585,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (dropSliding) transformPrefs.edit().putFloat(DROP_THRESHOLD, dropThreshold).apply()
         dropSliding = false
         refresh()
+    }
+
+    /** Whether a fill let go is still coming in where it was dropped. */
+    fun pourSpreading(): Boolean = session?.pourSpreading() == true
+
+    /** Moves it on, a frame at a time: true while it is still coming in. */
+    fun pourTick(ms: Long = android.os.SystemClock.uptimeMillis()): Boolean {
+        val s = session ?: return false
+        val going = s.pourTick(ms.toDouble())
+        if (going) refresh()
+        return going
     }
 
     /** A fill's work (and feathering's), in order, off the main thread (a slid threshold redoes the whole fill). */
