@@ -399,6 +399,22 @@ impl CanvasSession {
         self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
     }
 
+    /// Add Frame (New Page with Page Assist): a new empty layer above the current one, as
+    /// [`Self::add_layer`], named "Frame N" ("Page N") by the frames there are with it.
+    pub fn add_frame(&self) -> u64 {
+        self.change("new layer", |d| {
+            if !d.has_room(1) {
+                return None;
+            }
+            let pages = d.animation.as_ref().is_some_and(|a| a.pages);
+            let id = d.add_layer();
+            let n = procraft_engine::animation::frames(d).len();
+            d.rename(id, &format!("{} {n}", if pages { "Page" } else { "Frame" }));
+            Some(id.0)
+        })
+        .unwrap_or(0)
+    }
+
     /// Makes `id` the layer painting goes to, and the only one chosen (no picks): an undo step,
     /// unless nothing changes.
     pub fn select_layer(&self, id: u64) -> bool {

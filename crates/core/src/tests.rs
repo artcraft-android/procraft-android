@@ -10412,3 +10412,18 @@ fn merge_down_keeps_a_multiply_layer_s_look() {
     assert!(s.merge_down(upper));
     assert_eq!(pixel(&s, 50, 50), shown, "the merged layer looks as the two did");
 }
+
+#[test]
+fn add_frame_names_its_layer_frame_or_page_by_the_count() {
+    let Some(s) = session(64, 64) else { return };
+    assert!(s.set_animation_assist(true));
+    let frame = s.add_frame();
+    let name =
+        |s: &CanvasSession, id: u64| s.layers().into_iter().find(|l| l.id == id).map(|l| l.name).unwrap_or_default();
+    assert_eq!(name(&s, frame), "Frame 2");
+    let next = s.add_frame();
+    assert_eq!(name(&s, next), "Frame 3");
+    // a plain new layer keeps its own name
+    let layer = s.add_layer();
+    assert!(name(&s, layer).starts_with("Layer"));
+}

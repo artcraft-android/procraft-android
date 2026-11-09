@@ -7088,7 +7088,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun addFrame() {
         stopPlaying()
         frameOptionsOpen = false
-        addLayer()
+        layerChange { if (it.addFrame() == 0uL) message = noRoom() }
     }
 
     private fun currentFrameLayer(): LayerInfo? = currentFrame?.let { animationFrames.getOrNull(it) }?.let { id -> layers.firstOrNull { it.id == id } }
