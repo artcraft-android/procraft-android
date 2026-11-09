@@ -433,6 +433,16 @@ impl ApplicationHandler for App {
         if response.repaint && event != WindowEvent::RedrawRequested {
             screen.window.request_redraw();
         }
+        // F11: the window fills its screen without its frame (a pen display's whole screen for
+        // the canvas, as the tablet's), or goes back to a window
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event
+            && key.state.is_pressed()
+            && !key.repeat
+            && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11)
+        {
+            let full = screen.window.fullscreen().is_none();
+            screen.window.set_fullscreen(full.then_some(winit::window::Fullscreen::Borderless(None)));
+        }
         match event {
             WindowEvent::CloseRequested => {
                 // the artwork open is kept in the gallery, and files still being written finish

@@ -351,6 +351,7 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
             desktop(&[alone("r"), (false, true, false, "r")], "Turn the canvas 15° (with Shift, back)"),
             drag("R and drag", "Turn the canvas (with Shift, in 15° steps)"),
             desktop(&[alone("escape")], "Close what is open, or set the canvas upright"),
+            desktop(&[alone("f11")], "Full screen, or back to a window"),
         ],
     ),
     (
