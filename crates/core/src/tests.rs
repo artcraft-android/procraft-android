@@ -10393,3 +10393,22 @@ fn liquify_turns_away_an_alpha_locked_layer_and_other_adjustments_take_it() {
     assert!(s.adjustment_start(Adjustment::Liquify));
     s.adjustment_end(false);
 }
+
+#[test]
+fn merge_down_keeps_a_multiply_layer_s_look() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(1.0);
+    // yellow below, cyan above set to Multiply: green where they meet
+    s.set_color(1.0, 1.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let upper = s.add_layer();
+    s.set_color(0.0, 1.0, 1.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.set_layer_blend(upper, procraft_engine::document::BlendMode::Multiply.id()));
+    let shown = pixel(&s, 50, 50);
+    assert_eq!(shown, [0, 255, 0, 255]);
+    assert!(s.merge_down(upper));
+    assert_eq!(pixel(&s, 50, 50), shown, "the merged layer looks as the two did");
+}
