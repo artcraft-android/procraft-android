@@ -144,6 +144,46 @@ mod system {
         }
     }
 
+    /// How a decoded frame's pixels lie: its height and stride (bytes; negative, the rows bottom
+    /// first), and where the picture is within it and its size (a frame may be padded).
+    #[derive(Clone, Copy)]
+    struct Layout {
+        height: u32,
+        stride: i32,
+        x0: u32,
+        y0: u32,
+        w: u32,
+        h: u32,
+    }
+
+    impl Layout {
+        /// The frames of type `t`; a picture size it doesn't say is `before`'s (fitted), else the
+        /// whole frame.
+        fn of(t: &IMFMediaType, before: Option<&Layout>) -> windows::core::Result<Layout> {
+            let size = unsafe { t.GetUINT64(&MF_MT_FRAME_SIZE)? };
+            let (width, height) = ((size >> 32) as u32, (size & 0xFFFF_FFFF) as u32);
+            let stride = unsafe { t.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.map_or(width as i32 * 4, |s| s as i32);
+            let (mut x0, mut y0, mut w, mut h) = (0, 0, width, height);
+            if let Some(b) = before {
+                (x0, y0) = (b.x0.min(width), b.y0.min(height));
+                (w, h) = (b.w.min(width - x0), b.h.min(height - y0));
+            }
+            let mut area = [0u8; 16];
+            if unsafe { t.GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, &mut area, None) }.is_ok() {
+                let int =
+                    |at: usize| area.get(at..at + 4).and_then(|b| b.try_into().ok()).map_or(0, i32::from_le_bytes);
+                let short =
+                    |at: usize| area.get(at..at + 2).and_then(|b| b.try_into().ok()).map_or(0, i16::from_le_bytes);
+                let (cx, cy) = (int(8), int(12));
+                if cx > 0 && cy > 0 {
+                    (x0, y0) = (short(2).max(0) as u32, short(6).max(0) as u32);
+                    (w, h) = ((cx as u32).min(width - x0.min(width)), (cy as u32).min(height - y0.min(height)));
+                }
+            }
+            Ok(Layout { height, stride, x0, y0, w, h })
+        }
+    }
+
     /// The frames of the video at `path`, each as straight RGBA rows to `each` with when it
     /// shows (seconds), until it says to stop (false); how many.
     pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64) -> bool) -> windows::core::Result<u32> {
@@ -163,22 +203,7 @@ mod system {
             wanted.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
             reader.SetCurrentMediaType(stream, None, &wanted)?;
         }
-        let current = unsafe { reader.GetCurrentMediaType(stream)? };
-        let size = unsafe { current.GetUINT64(&MF_MT_FRAME_SIZE)? };
-        let (width, height) = ((size >> 32) as u32, (size & 0xFFFF_FFFF) as u32);
-        let stride = unsafe { current.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.map_or(width as i32 * 4, |s| s as i32);
-        // the picture within the decoded frame (which may be padded): where it is and its size
-        let mut area = [0u8; 16];
-        let (mut x0, mut y0, mut w, mut h) = (0u32, 0u32, width, height);
-        if unsafe { current.GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, &mut area, None) }.is_ok() {
-            let int = |at: usize| area.get(at..at + 4).and_then(|b| b.try_into().ok()).map_or(0, i32::from_le_bytes);
-            let short = |at: usize| area.get(at..at + 2).and_then(|b| b.try_into().ok()).map_or(0, i16::from_le_bytes);
-            let (cx, cy) = (int(8), int(12));
-            if cx > 0 && cy > 0 {
-                (x0, y0) = (short(2).max(0) as u32, short(6).max(0) as u32);
-                (w, h) = ((cx as u32).min(width - x0.min(width)), (cy as u32).min(height - y0.min(height)));
-            }
-        }
+        let mut layout = Layout::of(&unsafe { reader.GetCurrentMediaType(stream)? }, None)?;
         let mut frames = 0;
         loop {
             let (mut flags, mut sample) = (0u32, None);
@@ -186,6 +211,12 @@ mod system {
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 break;
             }
+            // the decoder settled on a frame of its own, padded perhaps (a width not a multiple of
+            // 16 comes out wider, with a longer stride): read from here on as it says
+            if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
+                layout = Layout::of(&unsafe { reader.GetCurrentMediaType(stream)? }, Some(&layout))?;
+            }
+            let Layout { height, stride, x0, y0, w, h, .. } = layout;
             let Some(sample) = sample else { continue };
             let buffer = unsafe { sample.ConvertToContiguousBuffer()? };
             let mut rgba = vec![0u8; (w * h * 4) as usize];
@@ -846,6 +877,40 @@ mod ffmpeg {
 
 #[cfg(test)]
 mod tests {
+    /// A video whose width the encoder pads (850: even, not a multiple of 16) comes back as it was
+    /// made, each row in its place: an edge down the middle stays straight, not slanted.
+    #[test]
+    fn a_video_of_a_width_the_encoder_pads_comes_back_unslanted() {
+        let dir = std::env::temp_dir().join(format!("procraft-padded-video-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("padded.mp4");
+        let (w, h) = (850u32, 480u32);
+        let made = super::write_mp4(&out, w, h, w, 30.0, false, 4, 3, |_, w, h| {
+            Some(
+                (0..w * h).flat_map(|i| if i % w < w / 2 { [20, 20, 20, 255] } else { [235, 235, 235, 255] }).collect(),
+            )
+        });
+        match made {
+            Err(e) if e == super::NO_FFMPEG => return eprintln!("skipped: no ffmpeg"),
+            other => assert_eq!(other.unwrap(), (w, h)),
+        }
+        let mut edges = Vec::new();
+        let mut sizes = Vec::new();
+        let count = super::read_frames(&out, |rgba, fw, fh, _| {
+            sizes.push((fw, fh));
+            // each row's edge: its first light pixel
+            for row in rgba.chunks(fw as usize * 4).take(fh as usize) {
+                edges.push(row.chunks(4).position(|p| p[1] > 128).unwrap_or(usize::MAX));
+            }
+            true
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(count.unwrap(), 3);
+        assert!(sizes.iter().all(|&s| s == (w, h)), "{sizes:?}");
+        let (least, most) = (edges.iter().min().copied().unwrap(), edges.iter().max().copied().unwrap());
+        assert!(most - least <= 4 && least.abs_diff(w as usize / 2) <= 4, "edges from {least} to {most}");
+    }
+
     /// Frames at a tenth of a frame a second through the system's writer: each shows for ten
     /// seconds, its time exact.
     #[test]
