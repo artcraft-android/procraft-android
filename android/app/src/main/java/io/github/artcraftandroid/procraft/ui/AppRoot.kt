@@ -54,9 +54,11 @@ fun AppRoot(vm: CanvasViewModel) {
     ProCraftTheme(interfaceSize) {
         // a phone keeps its status bar (ProCraft Pocket's), its icons dark over the light interface
         val view = androidx.compose.ui.platform.LocalView.current
-        val window = androidx.compose.ui.platform.LocalContext.current.activity()?.window
+        val activityWindow = androidx.compose.ui.platform.LocalContext.current.activity()?.window
         androidx.compose.runtime.SideEffect {
-            if (window != null) androidx.core.view.WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = Pc.light
+            if (activityWindow != null) {
+                androidx.core.view.WindowCompat.getInsetsController(activityWindow, view).isAppearanceLightStatusBars = Pc.light
+            }
         }
         if (vm.screen == Screen.GALLERY) {
             ZoomingGallery(vm, overlay = false)

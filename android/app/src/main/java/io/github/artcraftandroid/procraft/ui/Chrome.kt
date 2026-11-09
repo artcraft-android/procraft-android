@@ -356,7 +356,7 @@ private fun ModifyGlyph(vm: CanvasViewModel, side: Dp) {
                 if (vm.pickNext) Pc.Accent else Pc.SideGlyph,
                 topLeft = Offset(w / 2f, w / 2f),
                 size = Size(size.width - w, size.height - w),
-                cornerRadius = CornerRadius(Pc.ModifyCorner.toPx() * side / Pc.ModifySize - w / 2f),
+                cornerRadius = CornerRadius(Pc.ModifyCorner.toPx() * (side / Pc.ModifySize) - w / 2f),
                 style = Stroke(w),
             )
         },
