@@ -224,6 +224,16 @@ pub(crate) fn pixels_hash(rgba: &[u8]) -> u64 {
 }
 
 impl crate::State {
+    /// The time counted since tracking last started goes into the artwork's (at most a day at
+    /// once), and counts on from now.
+    pub(crate) fn count_tracked_time(&mut self) {
+        let Some(since) = self.tracking_since else { return };
+        let now = std::time::Instant::now();
+        let ms = u64::try_from(now.duration_since(since).as_millis()).unwrap_or(u64::MAX).min(24 * 3600 * 1000);
+        self.info.tracked_ms = self.info.tracked_ms.saturating_add(ms);
+        self.tracking_since = Some(now);
+    }
+
     /// See [`CanvasSession::edits`].
     pub(crate) fn edits(&self) -> u64 {
         self.revision.wrapping_add(self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made))
@@ -258,6 +268,8 @@ impl crate::State {
             let there = known.get(&id) == Some(&hash) && layer_path(dir, id).exists();
             (!there).then_some((id, hash, rgba))
         };
+        // the time on it up to now saved with it
+        self.count_tracked_time();
         let model = self.model_snapshot()?;
         let file = ArtworkFile {
             format: FORMAT.to_owned(),
@@ -885,6 +897,7 @@ impl CanvasSession {
                 self.exported(0.1 + 0.6 * (i + 1) as f32 / count as f32);
             }
             let reference = (st.reference_window.clone(), st.reference_picture.clone());
+            st.count_tracked_time();
             (st.doc.clone(), pixels, composite, st.name.clone(), st.info.clone(), reference.0, reference.1)
         };
         let (w, h) = (doc.width(), doc.height());
@@ -972,9 +985,24 @@ impl CanvasSession {
         self.shared.lock().name.clone()
     }
 
-    /// When the artwork was made, its strokes, the time spent on it and its author.
+    /// When the artwork was made, its strokes, the time spent on it (up to now) and its author.
     pub fn artwork_info(&self) -> ArtworkInfo {
-        self.shared.lock().info.clone()
+        let mut st = self.shared.lock();
+        st.count_tracked_time();
+        st.info.clone()
+    }
+
+    /// Time on the artwork counts while `on` (it is shown and the app in front), from now; off,
+    /// what was counted is added to the artwork's. Each save and [`Self::artwork_info`] takes the
+    /// time counted so far. (Android counts it itself, by [`Self::add_tracked_time`].)
+    pub fn set_tracking(&self, on: bool) {
+        let mut st = self.shared.lock();
+        st.count_tracked_time();
+        if !on {
+            st.tracking_since = None;
+        } else if st.tracking_since.is_none() {
+            st.tracking_since = Some(std::time::Instant::now());
+        }
     }
 
     pub fn set_author(&self, name: String) {

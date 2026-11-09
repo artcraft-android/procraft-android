@@ -460,6 +460,8 @@ impl ApplicationHandler for App {
                 screen.resize(size.width, size.height);
                 if let Some(session) = &session {
                     session.resize_window(size.width, size.height);
+                    // minimised, time on the artwork stops counting; back, it counts again
+                    session.set_tracking(!screen.minimised());
                 }
                 screen.window.request_redraw();
             }
@@ -610,6 +612,8 @@ impl App {
         self.ui.opened(&session, scale * screen.egui.egui_ctx().zoom_factor());
         session.show_in(size.width, size.height);
         self.input = input::Input::default();
+        // time on it counts while it is shown (not while the window is minimised)
+        session.set_tracking(!screen.minimised());
         self.session = Some(session);
         screen.window.request_redraw();
     }
@@ -1228,6 +1232,8 @@ impl App {
     /// The artwork open is put away and kept; false if it couldn't be.
     fn leave_artwork(&mut self) -> bool {
         if let Some(session) = self.session.clone() {
+            // its time counted up to now, saved with it
+            session.set_tracking(false);
             self.ui.closing(&session);
             // no save of its own after this one
             session.stop_autosave();
@@ -1235,6 +1241,7 @@ impl App {
         let kept = self.keep_artwork();
         // still open: kept saved again
         if !kept && let (Some(session), Some(dir)) = (&self.session, &self.artwork) {
+            session.set_tracking(true);
             Arc::clone(session).start_autosave(dir.clone());
         }
         kept

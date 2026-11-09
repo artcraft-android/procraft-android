@@ -503,6 +503,9 @@ pub(crate) struct State {
     pub(crate) name: String,
     /// What the artwork keeps about itself: when it was made, strokes, time spent, its author.
     pub(crate) info: project::ArtworkInfo,
+    /// Since when time on the artwork counts, while it does (see [`CanvasSession::set_tracking`]):
+    /// not yet in `info`.
+    pub(crate) tracking_since: Option<std::time::Instant>,
     /// Saved layer pixels waiting for the canvas (an opened artwork before it is shown).
     pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
     /// The canvas couldn't be made from these pixels (a failure elsewhere doesn't stop the next try).
@@ -1319,6 +1322,7 @@ impl CanvasSession {
                     .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0)),
                 ..project::ArtworkInfo::default()
             },
+            tracking_since: None,
             revision: 0,
             transform: None,
             transform_mode: procraft_engine::transform::TransformMode::Freeform,

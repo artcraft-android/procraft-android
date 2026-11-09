@@ -10670,3 +10670,33 @@ fn the_selections_bands_ask_for_a_frame_when_they_have_moved_a_pixel_not_every_f
     s.set_selection_display(crate::selection::SelectionDisplay::Tint);
     assert_eq!(draw(), None);
 }
+
+#[test]
+fn time_counts_while_tracking_is_on_and_is_saved_with_the_artwork() {
+    let Some(s) = session(64, 64) else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let wait = |ms: u64| std::thread::sleep(std::time::Duration::from_millis(ms));
+    // off by default: nothing counts
+    wait(30);
+    assert_eq!(s.artwork_info().tracked_ms, 0);
+    s.set_tracking(true);
+    wait(60);
+    let running = s.artwork_info().tracked_ms;
+    assert!(running >= 60, "{running} ms counted, read while it runs");
+    s.set_tracking(false);
+    let stopped = s.artwork_info().tracked_ms;
+    wait(40);
+    assert_eq!(s.artwork_info().tracked_ms, stopped, "off: nothing more counts");
+    // on again: a save takes what has counted so far
+    s.set_tracking(true);
+    wait(30);
+    let dir = std::env::temp_dir().join(format!("procraft-tracked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let saved = s.artwork_info().tracked_ms;
+    assert!(saved >= stopped + 30, "{saved} ms after the save, {stopped} before");
+    let o = reopened_at(&dir, &gpu);
+    let reopened = o.artwork_info().tracked_ms;
+    assert!(reopened >= stopped + 30 && reopened <= saved, "{reopened} ms reopened");
+    let _ = std::fs::remove_dir_all(&dir);
+}
