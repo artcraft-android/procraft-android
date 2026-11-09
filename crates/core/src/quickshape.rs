@@ -8,7 +8,7 @@ use procraft_engine::brush::Brush;
 use procraft_engine::document::LayerId;
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::Sample;
-use procraft_engine::quickshape::{Shape, ShapeKind, fit_ellipse, recognise};
+use procraft_engine::quickshape::{Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, without_end_hook};
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_gpu::{Canvas, StrokeStyle};
 
@@ -190,7 +190,17 @@ const PACE_MOST_MS: f64 = 50.0;
 /// crawl of a few pixels is no reason for a shape to stop there.
 const PACE_MOST_OFF: f32 = 8.0;
 
+/// How near a stroke's end, at most, a hook is looked for: points on the screen.
+const END_HOOK_POINTS: f32 = 30.0;
+
 impl State {
+    /// `line` (canvas pixels) without a hook at its end, as a shape is fitted to.
+    fn without_end_hook(&self, line: Vec<Vec2>) -> Vec<Vec2> {
+        let zoom = self.view.map_or(1.0, |v| v.zoom()).max(1e-6);
+        let reach = end_hook_reach(&line, END_HOOK_POINTS * self.display_scale / zoom);
+        without_end_hook(&line, reach).to_vec()
+    }
+
     /// Notes a stroke's input, for QuickShape.
     pub(crate) fn remember_input(&mut self, samples: &[Sample]) {
         for s in samples.iter().filter(|s| s.is_finite()) {
@@ -527,6 +537,7 @@ impl CanvasSession {
         }
         // fitted to the stroke's line as stabilisation and motion filtering smoothed it
         let line = st.began.as_ref().map_or_else(|| st.drawn.clone(), |b| b.shape_line(&st.drawn_samples, &st.drawn));
+        let line = st.without_end_hook(line);
         let found = recognise(&line);
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
@@ -550,11 +561,11 @@ impl CanvasSession {
         }
         st.flush();
         let last = st.last_stroke.take()?;
+        let line = st.without_end_hook(last.shape_line(&last.samples, &last.drawn));
         let canvas = st.canvas.as_mut()?;
         if canvas.steps_made() != last.steps || canvas.can_redo() {
             return None;
         }
-        let line = last.shape_line(&last.samples, &last.drawn);
         let found = recognise(&line);
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
