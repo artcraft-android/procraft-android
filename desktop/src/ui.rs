@@ -1270,6 +1270,11 @@ impl Interface {
     /// Undo (recoloring, the core takes back the open fill first).
     fn undo(&mut self, session: &CanvasSession) {
         self.feedback();
+        // transforming, the transform's last change goes back, the box with it
+        if self.transform.on {
+            self.transform.moved(session.transform_apply(procraft_core::TransformAction::Undo));
+            return;
+        }
         // a finished text's step goes back to editing that text first, as a step of its own
         if !self.text.editing()
             && !self.transform.on
@@ -1300,6 +1305,10 @@ impl Interface {
 
     fn redo(&mut self, session: &CanvasSession) {
         self.feedback();
+        // transforming, nothing is redone until it ends
+        if self.transform.on {
+            return;
+        }
         if self.text.editing()
             && let Some(name) = session.text_box_redo()
         {

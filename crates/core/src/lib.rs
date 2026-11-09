@@ -1949,6 +1949,12 @@ impl CanvasSession {
     pub fn undo(&self) -> Option<String> {
         self.await_pour();
         self.shared.lock().end_reveal();
+        // transforming, the transform's own last change goes back: the canvas's steps wait until
+        // it ends (one taken back under it would leave the box over what is no longer there)
+        if self.shared.lock().transform.is_some() {
+            self.transform_apply(crate::transform::TransformAction::Undo);
+            return None;
+        }
         // a picture being placed on a model goes first
         if self.model_picture_box().is_some() {
             self.model_picture_end(false);
@@ -1987,6 +1993,10 @@ impl CanvasSession {
     pub fn redo(&self) -> Option<String> {
         self.await_pour();
         self.shared.lock().end_reveal();
+        // transforming, nothing is redone until it ends
+        if self.shared.lock().transform.is_some() {
+            return None;
+        }
         if let Some(name) = self.text_box_redo() {
             return Some(name);
         }

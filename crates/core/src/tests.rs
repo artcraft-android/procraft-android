@@ -10700,3 +10700,33 @@ fn time_counts_while_tracking_is_on_and_is_saved_with_the_artwork() {
     assert!(reopened >= stopped + 30 && reopened <= saved, "{reopened} ms reopened");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn undo_while_transforming_takes_back_the_transforms_change_not_a_step_under_it() {
+    use crate::transform::TransformHandle;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    s.set_color(0.0, 0.0, 0.0);
+    // two strokes: the first a step the transform must not take back
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+    s.stroke_end(vec![]);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let dark = |x: u32, y: u32| pixel(&s, x, y)[0] < 128;
+    assert!(dark(20, 20) && dark(30, 30));
+    assert!(s.transform_begin().is_some());
+    s.transform_grab(TransformHandle::Move, 30.0, 30.0);
+    s.transform_drag(60.0, 60.0);
+    s.transform_release();
+    // the move goes back; neither stroke does; nothing is redone meanwhile
+    assert_eq!(s.undo(), None);
+    assert_eq!(s.redo(), None);
+    s.transform_end(true);
+    assert!(dark(20, 20) && dark(30, 30), "both strokes where they were");
+    assert!(!dark(50, 50) && !dark(40, 40), "nothing moved");
+    // once it has ended, undo is the canvas's again: the transform's step, then the second stroke
+    assert!(s.undo().is_some_and(|n| n.contains("transform")));
+    assert!(dark(20, 20) && dark(30, 30));
+    assert_eq!(s.undo().as_deref(), Some("Paint stroke"));
+    assert!(dark(20, 20) && !dark(30, 30));
+}
