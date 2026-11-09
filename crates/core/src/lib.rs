@@ -1541,6 +1541,7 @@ impl CanvasSession {
                 steps: 0,
                 fresh: second.is_none().then(|| builder.clone()),
                 samples: Vec::new(),
+                line: builder.clone(),
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
         match second {

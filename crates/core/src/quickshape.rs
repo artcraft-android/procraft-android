@@ -157,9 +157,19 @@ pub(crate) struct LastStroke {
     /// Its builder as it began (none for a dual brush), and its input.
     pub(crate) fresh: Option<StrokeBuilder>,
     pub(crate) samples: Vec<Sample>,
+    /// Its builder as it began (a dual brush's first), for the line a shape is fitted to.
+    pub(crate) line: StrokeBuilder,
 }
 
 impl LastStroke {
+    /// The line a shape is fitted to, from the stroke's input `samples`: smoothed as the stroke
+    /// smoothed it, but for streamline and the tapers (see [`StrokeBuilder::shape_line`]); the
+    /// points `drawn` if that leaves too little.
+    fn shape_line(&self, samples: &[Sample], drawn: &[Vec2]) -> Vec<Vec2> {
+        let line = self.line.shape_line(samples);
+        if line.len() >= 2 { line } else { drawn.to_vec() }
+    }
+
     /// The stroke as it can be laid again, given its input.
     fn laid_again(&self, samples: Vec<Sample>) -> Option<DrawnStroke> {
         let builder = self.fresh.clone()?;
@@ -515,11 +525,13 @@ impl CanvasSession {
         if st.stroke.is_none() || st.shape.is_some() {
             return None;
         }
-        let found = recognise(&st.drawn);
+        // fitted to the stroke's line as stabilisation and motion filtering smoothed it
+        let line = st.began.as_ref().map_or_else(|| st.drawn.clone(), |b| b.shape_line(&st.drawn_samples, &st.drawn));
+        let found = recognise(&line);
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
         let held = st.drawn.last().map(|&at| Held { snapped: first.clone(), from: at, at, finger: false });
-        let (drawn, along) = (st.drawn.clone(), StrokeAlong::of(&st.drawn_samples, st.pace()));
+        let (drawn, along) = (line, StrokeAlong::of(&st.drawn_samples, st.pace()));
         let stroke = st.began.take().and_then(|began| began.laid_again(st.drawn_samples.clone()));
         st.shape = Some(ShapeEdit::new(first, choices, drawn, along, held, stroke));
         st.draw_shape();
@@ -542,7 +554,8 @@ impl CanvasSession {
         if canvas.steps_made() != last.steps || canvas.can_redo() {
             return None;
         }
-        let found = recognise(&last.drawn);
+        let line = last.shape_line(&last.samples, &last.drawn);
+        let found = recognise(&line);
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
         canvas.undo();
@@ -553,7 +566,7 @@ impl CanvasSession {
         st.stroke =
             Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234).scaled(scale));
         st.second = None;
-        st.shape = Some(ShapeEdit::new(first, choices, last.drawn, along, None, stroke));
+        st.shape = Some(ShapeEdit::new(first, choices, line, along, None, stroke));
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()

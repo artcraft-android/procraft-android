@@ -1211,6 +1211,20 @@ impl StrokeBuilder {
         Some(self.placed.iter().take(drawn).map(|p| self.finish_stamp(p, start, None)).collect())
     }
 
+    /// The line a shape is fitted to, from this builder as its stroke began and the stroke's
+    /// input: stabilisation and motion filtering smooth it as they smooth the stroke, streamline
+    /// doesn't, no taper changes how its stamps are spaced and nothing runs on past the lift. Each
+    /// stamp's place on the path, before any jitter threw it.
+    pub fn shape_line(&self, samples: &[Sample]) -> Vec<Vec2> {
+        let mut line = self.clone();
+        line.brush.streamline = 0.0;
+        line.brush.pen_taper = Taper::NONE;
+        line.brush.touch_taper = Taper::NONE;
+        line.add(samples);
+        line.finish();
+        line.placed.iter().map(|p| p.center - p.thrown).collect()
+    }
+
     /// Ends the stroke: walks on to where the pen lifted and applies the end taper. Returns all of
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {
@@ -2970,6 +2984,37 @@ mod tests {
         let (pen_end, pen_tip, _) = ran_to(Pointer::Stylus);
         assert!((pen_end - 306.6).abs() < 1.0, "{pen_end}");
         assert!(pen_tip < 1.0, "{pen_tip}");
+    }
+
+    #[test]
+    fn a_shape_s_line_is_smoothed_by_stabilisation_but_not_streamline() {
+        // a wavy 600 px line, 3 px either way every 20 px
+        let wave: Vec<Sample> = (0..=300)
+            .map(|i| {
+                let x = i as f32 * 2.0;
+                Sample::at(Vec2::new(x, 50.0 + 3.0 * (x / 20.0 * std::f32::consts::TAU).sin()), 1.0, i as f64 * 4.0)
+            })
+            .collect();
+        let line = |brush: Brush| StrokeBuilder::new(brush, 4.0, Pointer::Stylus).shape_line(&wave);
+        let spread = |line: &[Vec2]| {
+            let middle = line.iter().filter(|p| (100.0..500.0).contains(&p.x));
+            middle.fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)))
+        };
+        let bare = line(plain());
+        let (lo, hi) = spread(&bare);
+        assert!(hi - lo > 5.0, "the wave is there: {lo}..{hi}");
+        // streamline leaves it as it is
+        assert_eq!(line(Brush { streamline: 0.9, ..plain() }), bare);
+        // stabilisation evens it out
+        let mut steady = plain();
+        steady.set_setting("stabilization", 1.0);
+        let (lo, hi) = spread(&line(steady));
+        assert!(hi - lo < 2.0, "stabilised: {lo}..{hi}");
+        // a classic end taper runs nothing on past the lift
+        let mut classic = Brush { pen_taper: Taper { start: 0.0, end: 1.0, size: 1.0, opacity: 0.0 }, ..plain() };
+        classic.set_setting("classic_taper", 1.0);
+        let end = line(classic).iter().map(|p| p.x).fold(f32::MIN, f32::max);
+        assert!(end <= 600.5, "ran on to {end}");
     }
 
     #[test]

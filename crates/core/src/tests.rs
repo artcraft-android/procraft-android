@@ -2368,6 +2368,35 @@ fn the_brush_studio_edits_keeps_and_puts_back() {
 }
 
 #[test]
+fn a_held_stroke_snaps_to_its_line_as_stabilisation_smoothed_it_but_not_streamline() {
+    use crate::quickshape::QuickShapeKind;
+    // a line across with a 12 px wobble, 6 times along it: too wavy for a line as it came
+    let pts: Vec<PenSample> = (0..=75)
+        .map(|i| {
+            let x = 25.0 + i as f32 * 2.0;
+            sample(x, 100.0 + 12.0 * (i as f32 / 75.0 * 6.0 * std::f32::consts::TAU).sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    let held = |setting: &str, amount: f32| {
+        let s = session(200, 200)?;
+        s.set_brush_size(0.05);
+        s.studio_begin();
+        s.set_studio_setting("streamline".to_owned(), 0.0);
+        s.set_studio_setting(setting.to_owned(), amount);
+        s.studio_end(true);
+        s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+        s.stroke_add(pts[1..].to_vec());
+        s.quickshape_hold().map(|info| info.kind)
+    };
+    let Some(raw) = held("stabilization", 0.0) else { return };
+    assert_ne!(raw, QuickShapeKind::Line);
+    // a heavy streamline is left out of the line a shape is fitted to
+    assert_eq!(held("streamline", 1.0), Some(raw));
+    // stabilisation evens the wobble out of it
+    assert_eq!(held("stabilization", 1.0), Some(QuickShapeKind::Line));
+}
+
+#[test]
 fn a_held_stroke_snaps_to_a_shape_and_is_edited() {
     use crate::quickshape::QuickShapeKind;
     let Some(s) = session(200, 200) else { return };
@@ -4514,7 +4543,7 @@ fn a_p3_canvas_exports_with_its_profile() {
     s.export_jpeg(path.to_string_lossy().into_owned()).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
-    let at = bytes.windows(12).position(|w| w == b"ICC_PROFILE ").expect("an embedded profile");
+    let at = bytes.windows(12).position(|w| w == b"ICC_PROFILE\0").expect("an embedded profile");
     assert_eq!(&bytes[at + 14..at + 14 + icc.len()], &icc[..]);
     let _ = std::fs::remove_file(path);
 }
