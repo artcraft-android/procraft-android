@@ -27,15 +27,30 @@ class ChromeFitTest {
 
     @Test
     fun theTopBarsEndsNeverMeet() {
-        for (width in widths(354, 2000)) assertTrue("$width", Pc.barFit(width).needs <= width)
+        for (width in widths(200, 2000)) assertTrue("$width", Pc.barFit(width).needs <= width + 0.01.dp)
+    }
+
+    @Test
+    fun aPhonesTopBarShrinksItsButtonsWithTheirGlyphsThenTakesTwoRows() {
+        for (width in widths(200, 2000)) {
+            val fit = Pc.barFit(width)
+            // the glyphs are drawn as wide as their buttons, so none runs into the next
+            assertEquals(fit.button.value / Pc.BarButtonWidth.value, fit.scale, 1e-4f)
+            assertTrue("$width", fit.scale <= 1f)
+            if (fit.rows == 1) assertTrue("$width", fit.button >= 32.dp - 0.01.dp)
+        }
+        assertEquals(1, Pc.barFit(360.dp).rows)
+        assertEquals(2, Pc.barFit(340.dp).rows)
+        // two rows of a phone held upright: the buttons as measured again
+        assertEquals(Pc.BarButtonWidth, Pc.barFit(320.dp).button)
     }
 
     @Test
     fun panelsStillHangFromTheirButtons() {
-        // the bar at 411: 8 margins and 36 buttons, nothing between them
-        assertEquals(26.dp, Pc.toolCentreFromRight(0, 411.dp))
-        assertEquals(170.dp, Pc.toolCentreFromRight(4, 411.dp))
-        assertEquals(84.dp, Pc.actionCentre(0, 411.dp))
+        // the bar at 411: 8 margins, the buttons and Gallery at 87% in one row, nothing between them
+        assertEquals(27.14f, Pc.toolCentreFromRight(0, 411.dp).value, 0.01f)
+        assertEquals(180.27f, Pc.toolCentreFromRight(4, 411.dp).value, 0.01f)
+        assertEquals(77.60f, Pc.actionCentre(0, 411.dp).value, 0.01f)
         // on a tablet, as ever
         assertEquals(62.dp, Pc.toolCentreFromRight(0, 1200.dp))
         assertEquals(342.dp, Pc.toolCentreFromRight(4, 1200.dp))

@@ -512,6 +512,8 @@ pub(crate) struct State {
     pub(crate) backdrops: Vec<[f32; 6]>,
     /// Where the glass over the canvas is thin (the side bar's slider tracks), the same way.
     pub(crate) backdrop_windows: Vec<[f32; 6]>,
+    /// Where it is liquid glass, bent by its rim (ProCraft Pocket's bars), the same way.
+    pub(crate) backdrop_liquid: Vec<[f32; 6]>,
     /// The view kept with the artwork, shown when the window first comes.
     pub(crate) saved_view: Option<project::SavedView>,
     /// The Reference window as the artwork keeps it, and its imported picture (a PNG, upright):
@@ -1354,6 +1356,7 @@ impl CanvasSession {
             fit_insets: [0.0; 4],
             backdrops: Vec::new(),
             backdrop_windows: Vec::new(),
+            backdrop_liquid: Vec::new(),
             saved_view: None,
             reference_window: Default::default(),
             reference_picture: None,
@@ -1842,11 +1845,19 @@ impl CanvasSession {
     /// The same, with `windows` drawn over them, where the glass is thin: what is behind only
     /// softens there.
     pub fn set_glass(&self, regions: Vec<f32>, windows: Vec<f32>) {
-        let ((regions, _), (windows, _)) = (regions.as_chunks::<6>(), windows.as_chunks::<6>());
+        self.set_liquid_glass(regions, windows, Vec::new());
+    }
+
+    /// The same, with `liquid` drawn over those: liquid glass, what is behind softening and bent
+    /// outward by its rim, as through a lens.
+    pub fn set_liquid_glass(&self, regions: Vec<f32>, windows: Vec<f32>, liquid: Vec<f32>) {
+        let ((regions, _), (windows, _), (liquid, _)) =
+            (regions.as_chunks::<6>(), windows.as_chunks::<6>(), liquid.as_chunks::<6>());
         let mut st = self.shared.lock();
-        if st.backdrops != regions || st.backdrop_windows != windows {
+        if st.backdrops != regions || st.backdrop_windows != windows || st.backdrop_liquid != liquid {
             st.backdrops = regions.to_vec();
             st.backdrop_windows = windows.to_vec();
+            st.backdrop_liquid = liquid.to_vec();
             self.shared.frame(&mut st);
         }
     }

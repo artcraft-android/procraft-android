@@ -5,6 +5,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -37,10 +41,10 @@ import androidx.compose.ui.unit.dp
 val LocalBackdrops = staticCompositionLocalOf<Backdrops?> { null }
 
 /**
- * The rounded bodies of the frosted panels and bars shown now, and the thin glass of the side bar's
- * tracks (window pixels), sent on whenever they change.
+ * The rounded bodies of the frosted panels and bars shown now, the thin glass of the side bar's
+ * tracks, and ProCraft Pocket's liquid glass (window pixels), sent on whenever they change.
  */
-class Backdrops(private val send: (List<Float>, List<Float>) -> Unit) {
+class Backdrops(private val send: (List<Float>, List<Float>, List<Float>) -> Unit) {
     /**
      * Where the app's window is on the screen (pixels): not its corner in a split screen or a
      * window of its own, so a place on the screen is made one in the window.
@@ -49,18 +53,27 @@ class Backdrops(private val send: (List<Float>, List<Float>) -> Unit) {
 
     private val regions = LinkedHashMap<Any, FloatArray>()
     private val windows = LinkedHashMap<Any, FloatArray>()
+    private val liquid = LinkedHashMap<Any, FloatArray>()
 
-    private fun sendAll() = send(regions.values.flatMap { it.asList() }, windows.values.flatMap { it.asList() })
+    private fun sendAll() = send(
+        regions.values.flatMap { it.asList() },
+        windows.values.flatMap { it.asList() },
+        liquid.values.flatMap { it.asList() },
+    )
 
-    fun put(key: Any, region: FloatArray, window: Boolean = false) {
-        val into = if (window) windows else regions
+    fun put(key: Any, region: FloatArray, window: Boolean = false, liquid: Boolean = false) {
+        val into = when {
+            liquid -> this.liquid
+            window -> windows
+            else -> regions
+        }
         if (into[key]?.contentEquals(region) == true) return
         into[key] = region
         sendAll()
     }
 
     fun remove(key: Any) {
-        if (regions.remove(key) == null && windows.remove(key) == null) return
+        if (regions.remove(key) == null && windows.remove(key) == null && liquid.remove(key) == null) return
         sendAll()
     }
 }
@@ -75,9 +88,17 @@ fun rememberFrost(corner: Dp): Modifier = rememberFrost(corner, BarGlass())
 /**
  * How a bar's glass differs from a panel's: it shows as much as [shown], [moved] (window pixels) as
  * the bar slides out of its place, its box goes [pastLeft] and [pastRight] further (to take the
- * corners of a bar's screen edge off the screen), and as a [window] what is behind only softens.
+ * corners of a bar's screen edge off the screen), as a [window] what is behind only softens, and
+ * [liquid] (ProCraft Pocket's) it is bent by the rim as well, as Apple's liquid glass.
  */
-data class BarGlass(val shown: Float = 1f, val moved: Offset = Offset.Zero, val pastLeft: Dp = 0.dp, val pastRight: Dp = 0.dp, val window: Boolean = false)
+data class BarGlass(
+    val shown: Float = 1f,
+    val moved: Offset = Offset.Zero,
+    val pastLeft: Dp = 0.dp,
+    val pastRight: Dp = 0.dp,
+    val window: Boolean = false,
+    val liquid: Boolean = false,
+)
 
 /** [rememberFrost] for a bar, as [glass] says. */
 @Composable
@@ -99,7 +120,7 @@ fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
                 px + (x0 + dx - px) * k, py + (y0 + dy - py) * k, px + (x1 + dx - px) * k, py + (y1 + dy - py) * k,
                 corner * k, look.alpha * glass.shown,
             )
-            backdrops.put(key, region, glass.window)
+            backdrops.put(key, region, glass.window, glass.liquid)
         }
     }
     return Modifier.onGloballyPositioned { c ->
@@ -113,6 +134,15 @@ fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
 
 /** The side of a popover its arrow sticks out of, pointing at its button; or none. */
 enum class ArrowSide { TOP, BOTTOM, LEFT, RIGHT, NONE }
+
+/**
+ * A panel shown as a sheet rising from the bottom (ProCraft Pocket): it hangs from no button, so
+ * it has no arrow, and a grabber across its top closes it ([close]) when tapped or pulled down;
+ * without [close] it keeps a grabber of its own.
+ */
+class PopoverSheet(val close: (() -> Unit)?)
+
+val LocalPopoverSheet = staticCompositionLocalOf<PopoverSheet?> { null }
 
 /**
  * A panel hanging from the top bar, with an arrow pointing up at its button: [arrowX] is the tip's
@@ -130,6 +160,9 @@ fun Popover(
     side: ArrowSide = ArrowSide.TOP,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val sheet = LocalPopoverSheet.current
+    val edge = if (sheet != null && side == ArrowSide.TOP) ArrowSide.NONE else side
+    val close = sheet?.close.takeIf { edge == ArrowSide.NONE }
     val backdrops = LocalBackdrops.current.takeIf { fill == null && Pc.PopoverFrost.alpha < 1f }
     val paint = fill ?: if (backdrops != null) Pc.PopoverFrost else Pc.PopoverFill
     val key = remember { Any() }
@@ -151,12 +184,12 @@ fun Popover(
             val at = c.positionInWindow()
             val k = look.scale
             val (arrowH, radius) = with(density) { Pc.ArrowHeight.toPx() to corner.toPx() }
-            val (l, t, r) = Triple(if (side == ArrowSide.LEFT) arrowH else 0f, if (side == ArrowSide.TOP) arrowH else 0f, if (side == ArrowSide.RIGHT) arrowH else 0f)
-            val b = if (side == ArrowSide.BOTTOM) arrowH else 0f
+            val (l, t, r) = Triple(if (edge == ArrowSide.LEFT) arrowH else 0f, if (edge == ArrowSide.TOP) arrowH else 0f, if (edge == ArrowSide.RIGHT) arrowH else 0f)
+            val b = if (edge == ArrowSide.BOTTOM) arrowH else 0f
             body = floatArrayOf(at.x + l * k, at.y + t * k, at.x + (c.size.width - r) * k, at.y + (c.size.height - b) * k, radius * k)
         }
     }
-    val sideways = side == ArrowSide.LEFT || side == ArrowSide.RIGHT
+    val sideways = edge == ArrowSide.LEFT || edge == ArrowSide.RIGHT
     Box(
         modifier.width(if (sideways) width + Pc.ArrowHeight else width).then(frost).drawBehind {
             val arrowH = Pc.ArrowHeight.toPx()
@@ -165,7 +198,7 @@ fun Popover(
             val tip = 2.dp.toPx()
             val radius = CornerRadius(corner.toPx())
             val outline = Path().apply {
-                when (side) {
+                when (edge) {
                     ArrowSide.TOP -> {
                         addRoundRect(RoundRect(0f, arrowH, size.width, size.height, radius))
                         moveTo(at - half - tip, arrowH + 0.5f)
@@ -217,16 +250,47 @@ fun Popover(
             drawPath(outline, paint)
         },
     ) {
-        val inset = when (side) {
+        val inset = when (edge) {
             ArrowSide.TOP -> Modifier.padding(top = Pc.ArrowHeight)
             ArrowSide.BOTTOM -> Modifier.padding(bottom = Pc.ArrowHeight)
             ArrowSide.LEFT -> Modifier.padding(start = Pc.ArrowHeight)
             ArrowSide.RIGHT -> Modifier.padding(end = Pc.ArrowHeight)
             ArrowSide.NONE -> Modifier
         }
-        Column(inset.clip(RoundedCornerShape(corner)), content = content)
+        // what opens from inside the sheet (a menu, a popover) points at its own button again
+        Column(inset.clip(RoundedCornerShape(corner))) {
+            val scope = this
+            androidx.compose.runtime.CompositionLocalProvider(LocalPopoverSheet provides null) { scope.content() }
+        }
+        if (close != null) SheetGrabber(close, Modifier.align(androidx.compose.ui.Alignment.TopCenter))
     }
 }
+
+/** A sheet's grabber: tapped, or pulled down, it [close]s the sheet. */
+@Composable
+private fun SheetGrabber(close: () -> Unit, modifier: Modifier) {
+    val closing by androidx.compose.runtime.rememberUpdatedState(close)
+    Box(
+        modifier.size(SheetGrabberReach, SheetGrabberHeight)
+            .pointerInput(Unit) {
+                var pulled = 0f
+                detectVerticalDragGestures(onDragStart = { pulled = 0f }) { change, dy ->
+                    change.consume()
+                    pulled += dy
+                    if (pulled > SheetPull.toPx()) closing()
+                }
+            }
+            .pointerInput(Unit) { detectTapGestures { closing() } },
+        contentAlignment = androidx.compose.ui.Alignment.Center,
+    ) {
+        Box(Modifier.size(36.dp, 5.dp).clip(RoundedCornerShape(2.5.dp)).drawBehind { drawRect(Pc.Grabber) })
+    }
+}
+
+/** A sheet's grabber: what takes the touch (over the sheet's top middle, clear of its title and buttons), and how far it is pulled down to close. */
+private val SheetGrabberReach = 72.dp
+private val SheetGrabberHeight = 18.dp
+private val SheetPull = 40.dp
 
 /** Where a popover [width] wide goes on a screen [screenWidth] wide: its left edge and arrow tip. */
 data class PopoverPlace(val left: Dp, val arrowX: Dp)

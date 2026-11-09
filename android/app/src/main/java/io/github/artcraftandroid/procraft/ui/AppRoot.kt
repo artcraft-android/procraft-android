@@ -12,6 +12,9 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -28,6 +31,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -48,6 +52,14 @@ fun AppRoot(vm: CanvasViewModel) {
     val interfaceSize = fittedInterfaceSize(vm.plugins, vm.pluginList)
     androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
     ProCraftTheme(interfaceSize) {
+        // a phone keeps its status bar (ProCraft Pocket's), its icons dark over the light interface
+        val view = androidx.compose.ui.platform.LocalView.current
+        val activityWindow = androidx.compose.ui.platform.LocalContext.current.activity()?.window
+        androidx.compose.runtime.SideEffect {
+            if (activityWindow != null) {
+                androidx.core.view.WindowCompat.getInsetsController(activityWindow, view).isAppearanceLightStatusBars = Pc.light
+            }
+        }
         if (vm.screen == Screen.GALLERY) {
             ZoomingGallery(vm, overlay = false)
             // a share from the gallery shows its card there, and a file brought in its own
@@ -99,6 +111,23 @@ fun AppRoot(vm: CanvasViewModel) {
                     target = dropped,
                 ),
             ) {
+                // the bars keep clear of the screen's cutout, and the top bar takes two rows where one is too narrow
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                val cutout = WindowInsets.displayCutout
+                val status = WindowInsets.statusBars
+                val direction = androidx.compose.ui.platform.LocalLayoutDirection.current
+                with(density) {
+                    // a phone's status bar, kept, is as far down as the bars start
+                    Pc.safeTop = maxOf(cutout.getTop(this), status.getTop(this)).toDp()
+                    Pc.safeLeft = cutout.getLeft(this, direction).toDp()
+                    Pc.safeRight = cutout.getRight(this, direction).toDp()
+                }
+                Pc.barRows = Pc.barFit(maxWidth - Pc.safeLeft - Pc.safeRight).rows
+                // a phone's window gets ProCraft Pocket; held sideways, its card goes in two pills across the top
+                Pc.pocket = minOf(maxWidth, maxHeight) < Pc.PocketBelow
+                Pc.pocketSplit = Pc.pocket && maxWidth - Pc.safeLeft - Pc.safeRight >= Pc.PocketSplitFrom
+                val barHeight = Pc.BarHeight
+                androidx.compose.runtime.LaunchedEffect(barHeight) { vm.applyFitInsets() }
                 AndroidView(factory = { CanvasSurfaceView(it, vm) }, modifier = Modifier.fillMaxSize())
                 // the drawing guide is the canvas's: under every bar and panel
                 GuideOverlay(vm)
@@ -114,7 +143,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 // with the interface hidden, a button in the top left brings it back
                 if (barsShown < 1f) {
                     Box(
-                        Modifier.offset(x = 20.dp).size(44.dp).graphicsLayer { alpha = 1f - barsShown }
+                        Modifier.offset(x = Pc.safeLeft + 20.dp, y = Pc.safeTop).size(44.dp).graphicsLayer { alpha = 1f - barsShown }
                             .pointerInput(Unit) { detectTapGestures { if (vm.barsHidden) vm.toggleBars() } },
                         contentAlignment = Alignment.Center,
                     ) {
@@ -147,18 +176,30 @@ fun AppRoot(vm: CanvasViewModel) {
                     val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
                     val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
                     val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
-                    TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
+                    if (Pc.pocket) {
+                        PocketBar(vm, Modifier.align(Alignment.TopStart), barsShown)
+                    } else {
+                        TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
+                    }
                     val sideBar = Pc.sideBarFit(maxHeight)
+                    val sideInset = if (Pc.pocket) Pc.PocketInset else 0.dp
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
                         vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
                             vm.opacityLayer == null &&
-                            (vm.adjustment == null || vm.adjustPencil),
-                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top),
+                            (vm.adjustment == null || vm.adjustPencil) &&
+                            // ProCraft Pocket's sheets rise over where it floats: it steps aside while one is open
+                            !(Pc.pocket && vm.panel != Panel.NONE),
+                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart)
+                            .offset(x = if (vm.rightHanded) -(Pc.safeRight + sideInset) else Pc.safeLeft + sideInset, y = sideBar.top),
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
-                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
+                        if (Pc.pocket) {
+                            PocketSideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
+                        } else {
+                            SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
+                        }
                     }
                 }
                 NoticeBand(vm)
@@ -193,35 +234,72 @@ fun AppRoot(vm: CanvasViewModel) {
                         Panel.ADJUSTMENTS -> 330.dp to 1
                         Panel.NONE -> 0.dp to 0
                     }
-                    val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS
-                    val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth) else maxWidth - Pc.toolCentreFromRight(button, maxWidth)
-                    // panels keep clear of the side bar, on whichever side it is
-                    val clear = if (vm.showSideBar) Pc.SideBarWidth + Pc.PopoverGap else Pc.PopoverGap
-                    val place = if (vm.rightHanded) popoverPlace(width, buttonX, maxWidth, minRight = clear) else popoverPlace(width, buttonX, maxWidth, clear)
-                    val pivot = with(androidx.compose.ui.platform.LocalDensity.current) {
-                        origin + androidx.compose.ui.geometry.Offset((place.left + place.arrowX).toPx(), Pc.BarHeight.toPx())
+                    // in ProCraft Pocket a panel is a sheet rising from the bottom, in the middle
+                    val sheet = Pc.pocket
+                    val gap = if (sheet) Pc.PocketSheetGap else Pc.PopoverGap
+                    // on a screen narrower than the panel (a phone), all of it shrinks to fit
+                    val fit = if (width > 0.dp) ((maxWidth - Pc.safeLeft - Pc.safeRight - gap * 2) / width).coerceIn(0.1f, 1f) else 1f
+                    val place: PopoverPlace
+                    val pivotAt: androidx.compose.ui.geometry.Offset
+                    val origin01: androidx.compose.ui.graphics.TransformOrigin
+                    if (sheet) {
+                        val left = Pc.safeLeft + (maxWidth - Pc.safeLeft - Pc.safeRight - width) / 2
+                        place = PopoverPlace(left, width / 2)
+                        pivotAt = with(density) { androidx.compose.ui.geometry.Offset((left + width / 2).toPx(), (maxHeight - gap).toPx()) }
+                        origin01 = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f)
+                    } else {
+                        val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS
+                        val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth) else maxWidth - Pc.toolCentreFromRight(button, maxWidth)
+                        // panels keep clear of the side bar, on whichever side it is, and of the cutout
+                        val bar = if (vm.showSideBar) Pc.SideBarWidth else 0.dp
+                        val minLeft = Pc.safeLeft + Pc.PopoverGap + if (vm.rightHanded) 0.dp else bar
+                        val minRight = Pc.safeRight + Pc.PopoverGap + if (vm.rightHanded) bar else 0.dp
+                        val fitted = popoverPlace(width * fit, buttonX, maxWidth, minLeft, minRight)
+                        // the arrow stays on the panel's straight edge, clear of its rounded corners
+                        val reach = Pc.PopoverCorner + PanelArrowClear
+                        val arrowX = (fitted.arrowX / fit).coerceIn(reach, (width - reach).coerceAtLeast(reach))
+                        // shrinking about its arrow, its body lands where [fitted] put it
+                        val left = fitted.left - arrowX * (1f - fit)
+                        place = PopoverPlace(left, arrowX)
+                        pivotAt = with(density) { androidx.compose.ui.geometry.Offset((left + arrowX).toPx(), Pc.BarHeight.toPx()) }
+                        origin01 = androidx.compose.ui.graphics.TransformOrigin(if (width > 0.dp) arrowX / width else 0f, 0f)
                     }
-                    val at = Modifier.offset(x = place.left, y = Pc.BarHeight).graphicsLayer {
+                    val pivot = origin + pivotAt
+                    val look = Modifier.graphicsLayer {
                         this.alpha = alpha
-                        scaleX = scale
-                        scaleY = scale
-                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / width, 0f)
+                        scaleX = scale * fit
+                        scaleY = scale * fit
+                        transformOrigin = origin01
                     }.then(if (vm.panel == Panel.NONE) Modifier.takingNoTouches() else Modifier)
-                    ProvidePanelLook(PanelLook(alpha, scale, pivot)) {
-                        when (shown) {
-                            Panel.LAYERS -> if (vm.backgroundPicking) {
-                                ColorPanel(vm, place.arrowX, maxHeight, at, background = true)
-                                // closed any way at all, the colour is kept
-                                androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.endBackgroundPick() } }
-                            } else {
-                                LayersPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - Pc.PopoverGap))
+                    val at = if (sheet) Modifier.offset(x = place.left).then(look) else Modifier.offset(x = place.left, y = Pc.BarHeight).then(look)
+                    // shrunk, a panel can be as much taller as it shows shorter; a sheet reaches up to under the bar
+                    fun tall(rest: Dp) = if (sheet) (maxHeight - Pc.BarHeight - gap * 2) / fit else (maxHeight - Pc.BarHeight - rest) / fit
+                    // the brush library, as tall as it can be where it hangs, is a sheet over the lower part of the screen
+                    val libraryHeight = if (sheet) minOf(tall(25.dp), maxHeight * PocketLibraryShare / fit) else tall(25.dp)
+                    Box(
+                        if (sheet) Modifier.fillMaxSize().padding(bottom = gap) else Modifier,
+                        contentAlignment = Alignment.BottomStart,
+                    ) {
+                        ProvidePanelLook(PanelLook(alpha, scale * fit, pivot)) {
+                            // the colour panel's grabber is its own: pulled, it floats over the canvas
+                            val sheetLook = if (!sheet) null else PopoverSheet(if (shown == Panel.COLOR || (shown == Panel.LAYERS && vm.backgroundPicking)) null else ({ vm.closePanels() }))
+                            CompositionLocalProvider(LocalPopoverSheet provides sheetLook) {
+                                when (shown) {
+                                    Panel.LAYERS -> if (vm.backgroundPicking) {
+                                        ColorPanel(vm, place.arrowX, Pc.BarHeight + 25.dp + tall(25.dp), at, background = true)
+                                        // closed any way at all, the colour is kept
+                                        androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.endBackgroundPick() } }
+                                    } else {
+                                        LayersPanel(vm, place.arrowX, at.heightIn(max = tall(Pc.PopoverGap)))
+                                    }
+                                    Panel.COLOR -> ColorPanel(vm, place.arrowX, Pc.BarHeight + 25.dp + tall(25.dp), at)
+                                    Panel.BRUSHES -> BrushLibrary(vm, place.arrowX, at.height(libraryHeight))
+                                    // ending 25 above the screen's edge, their rows scrolling (as measured)
+                                    Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at.heightIn(max = tall(25.dp)))
+                                    Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = tall(25.dp)))
+                                    Panel.NONE -> Unit
+                                }
                             }
-                            Panel.COLOR -> ColorPanel(vm, place.arrowX, maxHeight, at)
-                            Panel.BRUSHES -> BrushLibrary(vm, place.arrowX, at.height(maxHeight - Pc.BarHeight - 25.dp))
-                            // ending 25 above the screen's edge, their rows scrolling (as measured)
-                            Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
-                            Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
-                            Panel.NONE -> Unit
                         }
                     }
                 }
@@ -436,6 +514,12 @@ internal fun ModelWarningsAlert(vm: CanvasViewModel) {
         alone = true,
     )
 }
+
+/** How far past its rounded corner a panel's arrow stays, so that it sits on the straight edge. */
+private val PanelArrowClear = 6.dp
+
+/** How much of the screen's height ProCraft Pocket's brush library takes, rising from the bottom. */
+private const val PocketLibraryShare = 0.6f
 
 /** The adjustments whose controls are a panel at the bottom of the screen. */
 private val BottomPanels = setOf(

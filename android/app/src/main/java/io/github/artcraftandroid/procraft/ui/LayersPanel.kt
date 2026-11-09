@@ -71,6 +71,7 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
@@ -180,6 +181,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         last[0]?.let { (l, row) -> LayerOptions(open != null, vm, l, row.center.y, onRename = { renaming = l.id }, onDone = { options = null }) }
         PanelHeader(
             "Layers",
+            // in ProCraft Pocket the title's menu opens from the round ••• instead
+            chevron = !Pc.pocket,
             chevronOn = vm.anyPicked,
             onTitle = { titleMenu = !titleMenu },
             menu = {
@@ -191,8 +194,15 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                 }, onDelete = { deletingChosen = true })
             },
         ) {
-            Box(Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { vm.addLayer() }, contentAlignment = Alignment.Center) {
-                Icon(PcIcons.PlusMedium, contentDescription = "New layer", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
+            if (Pc.pocket) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    HeaderRoundButton(PcIcons.More, "Layer options", glyph = 22.dp) { titleMenu = !titleMenu }
+                    HeaderRoundButton(PcIcons.PlusMedium, "New layer", glyph = 34.dp) { vm.addLayer() }
+                }
+            } else {
+                Box(Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { vm.addLayer() }, contentAlignment = Alignment.Center) {
+                    Icon(PcIcons.PlusMedium, contentDescription = "New layer", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
+                }
             }
         }
         // a layer added at the top of what shows comes in there, the rows under it sliding down,
@@ -628,7 +638,7 @@ internal fun PanelHeader(
                 .then(if (onTitle != null) Modifier.clickable(interactionSource = null, indication = null, onClick = onTitle) else Modifier),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(title, color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(title, color = Pc.PanelTitle, fontSize = if (Pc.pocket) 27.sp else 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
             menu()
             if (chevron) {
                 Box(
@@ -643,6 +653,19 @@ internal fun PanelHeader(
         Box(Modifier.align(Alignment.TopEnd).padding(end = end)) { action() }
     }
 }
+
+/** A round button in a panel's title row, as ProCraft Pocket has them: its glyph ([glyph] across) on a disc. */
+@Composable
+internal fun HeaderRoundButton(icon: ImageVector, label: String, glyph: Dp, onClick: () -> Unit) {
+    Box(
+        Modifier.padding(top = 12.dp).size(HeaderButtonSize).clip(CircleShape).background(Pc.HeaderDisc).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = label, tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(glyph))
+    }
+}
+
+private val HeaderButtonSize = 40.dp
 
 /** A row's name, where it always is; locked, a small padlock in the gap before it. */
 @Composable

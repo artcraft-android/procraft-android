@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,6 +36,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -289,17 +291,32 @@ fun TransformToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
     }
 }
 
-/** A floating toolbar's width and its buttons' width. */
-internal data class ToolbarLayout(val width: Dp, val button: Dp)
+/** A floating toolbar's width and its buttons' width; on a phone its buttons [scrolls] across it. */
+internal data class ToolbarLayout(val width: Dp, val button: Dp, val scrolls: Boolean = false)
 
 /**
  * A floating toolbar of [count] buttons on a screen [screenWidth] wide: with room, [roomy]-wide
  * buttons 19 apart inside its padding (as measured in landscape); else across the screen (8 clear
- * of each side, at most 728) with [narrow]-wide buttons spread over it.
+ * of each side, at most 728) with [narrow]-wide buttons spread over it; where even those don't fit
+ * (a phone), buttons as wide as their names, scrolled across.
  */
 internal fun toolbarLayout(screenWidth: Dp, count: Int, roomy: Dp, narrow: Dp): ToolbarLayout {
     val wide = roomy * count + ButtonGap * (count - 1) + 32.dp
-    return if (wide <= screenWidth - 16.dp) ToolbarLayout(wide, roomy) else ToolbarLayout(minOf(ToolbarWidth, screenWidth - 16.dp), narrow)
+    if (wide <= screenWidth - 16.dp) return ToolbarLayout(wide, roomy)
+    val width = minOf(ToolbarWidth, screenWidth - 16.dp)
+    return if (narrow * count + 32.dp <= width) ToolbarLayout(width, narrow) else ToolbarLayout(width, CompactButton, scrolls = true)
+}
+
+/** A phone's toolbar button: room for its name in [CompactLabel]. */
+private val CompactButton = 84.dp
+private val CompactLabel = 11.sp
+
+/** The toolbar's buttons scroll and its ways show their names alone (a phone). */
+private val LocalToolbarCompact = androidx.compose.runtime.staticCompositionLocalOf { false }
+
+/** How far a phone's toolbar buttons are scrolled, for the popovers pointing at them. */
+private object ToolbarScroll {
+    var offset by androidx.compose.runtime.mutableStateOf(0.dp)
 }
 
 /**
@@ -323,18 +340,32 @@ internal fun FloatingToolbar(
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(
-            Modifier.height(34.dp).clip(CircleShape).background(SegmentTrack).border(0.5.dp, SegmentEdge, CircleShape).padding(2.dp),
-            horizontalArrangement = Arrangement.spacedBy(SegmentGap),
-            content = segments,
-        )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { buttons(layout.button) }
+        val compact = layout.scrolls
+        androidx.compose.runtime.CompositionLocalProvider(LocalToolbarCompact provides compact) {
+            Row(
+                (if (compact) Modifier.fillMaxWidth() else Modifier).height(34.dp).clip(CircleShape).background(SegmentTrack)
+                    .border(0.5.dp, SegmentEdge, CircleShape).padding(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (compact) 0.dp else SegmentGap),
+                content = segments,
+            )
+            if (compact) {
+                val scroll = androidx.compose.foundation.rememberScrollState()
+                val density = LocalDensity.current
+                LaunchedEffect(scroll) {
+                    androidx.compose.runtime.snapshotFlow { scroll.value }.collect { ToolbarScroll.offset = with(density) { it.toDp() } }
+                }
+                Row(Modifier.fillMaxWidth().horizontalScroll(scroll)) { buttons(layout.button) }
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { buttons(layout.button) }
+            }
+        }
     }
 }
 
 /** Where button [index] of [count] is centred on a toolbar laid out as [layout], from the screen's left. */
 internal fun toolbarButtonCentre(screenWidth: Dp, layout: ToolbarLayout, index: Int, count: Int): Dp {
     val left = (screenWidth - layout.width) / 2 + 16.dp
+    if (layout.scrolls) return left + layout.button * index + layout.button / 2 - ToolbarScroll.offset
     val gap = (layout.width - 32.dp - layout.button * count) / (count - 1).coerceAtLeast(1)
     return left + (layout.button + gap) * index + layout.button / 2
 }
@@ -342,10 +373,19 @@ internal fun toolbarButtonCentre(screenWidth: Dp, layout: ToolbarLayout, index: 
 /** The top of the toolbar's buttons, from the top of a screen [screenHeight] tall: where popovers point. */
 internal fun toolbarButtonsTop(screenHeight: Dp): Dp = screenHeight - ToolbarBottom - ToolbarHeight + 16.dp + 34.dp
 
-/** One of the four ways: its icon and name, filled blue when chosen. */
+/** One of the four ways: its icon and name, filled blue when chosen; on a phone its name alone, the four sharing the track. */
 @Composable
-internal fun Segment(icon: ImageVector, label: String, selected: Boolean, iconSize: Dp = 26.5.dp, onClick: () -> Unit) {
+internal fun RowScope.Segment(icon: ImageVector, label: String, selected: Boolean, iconSize: Dp = 26.5.dp, onClick: () -> Unit) {
     val tint = if (selected) Color.White else SegmentText
+    if (LocalToolbarCompact.current) {
+        Box(
+            Modifier.weight(1f).height(30.dp).clip(CircleShape).background(if (selected) Pc.Accent else Color.Transparent).tap(onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(label, color = tint, fontSize = 13.sp, letterSpacing = (-0.025).em, maxLines = 1, softWrap = false)
+        }
+        return
+    }
     Row(
         Modifier.height(30.dp).clip(CircleShape).background(if (selected) Pc.Accent else Color.Transparent).tap(onClick)
             .padding(start = 14.dp, end = 20.dp),
@@ -376,18 +416,20 @@ internal fun ToolbarButton(
         active -> Pc.Accent
         else -> ButtonText
     }
+    // on a phone every name fits its button
+    val nameSize = if (LocalToolbarCompact.current && labelSize.value > CompactLabel.value) CompactLabel else labelSize
     Box(Modifier.size(width, ButtonHeight).then(if (enabled) Modifier.tap(onClick) else Modifier)) {
         // icons centred 30 below the top, labels' capitals 50 below it
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.align(Alignment.TopCenter).offset(y = 30.dp - iconSize / 2).requiredSize(iconSize))
         Text(
             label,
             color = if (enabled) ButtonText else ButtonDimmed,
-            fontSize = labelSize,
+            fontSize = nameSize,
             letterSpacing = 0.em,
             maxLines = 1,
             softWrap = false,
             // a long name may run past the button
-            modifier = Modifier.align(Alignment.TopCenter).offset(y = 50.dp - labelSize.value.dp * CAP_MIDDLE).wrapContentWidth(unbounded = true),
+            modifier = Modifier.align(Alignment.TopCenter).offset(y = 50.dp - nameSize.value.dp * CAP_MIDDLE).wrapContentWidth(unbounded = true),
         )
     }
 }

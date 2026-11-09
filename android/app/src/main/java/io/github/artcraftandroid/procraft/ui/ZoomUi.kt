@@ -25,6 +25,7 @@ import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The gallery zooming into an artwork as it opens, and out of it as it closes. Opening, it is drawn
@@ -59,7 +60,8 @@ fun ZoomingGallery(vm: CanvasViewModel, overlay: Boolean) {
         }
         progress.animateTo(1f, if (z.opening) Motion.galleryOpen() else Motion.galleryClose())
         if (!fadesWithZoom) {
-            snapshotFlow { drawn }.first { it }
+            // held no longer than this, drawn or not: the cover takes every touch
+            withTimeoutOrNull(COVER_HOLD_MS) { snapshotFlow { drawn }.first { it } }
             cover.animateTo(0f, Motion.coverFade())
         }
         vm.galleryZoom = null
@@ -116,3 +118,6 @@ private fun Modifier.zoomed(from: Rect, to: Rect): Modifier = graphicsLayer {
 /** How much of the opening zoom's end the gallery fades over, and how much of the closing zoom's start the canvas does. */
 private const val OPEN_FADE = 0.35f
 private const val CLOSE_FADE = 0.3f
+
+/** The longest the grown artwork covers a canvas not yet drawn after the zoom, milliseconds. */
+private const val COVER_HOLD_MS = 5_000L

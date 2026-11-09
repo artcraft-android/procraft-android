@@ -147,7 +147,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /** Frosted panels open over the canvas, for the engine to blur what is behind them. */
-    val backdrops = io.github.artcraftandroid.procraft.ui.Backdrops { regions, windows -> session?.setGlass(regions, windows) }
+    val backdrops = io.github.artcraftandroid.procraft.ui.Backdrops { regions, windows, liquid -> session?.setLiquidGlass(regions, windows, liquid) }
 
     var screen by mutableStateOf(Screen.GALLERY)
         private set

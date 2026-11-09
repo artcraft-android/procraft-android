@@ -7,7 +7,7 @@ struct BackdropUniform {
     v0: vec4<f32>,
     // frost: (corner radius, target width, target height, target pixels per source texel)
     v1: vec4<f32>,
-    // frost: (how much it shows, 0..1, as the panel fades in and out; unused)
+    // frost: (how much it shows, 0..1, as the panel fades in and out; 1 for liquid glass; unused)
     v2: vec4<f32>,
 }
 
@@ -49,7 +49,10 @@ fn vs_frost(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(p.x / u.v1.y * 2.0 - 1.0, 1.0 - p.y / u.v1.z * 2.0, 0.0, 1.0);
 }
 
-// The blurred scene inside the rounded region, its edge smoothed over a pixel.
+// The blurred scene inside the rounded region, its edge smoothed over a pixel. Liquid glass bends
+// it instead, as a lens with a rounded rim would: across a band along the edge each pixel shows
+// what lies further out, the more the nearer the edge (a circular bevel's slope, steep at the rim
+// and flat inside), its colours parting a little there, and the whole a little more vivid.
 @fragment
 fn fs_frost(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let centre = (u.v0.xy + u.v0.zw) * 0.5;
@@ -58,7 +61,31 @@ fn fs_frost(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let q = abs(pos.xy - centre) - (half - vec2<f32>(r));
     let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
     let cover = clamp(0.5 - d, 0.0, 1.0) * clamp(u.v2.x, 0.0, 1.0);
-    let uv = pos.xy / (u.v1.w * vec2<f32>(textureDimensions(source)));
-    let c = textureSampleLevel(source, smp, uv, 0.0);
-    return vec4<f32>(c.rgb * cover, cover);
+    let scale = u.v1.w * vec2<f32>(textureDimensions(source));
+    if u.v2.y <= 0.0 {
+        let c = textureSampleLevel(source, smp, pos.xy / scale, 0.0);
+        return vec4<f32>(c.rgb * cover, cover);
+    }
+    // the way out of the shape: across a corner's arc, or straight out of the nearer side
+    let past = max(q, vec2<f32>(0.0));
+    let side = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), q.x > q.y);
+    let normal = select(side, past / max(length(past), 1e-4), length(past) > 0.0) * sign(pos.xy - centre);
+    let band = clamp(r * LENS_BAND, 1.0, max(min(half.x, half.y), 1.0));
+    let e = 1.0 - clamp(-d / band, 0.0, 1.0);
+    let bend = band * LENS_BEND * (1.0 - sqrt(max(1.0 - e * e, 0.0)));
+    let far = pos.xy + normal * bend * (1.0 + LENS_SPREAD);
+    let red = textureSampleLevel(source, smp, far / scale, 0.0).r;
+    let mid = textureSampleLevel(source, smp, (pos.xy + normal * bend) / scale, 0.0);
+    let blue = textureSampleLevel(source, smp, (pos.xy + normal * bend * (1.0 - LENS_SPREAD)) / scale, 0.0).b;
+    let c = vec3<f32>(red, mid.g, blue);
+    let grey = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let vivid = clamp(mix(vec3<f32>(grey), c, LIQUID_SATURATION), vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(vivid * cover, cover);
 }
+
+// Liquid glass's lens: its band along the rim (of the corner radius), how far the rim reaches out
+// (of the band), how far apart its colours part (of that), and how vivid what shows through is.
+const LENS_BAND: f32 = 0.85;
+const LENS_BEND: f32 = 0.55;
+const LENS_SPREAD: f32 = 0.08;
+const LIQUID_SATURATION: f32 = 1.2;

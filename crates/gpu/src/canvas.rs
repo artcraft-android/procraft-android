@@ -417,7 +417,18 @@ pub struct Backdrop<'a> {
     /// Regions likewise, drawn over those, where the glass is thin: what is behind only softens
     /// (about a tenth of `sigma`).
     pub windows: &'a [[f32; 6]],
+    /// Regions likewise, drawn over the windows, of liquid glass (as Apple's): what is behind
+    /// only softens, and toward the rim it is bent outward, the surroundings drawn in along the
+    /// edge as through a lens.
+    pub liquid: &'a [[f32; 6]],
     pub sigma: f32,
+}
+
+impl Backdrop<'_> {
+    /// Whether there is any glass to draw.
+    pub fn shows(&self) -> bool {
+        !(self.regions.is_empty() && self.windows.is_empty() && self.liquid.is_empty()) && self.sigma > 0.0
+    }
 }
 
 /// Draws a scene for [`Canvas::frost_over`] into the view given (cleared first), at the size
@@ -465,7 +476,8 @@ impl BackdropGpu {
 }
 
 /// The glass [`Canvas::frost_ready`] worked out, `k` times smaller than the target of `size`, drawn
-/// into `pass`: blurred into each region, and the small scene as it is into the windows.
+/// into `pass`: blurred into each region, the small scene as it is into the windows, and bent by
+/// the rim into the liquid regions.
 #[allow(clippy::too_many_arguments)]
 fn draw_glass(
     pass: &mut wgpu::RenderPass<'_>,
@@ -479,7 +491,12 @@ fn draw_glass(
 ) {
     let (tw, th) = (size.0.max(1) as f32, size.1.max(1) as f32);
     pass.set_pipeline(frost);
-    for (bind, regions) in [(&small.binds[2], backdrop.regions), (&small.binds[0], backdrop.windows)] {
+    let layers = [
+        (&small.binds[2], backdrop.regions, 0.0),
+        (&small.binds[0], backdrop.windows, 0.0),
+        (&small.binds[0], backdrop.liquid, 1.0),
+    ];
+    for (bind, regions, liquid) in layers {
         pass.set_bind_group(0, bind, &[]);
         for &[x0, y0, x1, y1, corner, alpha] in regions {
             let usable = [x0, y0, x1, y1, corner, alpha].iter().all(|v| v.is_finite());
@@ -489,7 +506,7 @@ fn draw_glass(
             let offset = uniforms.push(&BackdropUniform {
                 v0: [x0, y0, x1, y1],
                 v1: [corner, tw, th, k],
-                v2: [alpha.min(1.0), 0.0, 0.0, 0.0],
+                v2: [alpha.min(1.0), liquid, 0.0, 0.0],
             });
             pass.set_bind_group(1, uniform_bind, &[offset]);
             pass.draw(0..6, 0..1);
@@ -4549,8 +4566,7 @@ impl Canvas {
         if let Some(target) = target {
             // what the glass shows is worked out first: drawn in the display's own pass, a tiled
             // GPU needn't write the whole target out and read it back for a pass of its own
-            let shows = |b: &Backdrop<'_>| !(b.regions.is_empty() && b.windows.is_empty()) && b.sigma > 0.0;
-            let backdrop = target.backdrop.filter(shows);
+            let backdrop = target.backdrop.filter(Backdrop::shows);
             let glass = backdrop.map(|b| (b, self.frost_ready(device, &mut encoder, &mut uniforms, &target, b, None)));
             self.display(device, &mut encoder, &mut uniforms, &target, predicted, glass);
         }
@@ -6979,7 +6995,7 @@ impl Canvas {
         backdrop: Backdrop<'_>,
         scene: SmallScene<'_>,
     ) {
-        if (backdrop.regions.is_empty() && backdrop.windows.is_empty()) || backdrop.sigma <= 0.0 {
+        if !backdrop.shows() {
             return;
         }
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frost") });
