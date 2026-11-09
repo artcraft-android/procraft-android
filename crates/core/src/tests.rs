@@ -5526,6 +5526,119 @@ fn keys_a_brush_file_has_that_nothing_draws_yet_are_kept_and_written_again() {
     }
 }
 
+/// The window pixel (`x`, `y`) as it is shown (the canvas through the view, a veil over it).
+fn shown(s: &CanvasSession, x: f32, y: f32) -> [u8; 3] {
+    let p = s.pick(x, y, 1).unwrap();
+    [p.pixels[0], p.pixels[1], p.pixels[2]]
+}
+
+/// The dropped colour's spreading as it is `seconds` in, given to the canvas as a frame does.
+fn spread_to(s: &CanvasSession, seconds: f32) {
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let hole = st.reveal.as_ref().unwrap().hole_after(seconds).unwrap();
+    st.canvas.as_mut().unwrap().veil_hole(&hole);
+}
+
+#[test]
+fn a_dropped_colour_is_one_undo_step_at_once_and_spreads_in_from_where_it_landed() {
+    let Some(s) = session(100, 100) else { return };
+    // red dropped on the white canvas fills all of it, made at once: the composite has it
+    assert!(s.pour_drop(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    s.pour_end(true, None);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    assert!(s.shared.lock().canvas.as_ref().unwrap().veil_rect().is_some());
+    // shown through a hole ten points round where it landed (twenty window pixels here), the
+    // canvas as it was round that
+    spread_to(&s, 0.0);
+    assert_eq!(shown(&s, 20.0, 50.0), [255, 0, 0]);
+    assert_eq!(shown(&s, 20.0, 66.0), [255, 0, 0]);
+    assert_eq!(shown(&s, 20.0, 75.0), [255, 255, 255]);
+    assert_eq!(shown(&s, 80.0, 50.0), [255, 255, 255]);
+    // near its end the hole is past the whole canvas
+    spread_to(&s, 0.499);
+    for (x, y) in [(1.0, 1.0), (99.0, 1.0), (1.0, 99.0), (99.0, 99.0), (80.0, 50.0)] {
+        assert_eq!(shown(&s, x, y), [255, 0, 0], "({x}, {y})");
+    }
+    // undone while it spreads: the undo isn't held up, and the spreading is over
+    spread_to(&s, 0.0);
+    assert!(s.undo().is_some());
+    assert!(s.shared.lock().reveal.is_none());
+    assert!(s.shared.lock().canvas.as_ref().unwrap().veil_rect().is_none());
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(shown(&s, 80.0, 50.0), [255, 255, 255]);
+    // and redone, all of it at once
+    assert!(s.redo().is_some());
+    assert_eq!(shown(&s, 80.0, 50.0), [255, 0, 0]);
+}
+
+#[test]
+fn a_dropped_colour_s_veil_is_the_canvas_before_it_while_its_threshold_slides() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    // a line down the middle: the left half fills
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, -10.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
+    assert!(s.pour_drop(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    spread_to(&s, 0.0);
+    assert_eq!(shown(&s, 20.0, 50.0), [255, 0, 0]);
+    assert_eq!(shown(&s, 20.0, 85.0), [255, 255, 255]);
+    // slid down and up again, what the hole doesn't show yet stays as it was
+    s.pour_threshold(0.0);
+    s.pour_threshold(0.7);
+    assert_eq!(shown(&s, 20.0, 50.0), [255, 0, 0]);
+    assert_eq!(shown(&s, 20.0, 85.0), [255, 255, 255]);
+    s.pour_end(true, None);
+    assert_eq!(pixel(&s, 20, 85), [255, 0, 0, 255]);
+}
+
+#[test]
+fn a_large_canvas_zoomed_out_is_veiled_at_the_size_it_is_shown() {
+    // 400 pixels shown in 100: the veil is kept a quarter the size, and still shows right
+    let Some(s) = session(400, 100) else { return };
+    assert!(s.pour_drop(20.0, 50.0, 0.0, 0.0, 1.0, 0.5));
+    s.pour_end(true, None);
+    spread_to(&s, 0.0);
+    assert_eq!(shown(&s, 20.0, 50.0), [0, 0, 255]);
+    assert_eq!(shown(&s, 80.0, 50.0), [255, 255, 255]);
+    assert_eq!(shown(&s, 50.0, 90.0), [255, 255, 255]);
+    spread_to(&s, 0.499);
+    assert_eq!(shown(&s, 80.0, 50.0), [0, 0, 255]);
+}
+
+#[test]
+fn continue_filling_and_reduce_motion_show_a_fill_at_once() {
+    let Some(s) = session(100, 100) else { return };
+    let spreading = |s: &CanvasSession| {
+        let st = s.shared.lock();
+        st.reveal.is_some() || st.canvas.as_ref().unwrap().veil_rect().is_some()
+    };
+    // Continue filling's touches (and Recolor) pour, not drop: no spreading
+    assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    s.pour_end(true, None);
+    assert!(!spreading(&s));
+    // with Reduce Motion a dropped colour shows at once too
+    s.set_reduce_motion(true);
+    assert!(s.pour_drop(20.0, 50.0, 0.0, 0.0, 1.0, 0.5));
+    s.pour_end(true, None);
+    assert!(!spreading(&s));
+    assert_eq!(shown(&s, 80.0, 50.0), [0, 0, 255]);
+    s.set_reduce_motion(false);
+    assert!(s.pour_drop(20.0, 50.0, 0.0, 1.0, 0.0, 0.5));
+    s.pour_end(true, None);
+    assert!(spreading(&s));
+    // a stroke begun while it spreads has all of the fill shown first
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 10.0, 0.0)]);
+    assert!(!spreading(&s));
+    s.stroke_end(vec![sample(12.0, 10.0, 20.0)]);
+    // a fill begun while one spreads ends that one
+    assert!(s.pour_drop(20.0, 50.0, 1.0, 1.0, 0.0, 0.5));
+    assert!(s.pour_begin(80.0, 50.0, 1.0, 0.0, 1.0, 0.5));
+    assert!(!spreading(&s));
+    s.pour_end(true, None);
+}
+
 #[test]
 fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     let Some(s) = session(100, 100) else { return };

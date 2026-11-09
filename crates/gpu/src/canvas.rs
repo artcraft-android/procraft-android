@@ -810,6 +810,34 @@ impl DisplayUniform {
     }
 }
 
+/// The most points a veil's hole has (see [`Canvas::veil_hole`]).
+pub const VEIL_POINTS: usize = 64;
+
+/// What the veil's shader is told: its rectangle on the canvas (left, top, width, height), the
+/// colour round the canvas as the target takes it and how many points the hole has, and the
+/// hole's outline (two points an entry), canvas pixels.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct VeilUniform {
+    rect: [f32; 4],
+    surround: [f32; 4],
+    points: [[f32; 4]; VEIL_POINTS / 2],
+}
+
+/// Part of the composite as it was before a change, drawn over the canvas but for a hole that
+/// grows: the change shown spreading in from a point (see [`Canvas::veil_begin`]).
+struct Veil {
+    rect: IRect,
+    /// Its picture, as it is shown smoothed or crisp (see [`Target::crisp_from`]).
+    _texture: wgpu::Texture,
+    bind: wgpu::BindGroup,
+    crisp: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+    uniform_bind: wgpu::BindGroup,
+    /// The hole this frame, canvas pixels.
+    hole: Vec<[f32; 2]>,
+}
+
 /// An encoded colour moved by a linear-light matrix (clipped), as the display shader does.
 fn convert_colour(c: [f32; 3], m: Option<[[f32; 3]; 3]>) -> [f32; 3] {
     let Some(m) = m else { return c };
@@ -1699,6 +1727,10 @@ pub(crate) struct Pipelines {
     overlay_module: wgpu::ShaderModule,
     /// Frosted panels: the blur passes and the regions drawn.
     backdrop_module: wgpu::ShaderModule,
+    /// A veil over the canvas (see [`Canvas::veil_begin`]): its uniform, and the display's
+    /// groups with it.
+    veil_layout: wgpu::BindGroupLayout,
+    veil_pipeline_layout: wgpu::PipelineLayout,
 }
 
 /// A canvas's own pipelines for drawing to a window, made for each target format as it comes.
@@ -1711,6 +1743,7 @@ struct ScreenPipelines {
     selection: HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>,
     blur: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     frost: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    veil: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
 }
 
 pub struct Canvas {
@@ -1817,6 +1850,9 @@ pub struct Canvas {
     smudge_untold: bool,
     /// A layer's pixels set aside by [`Canvas::hold_layer`].
     held: Option<Snapshot>,
+    /// Part of the composite kept as it was, drawn over the canvas but for a hole (see
+    /// [`Canvas::veil_begin`]).
+    veil: Option<Veil>,
     /// Counts the undo steps ever made, so that a change since some moment shows.
     steps_made: u64,
     /// The steps made when [`Canvas::mark_steps`] was last done.
@@ -2130,6 +2166,7 @@ impl Canvas {
             smudge_refused: false,
             smudge_untold: false,
             held: None,
+            veil: None,
             steps_made: 0,
             mark: None,
             next_name: None,
@@ -2836,6 +2873,98 @@ impl Canvas {
     pub fn release_layer(&mut self, keep: bool, before: Option<Document>) {
         self.ops.push(Op::Release { keep, before: before.map(Box::new) });
         self.invalidate();
+    }
+
+    /// Keeps the composite inside `rect` as it is now (copied at once, before any work still
+    /// queued), to show over the canvas but for a hole given each frame ([`Canvas::veil_hole`]),
+    /// until [`Canvas::veil_end`]: a change queued after this then shows only through the hole.
+    /// Kept at `scale` target pixels to a canvas pixel where that is under one (box-filtered), so
+    /// a large canvas zoomed out keeps no more than the screen shows. A veil already kept goes;
+    /// nothing is kept for a rectangle off the canvas.
+    pub fn veil_begin(&mut self, gpu: &Gpu, rect: IRect, scale: f32) {
+        self.veil = None;
+        let rect = rect.intersect(self.full());
+        if rect.is_empty() {
+            return;
+        }
+        let device = &gpu.device;
+        let scale = if scale.is_finite() { scale.clamp(1e-3, 1.0) } else { 1.0 };
+        let (rw, rh) = (rect.width(), rect.height());
+        let fit = |side: u32| ((side as f32 * scale).ceil() as u32).clamp(1, side);
+        let (w, h) = (fit(rw), fit(rh));
+        let texture = texture(device, "veil", w, h, LAYER_FORMAT);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("veil") });
+        if (w, h) == (rw, rh) {
+            encoder.copy_texture_to_texture(
+                copy_at(&self.composite, rect.x0, rect.y0),
+                copy_at(&texture, 0, 0),
+                extent(rw, rh),
+            );
+        } else {
+            // box-filtered down, as a thumbnail is
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind = sampled_bind(device, &self.pipelines.sampled_layout, &self.composite_view, &self.sampler);
+            let mut data = UniformData::default();
+            let (cw, ch) = (self.width.max(1) as f32, self.height.max(1) as f32);
+            let (fw, fh) = (rw as f32, rh as f32);
+            let offset = data.push(&DisplayUniform::new(
+                [w as f32, h as f32, fw / w as f32, fh / h as f32],
+                [rect.x0 as f32 / cw, rect.y0 as f32 / ch, fw / cw, fh / ch],
+                None,
+                false,
+            ));
+            {
+                let mut pass = render_pass(&mut encoder, "veil", &view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+                pass.set_pipeline(&self.pipelines.thumb);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+                pass.draw(0..3, 0..1);
+            }
+            self.write_uniforms(gpu, &data);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let crisp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("veil crisp"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let layout = &self.pipelines.sampled_layout;
+        let bind = sampled_bind(device, layout, &view, &self.sampler);
+        let crisp = sampled_bind(device, layout, &view, &crisp_sampler);
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("veil"),
+            size: size_of::<VeilUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("veil"),
+            layout: &self.pipelines.veil_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
+        });
+        self.veil = Some(Veil { rect, _texture: texture, bind, crisp, uniform, uniform_bind, hole: Vec::new() });
+    }
+
+    /// The veil's hole from now on: a closed outline in canvas pixels, its first
+    /// [`VEIL_POINTS`] points (fewer than three: no hole). Where the hole is the canvas shows as
+    /// it is now.
+    pub fn veil_hole(&mut self, hole: &[[f32; 2]]) {
+        if let Some(veil) = self.veil.as_mut() {
+            veil.hole.clear();
+            veil.hole.extend(hole.iter().take(VEIL_POINTS).filter(|p| p[0].is_finite() && p[1].is_finite()));
+        }
+    }
+
+    /// The veil goes: the canvas shows as it is.
+    pub fn veil_end(&mut self) {
+        self.veil = None;
+    }
+
+    /// The rectangle a veil is kept for, while there is one.
+    pub fn veil_rect(&self) -> Option<IRect> {
+        self.veil.as_ref().map(|v| v.rect)
     }
 
     /// Replaces a layer's pixels inside `rect` with `part` (premultiplied RGBA8, the rectangle's
@@ -3759,7 +3888,8 @@ impl Canvas {
         // remaking the caches composites the layers once more
         let cached = if self.cache_composites { doc.layers().len() + 2 } else { 0 };
         let worked: usize = ops.iter().map(|op| self.slots_for(op, &ops)).sum();
-        let slots = (worked + doc.layers().len() + 4 + frosted + cached) as u64;
+        let veiled = usize::from(self.veil.is_some());
+        let slots = (worked + doc.layers().len() + 4 + veiled + frosted + cached) as u64;
         if slots > self.uniform_slots {
             self.uniform_slots = slots.next_power_of_two();
             let (buffer, bind) = uniforms(device, &self.pipelines.uniform_layout, self.uniform_slots);
@@ -4559,6 +4689,26 @@ impl Canvas {
             self.dirty = IRect::EMPTY;
         }
 
+        // the veil's rectangle, the colour round the canvas and its hole, for its shader
+        if let (Some(target), Some(veil)) = (target.as_ref(), self.veil.as_ref()) {
+            let srgb = target.format.is_srgb();
+            let around = target.surround.map(|c| if srgb { srgb_to_linear(c) } else { c });
+            let mut points = [[0.0; 4]; VEIL_POINTS / 2];
+            for (entry, pair) in points.iter_mut().zip(veil.hole.chunks(2)) {
+                match pair {
+                    [a, b] => *entry = [a[0], a[1], b[0], b[1]],
+                    [a] => *entry = [a[0], a[1], 0.0, 0.0],
+                    _ => {}
+                }
+            }
+            let r = veil.rect;
+            let uniform = VeilUniform {
+                rect: [r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32],
+                surround: [around[0], around[1], around[2], veil.hole.len() as f32],
+                points,
+            };
+            gpu.queue.write_buffer(&veil.uniform, 0, bytemuck::bytes_of(&uniform));
+        }
         if let Some(target) = target {
             // what the glass shows is worked out first: drawn in the display's own pass, a tiled
             // GPU needn't write the whole target out and read it back for a pass of its own
@@ -6785,6 +6935,7 @@ impl Canvas {
             overlay_module,
             stamp_layout,
             selection_module,
+            veil_pipeline_layout,
             ..
         } = &*self.pipelines;
         // the images a predicted tail reads, if they are a brush file's own
@@ -6796,6 +6947,7 @@ impl Canvas {
             overlay,
             selection: selection_pipelines,
             frost,
+            veil: veil_pipelines,
             ..
         } = &mut self.screen;
         let pipeline = display.entry(target.format).or_insert_with(|| {
@@ -6855,6 +7007,37 @@ impl Canvas {
         pass.set_bind_group(1, &self.uniform_bind, &[offset]);
         pass.set_bind_group(2, target.lut.map_or(&self.identity_lut, |l| &l.bind), &[]);
         pass.draw(0..6, 0..1);
+
+        // part of the canvas as it was, over it but for its hole
+        if let Some(veil) = self.veil.as_ref() {
+            let pipeline = veil_pipelines.entry(target.format).or_insert_with(|| {
+                blended_pipeline(
+                    device,
+                    veil_pipeline_layout,
+                    display_module,
+                    "veil",
+                    ("vs_display", "fs_veil"),
+                    target.format,
+                    Some(PREMULTIPLIED_OVER),
+                )
+            });
+            let r = veil.rect;
+            let (x, y, w, h) = (r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32);
+            let unit_to_rect = Affine { a: w, b: 0.0, c: 0.0, d: h, e: x, f: y };
+            let m = unit_to_rect.then(target.to_screen).then(to_clip);
+            let offset = uniforms.push(&DisplayUniform::new(
+                [m.a, m.b, m.c, m.d],
+                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
+                target.convert,
+                target.lut.is_some(),
+            ));
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, if crisp { &veil.crisp } else { &veil.bind }, &[]);
+            pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+            pass.set_bind_group(2, target.lut.map_or(&self.identity_lut, |l| &l.bind), &[]);
+            pass.set_bind_group(3, &veil.uniform_bind, &[]);
+            pass.draw(0..6, 0..1);
+        }
 
         // the selection: bands over what is not selected, or what is selected tinted or covered
         if let (Some(look), Some(selection), Some(inverse)) =
@@ -7992,6 +8175,21 @@ impl Pipelines {
         });
         let display_lut_layout =
             layout("display with a table", &[Some(&sampled_layout), Some(&uniform_layout), Some(&lut_layout)]);
+        let veil_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("veil"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(size_of::<VeilUniform>() as u64),
+                },
+                count: None,
+            }],
+        });
+        let veil_pipeline_layout =
+            layout("veil", &[Some(&sampled_layout), Some(&uniform_layout), Some(&lut_layout), Some(&veil_layout)]);
         // a transform's copy, its sampler and the selection
         let transform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("transform source"),
@@ -8395,6 +8593,8 @@ impl Pipelines {
             selection_module,
 
             backdrop_module,
+            veil_layout,
+            veil_pipeline_layout,
         }
     }
 }

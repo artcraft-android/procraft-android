@@ -553,6 +553,8 @@ impl App {
         let size = screen.window.inner_size();
         let scale = screen.window.scale_factor() as f32;
         session.set_display_scale(scale);
+        // the system's ask for less motion: a dropped colour's fill shows at once
+        session.set_reduce_motion(colour_drop::reduce_motion());
         // until it shows, a driver crashing counts against the backend (unless a canvas has drawn
         // on it before)
         startup::canvas_opening();

@@ -22,6 +22,7 @@ mod brushes;
 mod bundled;
 mod clipboard;
 mod colour;
+mod colour_blob;
 mod colour_drag;
 mod crop;
 mod crop_edit;
@@ -62,6 +63,7 @@ mod reference_view;
 mod reference_window;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod render;
+mod reveal;
 mod scene3d;
 mod selection;
 mod studio;
@@ -108,6 +110,7 @@ pub use brushes::{BrushInfo, BrushSetInfo, RecentBrush};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
 };
+pub use colour_blob::{BlobOutline, BlobShape, ColourBlob};
 pub use colour_drag::{ColourDrag, DragStep};
 pub use crop_edit::CropShown;
 pub use device::keep_device;
@@ -415,6 +418,10 @@ pub(crate) struct State {
     pub(crate) text_steps: Vec<(u64, procraft_engine::document::LayerId)>,
     /// A colour dropped on the canvas whose threshold can still change.
     pub(crate) pour: Option<pour::Pour>,
+    /// A dropped colour's fill spreading in, while it does.
+    pub(crate) reveal: Option<reveal::Reveal>,
+    /// The system asks for less motion: a dropped colour's fill shows at once.
+    pub(crate) reduce_motion: bool,
     /// Recolor, while it is on.
     pub(crate) recolor: Option<recolor::Recolor>,
     /// The library as the user has it, and as it ships.
@@ -1251,6 +1258,8 @@ impl CanvasSession {
             text_drawn: None,
             text_steps: Vec::new(),
             pour: None,
+            reveal: None,
+            reduce_motion: false,
             recolor: None,
             crop_undo: None,
             selection_visibility: 0.25,
@@ -1449,6 +1458,8 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // a fill still spreading in shows all of itself before anything is drawn over it
+        st.end_reveal();
         // the graphics stopped (perhaps while the app was away, its notice long gone): nothing
         // drawn will show, so each stroke tells it again
         if st.gpu.as_ref().is_some_and(Gpu::is_lost) {
@@ -1709,6 +1720,12 @@ impl CanvasSession {
         self.shared.lock().grey_view
     }
 
+    /// Whether the system asks for less motion (Reduce Motion, animations off): a dropped colour's
+    /// fill then shows at once instead of spreading in.
+    pub fn set_reduce_motion(&self, reduce: bool) {
+        self.shared.lock().reduce_motion = reduce;
+    }
+
     /// How many window pixels make one interface point (the screen's density).
     pub fn set_display_scale(&self, pixels_per_point: f32) {
         if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
@@ -1923,6 +1940,7 @@ impl CanvasSession {
     /// Undoes the last step; returns what it was called, if it was named.
     pub fn undo(&self) -> Option<String> {
         self.await_pour();
+        self.shared.lock().end_reveal();
         // a picture being placed on a model goes first
         if self.model_picture_box().is_some() {
             self.model_picture_end(false);
@@ -1960,6 +1978,7 @@ impl CanvasSession {
     /// Redoes the last step undone; returns what it was called, if it was named.
     pub fn redo(&self) -> Option<String> {
         self.await_pour();
+        self.shared.lock().end_reveal();
         if let Some(name) = self.text_box_redo() {
             return Some(name);
         }

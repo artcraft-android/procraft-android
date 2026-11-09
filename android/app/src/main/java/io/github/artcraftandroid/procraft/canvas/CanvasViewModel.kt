@@ -2512,6 +2512,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.setBrushScaling(brushOnScreen)
         s.setLightInterface(lightInterface)
         s.setInterfaceSize(interfaceShown)
+        // the system's animations off: a dropped colour's fill shows at once
+        s.setReduceMotion(!android.animation.ValueAnimator.areAnimatorsEnabled())
         applyPlugins(s)
         // as it was left, or fitted
         if (!orientationMemory) s.forgetSavedView()
@@ -6408,6 +6410,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var dropDot by mutableStateOf<Pair<Offset, Int>?>(null)
         private set
 
+    /** The dragged colour as it is drawn (the core's spring), while it is dragged. */
+    var dropBlob by mutableStateOf<io.github.artcraftandroid.procraft.core.ColourBlob?>(null)
+        private set
+
+    /** The colour button's centre and the side bar, where they are (window pixels): over the bars a dragged colour shrinks the further it is from the button. */
+    var dropButton: Offset? = null
+    var sideBarBounds: androidx.compose.ui.geometry.Rect? = null
+
     /** The threshold the colour fills with (0..1), kept from one drop to the next. */
     var dropThreshold by mutableFloatStateOf(transformPrefs.getFloat(DROP_THRESHOLD, 0.5f))
         private set
@@ -6432,9 +6442,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * A colour starts being dragged from the colour button, or [swatch] from the palette, at
-     * uptime [ms], by a pen or not ([pen]).
+     * uptime [ms], by a pen or not ([pen]), pulled out [from] the button's centre or the swatch.
      */
-    fun dropDragStart(at: Offset, swatch: Int? = null, pen: Boolean = false, ms: Long = android.os.SystemClock.uptimeMillis()) {
+    fun dropDragStart(at: Offset, swatch: Int? = null, pen: Boolean = false, ms: Long = android.os.SystemClock.uptimeMillis(), from: Offset = at) {
         if (swatch == null) closePanels()
         dropBandTimer?.cancel()
         dropSwatch = swatch
@@ -6443,6 +6453,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropPoured = false
         dropPourRefused = false
         colourDrag = io.github.artcraftandroid.procraft.core.ColourDrag(at.x / density, at.y / density, ms.toDouble(), pen, dropThreshold)
+        // with the system's animations off it neither stretches nor wobbles
+        val still = !android.animation.ValueAnimator.areAnimatorsEnabled()
+        dropBlob = io.github.artcraftandroid.procraft.core.ColourBlob(from.x / density, from.y / density, swatch == null, pen, still, ms.toDouble())
+        blobTo(at)
+    }
+
+    /** The drawn colour goes after window point [p]. */
+    private fun blobTo(p: Offset) {
+        val button = dropButton ?: p
+        val overBar = p.y <= io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density || sideBarBounds?.contains(p) == true
+        dropBlob?.pointTo(p.x / density, p.y / density, overBar, button.x / density, button.y / density)
     }
 
     /** The dragged colour's pointer moved to [at] at uptime [ms]: the dot follows, or, resting, the threshold slides. */
@@ -6451,6 +6472,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val step = drag.moved(at.x / density, at.y / density, ms.toDouble())
         val dot = Offset(step.dotX * density, step.dotY * density)
         dropDot = dropDot?.let { dot to it.second }
+        blobTo(dot)
         if (!step.slid) return
         if (dropPoured) {
             pourThreshold(step.threshold)
@@ -6494,6 +6516,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun dropDragEnd(at: Offset?) {
         val step = colourDrag?.now()
         colourDrag = null
+        dropBlob = null
         // come to rest, it fills where it rests (already, if its threshold was slid)
         val rested = step?.takeIf { it.resting }?.let { Offset(it.dotX * density, it.dotY * density) }
         if (dropPoured) {
@@ -6552,7 +6575,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val c = dropSwatch ?: colorRgb()
         val t = dropThreshold
-        return pourNow { s.pourBegin(p.x, p.y, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t) }
+        // made at once, and shown spreading in from where it landed
+        return pourNow { s.pourDrop(p.x, p.y, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t) }
     }
 
     /** Continue filling: the colour and threshold the canvas's (shared) touches fill with; none when not filling. */

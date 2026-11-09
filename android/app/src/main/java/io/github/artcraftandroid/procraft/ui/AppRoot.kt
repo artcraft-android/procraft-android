@@ -20,7 +20,10 @@ import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -158,7 +161,15 @@ fun AppRoot(vm: CanvasViewModel) {
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
-                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
+                        // where it is, for a dragged colour over it
+                        DisposableEffect(Unit) { onDispose { vm.sideBarBounds = null } }
+                        SideBar(
+                            vm,
+                            aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInWindow() },
+                            right = vm.rightHanded,
+                            trackHeight = sideBar.track,
+                            shown = barsShown,
+                        )
                     }
                 }
                 NoticeBand(vm)

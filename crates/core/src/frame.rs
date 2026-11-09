@@ -125,6 +125,18 @@ impl State {
                 windows: &self.backdrop_windows,
                 sigma: BACKDROP_SIGMA_PT * s,
             });
+            // a dropped colour's fill spreading in: the canvas as it was over it, but for a hole
+            match self.reveal.as_ref().map(|r| r.hole_at(Instant::now())) {
+                Some(Some(hole)) => {
+                    canvas.veil_hole(&hole);
+                    self.needs_frame = true;
+                }
+                Some(None) => {
+                    self.reveal = None;
+                    canvas.veil_end();
+                }
+                None => {}
+            }
             canvas.render(
                 gpu,
                 &mut self.doc,
