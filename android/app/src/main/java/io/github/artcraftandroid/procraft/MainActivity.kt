@@ -53,7 +53,13 @@ class MainActivity : ComponentActivity() {
         io.github.artcraftandroid.procraft.core.setGpuRecordFolder(filesDir.path)
         // made here, not inside the flow's read-only snapshot, where its setup can't write state
         val model = vm
-        setContent { AppRoot(model) }
+        // laid out left to right in every language, as the original is: a right-to-left one
+        // (Arabic, Hebrew) would otherwise mirror the bars
+        setContent {
+            androidx.compose.runtime.CompositionLocalProvider(
+                androidx.compose.ui.platform.LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Ltr,
+            ) { AppRoot(model) }
+        }
         lifecycleScope.launch { snapshotFlow { model.projectCanvas }.collect { showProjection() } }
         importOpened(intent)
     }

@@ -61,7 +61,11 @@ class SettingsActivity : ComponentActivity() {
         setContent {
             val size = fittedInterfaceSize(plugins)
             val density = LocalDensity.current
-            CompositionLocalProvider(LocalDensity provides Density(density.density * size, density.fontScale)) {
+            // left to right in every language, as the app is
+            CompositionLocalProvider(
+                LocalDensity provides Density(density.density * size, density.fontScale),
+                androidx.compose.ui.platform.LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Ltr,
+            ) {
                 SettingsScreen(prefs) { finish() }
             }
         }
