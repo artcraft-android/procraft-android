@@ -94,7 +94,16 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
             let mut st = shared.lock();
             // a device lost draws nothing again: there is only its stopping to wait for
             while !st.stop && (!st.needs_frame || st.gpu.as_ref().is_some_and(Gpu::is_lost)) {
-                shared.wake.wait(&mut st);
+                // a frame due later (the selection's bands drifting) comes then, unless asked sooner
+                match st.frame_due.filter(|_| !st.gpu.as_ref().is_some_and(Gpu::is_lost)) {
+                    Some(at) => {
+                        if shared.wake.wait_until(&mut st, at).timed_out() {
+                            st.frame_due = None;
+                            st.needs_frame = true;
+                        }
+                    }
+                    None => shared.wake.wait(&mut st),
+                }
             }
             if st.stop {
                 break;

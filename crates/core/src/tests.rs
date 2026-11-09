@@ -10630,3 +10630,43 @@ fn a_crop_undone_and_redone_after_a_save_saves_every_layer_at_its_size() {
     assert_eq!(painted_per_layer(&reopened_at(&dir, &gpu)), cropped);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_selections_bands_ask_for_a_frame_when_they_have_moved_a_pixel_not_every_frame() {
+    let Some(s) = session(200, 300) else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    s.set_display_scale(3.0);
+    let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+    let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
+        label: Some("window"),
+        size: procraft_gpu::wgpu::Extent3d { width: 300, height: 300, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: procraft_gpu::wgpu::TextureDimension::D2,
+        format,
+        usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let started = std::time::Instant::now();
+    let draw = || {
+        // caches remade first: those frames are wanted at once
+        let mut after = s.draw(&view, format, (300, 300), procraft_engine::profile::Profile::Srgb, started);
+        for _ in 0..50 {
+            if after != Some(std::time::Duration::ZERO) {
+                break;
+            }
+            after = s.draw(&view, format, (300, 300), procraft_engine::profile::Profile::Srgb, started);
+        }
+        after
+    };
+    // nothing moving: no frame wanted
+    assert_eq!(draw(), None);
+    // the bands drift 10 points a second: on a 3x screen a pixel every 1/30 s
+    s.select_shape(false, 40.0, 40.0, 120.0, 120.0, crate::SelectionJoin::Add);
+    let after = draw().expect("the bands keep drawing");
+    assert!(after > std::time::Duration::from_millis(20) && after <= std::time::Duration::from_millis(34), "{after:?}");
+    // tinted instead, nothing drifts
+    s.set_selection_display(crate::selection::SelectionDisplay::Tint);
+    assert_eq!(draw(), None);
+}

@@ -368,7 +368,7 @@ impl Screen {
             | wgpu::CurrentSurfaceTexture::Validation => return None,
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let canvas_soon = session.is_some_and(|s| s.draw(&view, format, size, screen, started));
+        let canvas_after = session.and_then(|s| s.draw(&view, format, size, screen, started));
 
         let (device, queue) = (&self.gpu.device, &self.gpu.queue);
         let jobs = self.egui.egui_ctx().tessellate(shapes, pixels_per_point);
@@ -413,7 +413,10 @@ impl Screen {
         if crate::startup::canvas_awaited() {
             crate::startup::canvas_shown(session.map(|s| s.frames_drawn() > 0));
         }
-        if canvas_soon { Some(Duration::ZERO) } else { interface_after }
+        match (canvas_after, interface_after) {
+            (Some(canvas), Some(interface)) => Some(canvas.min(interface)),
+            (canvas, interface) => canvas.or(interface),
+        }
     }
 }
 

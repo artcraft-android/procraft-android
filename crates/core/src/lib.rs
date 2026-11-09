@@ -459,6 +459,9 @@ pub(crate) struct State {
     pub(crate) gpu: Option<Gpu>,
     pub(crate) canvas: Option<Canvas>,
     pub(crate) needs_frame: bool,
+    /// A frame wanted at this time, not before: the selection's bands drift slowly, so a frame
+    /// shows them moved only every so often (a pixel at a time).
+    pub(crate) frame_due: Option<std::time::Instant>,
     /// Frames wait (the canvas is being redrawn a stroke at a time, as the brush studio's pad is
     /// when its brush changes), and one was asked for meanwhile.
     pub(crate) holding_frames: bool,
@@ -1290,6 +1293,7 @@ impl CanvasSession {
             scene: None,
             x_ray: false,
             needs_frame: false,
+            frame_due: None,
             holding_frames: false,
             frame_held: false,
             stop: false,
