@@ -831,6 +831,8 @@ impl App {
                 if !busy {
                     let session = files::new_from_preset(&preset);
                     let dir = self.gallery.store.new_folder(folder);
+                    // its time-lapse made as the preset says
+                    files::keep_preset_time_lapse(&preset, &dir);
                     self.open_artwork(session, dir);
                     self.ui.started_new();
                 }

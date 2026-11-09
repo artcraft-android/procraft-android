@@ -376,6 +376,15 @@ pub fn new_from_preset(preset: &CanvasPreset) -> Arc<CanvasSession> {
     session
 }
 
+/// The time-lapse settings `preset` gives a new artwork, kept in its folder `dir` before it opens.
+pub fn keep_preset_time_lapse(preset: &CanvasPreset, dir: &str) {
+    procraft_core::TimeLapse::new(dir.to_owned()).set_settings(procraft_core::TimeLapseSettings {
+        resolution: preset.time_lapse_resolution,
+        quality: preset.time_lapse_quality,
+        hevc: preset.time_lapse_hevc,
+    });
+}
+
 /// A colour profile the user picks (an .icc file), added to those a canvas can be in; its name, or
 /// none (said so) if it isn't one.
 pub fn import_profile() -> Option<String> {
@@ -932,6 +941,17 @@ fn seed() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_artwork_records_its_time_lapse_as_its_preset_says() {
+        let dir = folder("preset-time-lapse");
+        let mut preset = procraft_core::standard_presets().remove(0);
+        (preset.time_lapse_resolution, preset.time_lapse_quality, preset.time_lapse_hevc) = (2, 3, true);
+        keep_preset_time_lapse(&preset, &dir.to_string_lossy());
+        let settings = procraft_core::TimeLapse::new(dir.to_string_lossy().into_owned()).settings();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(settings, procraft_core::TimeLapseSettings { resolution: 2, quality: 3, hevc: true });
+    }
 
     #[test]
     fn a_message_has_other_ways_of_showing_with_its_words_in_each() {
