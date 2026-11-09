@@ -32,6 +32,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.requiredWidth
@@ -112,15 +114,34 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * A gallery cell's sizes: its pitch both ways (the screen's width over the columns, three upright
- * and four on its side), the content's width (40 less) and the thumbnail box's height (82 less).
+ * A gallery cell's sizes: its pitch across (the screen's width over the columns), the content's
+ * width (40 less) and the thumbnail box's height (82 less), and its [height], as its pitch. ProCraft
+ * Pocket's ([pocket]) cells are taller than wide, their thumbnails large: most of the cell's width,
+ * and two thirds of it tall, the names under them.
  */
-private data class CellSize(val pitch: Dp, val width: Dp, val thumb: Dp)
+private data class CellSize(val pitch: Dp, val width: Dp, val thumb: Dp, val height: Dp = pitch)
 
-private fun cellSize(screenWidth: Dp, columns: Int): CellSize {
+private fun cellSize(screenWidth: Dp, columns: Int, pocket: Boolean = false): CellSize {
     val pitch = screenWidth / columns
+    if (pocket) {
+        val thumb = pitch * POCKET_THUMB_HEIGHT
+        return CellSize(pitch, pitch * POCKET_THUMB_WIDTH, thumb, ThumbTop + thumb + NamesHeight)
+    }
     return CellSize(pitch, pitch - 40.dp, pitch - 82.dp)
 }
+
+/** Three columns upright and four on its side; ProCraft Pocket's two upright. */
+private fun galleryColumns(screenWidth: Dp, screenHeight: Dp, pocket: Boolean) = when {
+    screenWidth > screenHeight -> 4
+    pocket -> 2
+    else -> 3
+}
+
+/** Where a cell's thumbnail box starts, and the room under it for its names. */
+private val ThumbTop = 39.dp
+private val NamesHeight = 43.dp
+private const val POCKET_THUMB_WIDTH = 0.78f
+private const val POCKET_THUMB_HEIGHT = 0.68f
 
 private val LocalCell = androidx.compose.runtime.staticCompositionLocalOf { cellSize(747.dp, 3) }
 private val NewCanvasWidth = 347.dp
@@ -191,9 +212,15 @@ fun GalleryScreen(vm: CanvasViewModel) {
             if (renaming != null || renamingStack != null || about) tween(300) else tween(150),
             label = "blur",
         )
-        val dropCell = cellSize(screenWidth, if (screenWidth > screenHeight) 4 else 3)
-        // the header keeps clear of the screen's cutout, and the menus hanging from it go down with it
-        val headerTop = with(LocalDensity.current) { WindowInsets.displayCutout.getTop(this).toDp() }
+        // a phone's gallery is ProCraft Pocket's
+        val pocket = minOf(screenWidth, screenHeight) < Pc.PocketBelow
+        val columns = galleryColumns(screenWidth, screenHeight, pocket)
+        val dropCell = cellSize(screenWidth, columns, pocket)
+        // the header keeps clear of the screen's cutout (and a phone's status bar), and the menus
+        // hanging from it go down with it
+        val headerTop = with(LocalDensity.current) {
+            maxOf(WindowInsets.displayCutout.getTop(this), WindowInsets.statusBars.getTop(this)).toDp()
+        }
         Column(
             Modifier.fillMaxSize().then(if (blur > 0.dp) Modifier.blur(blur) else Modifier).then(
                 galleryDrop(
@@ -249,6 +276,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     onImport = { importFile.launch(arrayOf("*/*")) },
                     onPhoto = { photo.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)) },
                     top = headerTop,
+                    pocket = pocket,
                 )
             }
             // into a stack the gallery goes at once and the stack's artworks fly out of its cell to
@@ -281,8 +309,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                         Text("Tap + to start a new canvas", color = Pc.GalleryText, fontSize = 17.sp)
                     }
                 } else {
-                    val columns = if (screenWidth > screenHeight) 4 else 3
-                    val cell = cellSize(screenWidth, columns)
+                    val cell = dropCell
                     androidx.compose.runtime.CompositionLocalProvider(LocalCell provides cell) {
                     // the whole screen under the header, so artworks flying in from a stack lower down
                     // aren't clipped by a grid of one short row
@@ -298,7 +325,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
                         },
                         state = grid,
                         columns = GridCells.Fixed(columns),
-                        contentPadding = PaddingValues(bottom = 24.dp),
+                        // ProCraft Pocket's last row clears its actions in the bottom corner
+                        contentPadding = PaddingValues(bottom = if (pocket) 24.dp + DockHeight + DockMargin else 24.dp),
                     ) {
                         items(entries, key = { it.dir.name }) { entry ->
                             if (entry is io.github.artcraftandroid.procraft.gallery.Stack) {
@@ -356,7 +384,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                             Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null).flyIn(stackFrom, Motion.stackPushMove()).flyOut(stackFrom, leaving, Motion.stackPop())) {
                                 // across the whole column, so the thumbnail sits in its middle as a stack's does
                                 Column(
-                                    Modifier.fillMaxWidth().height(cell.pitch).onGloballyPositioned { cellAt[0] = it.positionInWindow() }.graphicsLayer {
+                                    Modifier.fillMaxWidth().height(cell.height).onGloballyPositioned { cellAt[0] = it.positionInWindow() }.graphicsLayer {
                                         alpha = (1f - SWIPED_FADE * open.coerceIn(0f, 1f)) * faint.value *
                                             (if (opening?.artwork?.dir?.name == a.dir.name) 0f else 1f)
                                     }.pointerInput(a, selecting, chosen) {
@@ -505,13 +533,28 @@ fun GalleryScreen(vm: CanvasViewModel) {
             }
         }
 
+        if (pocket && !selecting) {
+            PocketGalleryDock(
+                Modifier.align(Alignment.BottomEnd).padding(end = DockMargin, bottom = DockMargin),
+                onSelect = { selecting = true },
+                onImport = { importFile.launch(arrayOf("*/*")) },
+                onPhoto = { photo.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                onNew = { newCanvas = !newCanvas },
+            )
+        }
         if (newCanvas) Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { newCanvas = false } })
-        // hangs from the + button, 2 dp from the screen's edge, and grows out of its arrow
+        // hangs from the + button, 2 dp from the screen's edge, and grows out of its arrow; ProCraft
+        // Pocket's rises from it, in the bottom corner
         val newLeft = maxWidth - 2.dp - NewCanvasWidth
-        val newArrow = maxWidth - 49.dp - newLeft
-        MenuPresence(newCanvas, androidx.compose.ui.graphics.TransformOrigin(newArrow / NewCanvasWidth, 0f)) { look ->
+        val newArrow = (if (pocket) maxWidth - DockMargin - DockHeight / 2 else maxWidth - 49.dp) - newLeft
+        MenuPresence(newCanvas, androidx.compose.ui.graphics.TransformOrigin(newArrow / NewCanvasWidth, if (pocket) 1f else 0f)) { look ->
+            val place = if (pocket) {
+                Modifier.align(Alignment.BottomStart).offset(x = newLeft, y = -(DockMargin + DockHeight + DockPanelGap))
+            } else {
+                Modifier.offset(x = newLeft, y = headerTop + 56.5.dp)
+            }
             NewCanvasPanel(
-                Modifier.offset(x = newLeft, y = headerTop + 56.5.dp).then(look), arrowX = newArrow, presets = vm.canvasPresets,
+                place.then(look), arrowX = newArrow, side = if (pocket) ArrowSide.BOTTOM else ArrowSide.TOP, presets = vm.canvasPresets,
                 // Custom Canvas opens over the list, which is still there when it closes
                 onCustom = { vm.openCustomCanvas() },
                 onEdit = { vm.openCustomCanvas(it) },
@@ -704,7 +747,11 @@ fun GalleryScreen(vm: CanvasViewModel) {
     )
 }
 
-/** The title row: the app's name, the select/import/photo capsule and the new-canvas button. */
+/**
+ * The title row: the app's name, the select/import/photo capsule and the new-canvas button. In
+ * ProCraft Pocket ([pocket]) the title alone, "ProCraft Pocket", its actions in the bottom corner
+ * ([PocketGalleryDock]).
+ */
 @Composable
 private fun GalleryHeader(
     stack: String?,
@@ -717,8 +764,9 @@ private fun GalleryHeader(
     onImport: () -> Unit,
     onPhoto: () -> Unit,
     top: Dp,
+    pocket: Boolean = false,
 ) {
-    TitleRow(top, title = {
+    val title: @Composable () -> Unit = {
         // into a stack the title changes at once; back out, the stack's name fades out as the
         // gallery's fades in
         androidx.compose.animation.AnimatedContent(
@@ -757,18 +805,33 @@ private fun GalleryHeader(
                 }
             } else {
                 Text(
-                    "ProCraft",
+                    if (pocket) {
+                        // "Pocket" light beside the bold name, as Procreate Pocket's title
+                        androidx.compose.ui.text.buildAnnotatedString {
+                            append("ProCraft")
+                            pushStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Light))
+                            append(" Pocket")
+                            pop()
+                        }
+                    } else {
+                        androidx.compose.ui.text.AnnotatedString("ProCraft")
+                    },
                     color = Pc.GalleryTitle,
-                    fontSize = 36.sp,
+                    fontSize = if (pocket) 34.sp else 36.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 32.dp, top = 11.dp)
+                    modifier = Modifier.padding(start = if (pocket) 20.dp else 32.dp, top = 11.dp)
                         .clickable(remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null, onClick = onAbout),
                 )
             }
         }
-    }) {
+    }
+    if (pocket) {
+        Box(Modifier.fillMaxWidth().padding(top = top).height(HeaderHeight)) { title() }
+        return
+    }
+    TitleRow(top, title = title) {
         Row(Modifier.padding(top = 10.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             Row(
                 Modifier.height(45.dp).clip(CircleShape).background(Pc.Capsule).border(1.dp, Pc.CapsuleEdge, CircleShape),
@@ -792,6 +855,45 @@ private fun GalleryHeader(
         }
     }
 }
+
+/**
+ * ProCraft Pocket's gallery actions, in the bottom corner: Select, Import and Photo in a capsule of
+ * liquid glass, and + on a bead of its own beside it.
+ */
+@Composable
+private fun PocketGalleryDock(modifier: Modifier, onSelect: () -> Unit, onImport: () -> Unit, onPhoto: () -> Unit, onNew: () -> Unit) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(DockGap), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.height(DockHeight).liquidLook(DockHeight / 2, Pc.GalleryGlass).padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            DockButton(PcIcons.MenuCheckCircle, "Select", 36.dp, onSelect)
+            DockButton(PcIcons.TabImport, "Import", 44.dp, onImport)
+            DockButton(PcIcons.MenuPhoto, "Photo", 36.dp, onPhoto)
+        }
+        Box(
+            Modifier.size(DockHeight).liquidLook(DockHeight / 2, Pc.GalleryGlass).clip(CircleShape).clickable(onClick = onNew),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(PcIcons.Add, contentDescription = "New canvas", tint = Pc.GalleryText, modifier = Modifier.requiredSize(36.dp))
+        }
+    }
+}
+
+/** One of the dock's buttons: its glyph, drawn in a frame shown [glyph] across. */
+@Composable
+private fun DockButton(icon: ImageVector, label: String, glyph: Dp, onClick: () -> Unit) {
+    Box(Modifier.size(DockButtonWidth, DockHeight).clip(CircleShape).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+        Icon(icon, contentDescription = label, tint = Pc.GalleryText, modifier = Modifier.requiredSize(glyph))
+    }
+}
+
+/** ProCraft Pocket's gallery dock: how tall, how far from the screen's edges, the gap in it and above it (to the new-canvas list), and a button's width. */
+private val DockHeight = 50.dp
+private val DockMargin = 16.dp
+private val DockGap = 10.dp
+private val DockPanelGap = 6.dp
+private val DockButtonWidth = 46.dp
 
 /**
  * A title row [top] under the screen's cutout: the [title] on the left and the [actions] on the
@@ -1311,7 +1413,7 @@ private fun StackCell(
     // where the cell is in the window, for where the drag picture is held
     val cellAt = remember { arrayOf(Offset.Zero) }
     Column(
-        modifier.height(cell.pitch).onGloballyPositioned {
+        modifier.height(cell.height).onGloballyPositioned {
             onPlaced(it.boundsInWindow())
             cellAt[0] = it.positionInWindow()
         }.pointerInput(s) {
@@ -1657,6 +1759,7 @@ private fun Thumbnail(a: Artwork, version: Int, chosen: Boolean? = null, wash: B
 private fun NewCanvasPanel(
     modifier: Modifier,
     arrowX: Dp,
+    side: ArrowSide = ArrowSide.TOP,
     presets: List<CanvasPreset>,
     onCustom: () -> Unit,
     onEdit: (Int) -> Unit,
@@ -1669,7 +1772,7 @@ private fun NewCanvasPanel(
     val (sw, sh) = root.width.coerceAtLeast(1) to root.height.coerceAtLeast(1)
     // the row swiped open, if one is
     var opened by remember { mutableStateOf<Int?>(null) }
-    Popover(NewCanvasWidth, arrowX, modifier, fill = Pc.LightPanel, corner = 32.dp) {
+    Popover(NewCanvasWidth, arrowX, modifier, fill = Pc.LightPanel, corner = 32.dp, side = side) {
         Box(Modifier.fillMaxWidth()) {
             Text(
                 "New canvas",

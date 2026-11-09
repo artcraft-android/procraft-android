@@ -120,11 +120,13 @@ impl State {
                     .map(|(k, table)| (k, canvas.display_lut(gpu, &table)));
             }
             let lut = self.display_lut.as_ref().map(|(_, l)| l);
-            let backdrop = (!self.backdrops.is_empty() || !self.backdrop_windows.is_empty()).then(|| Backdrop {
+            let backdrop = Some(Backdrop {
                 regions: &self.backdrops,
                 windows: &self.backdrop_windows,
+                liquid: &self.backdrop_liquid,
                 sigma: BACKDROP_SIGMA_PT * s,
-            });
+            })
+            .filter(Backdrop::shows);
             canvas.render(
                 gpu,
                 &mut self.doc,

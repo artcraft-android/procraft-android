@@ -41,10 +41,10 @@ import androidx.compose.ui.unit.dp
 val LocalBackdrops = staticCompositionLocalOf<Backdrops?> { null }
 
 /**
- * The rounded bodies of the frosted panels and bars shown now, and the thin glass of the side bar's
- * tracks (window pixels), sent on whenever they change.
+ * The rounded bodies of the frosted panels and bars shown now, the thin glass of the side bar's
+ * tracks, and ProCraft Pocket's liquid glass (window pixels), sent on whenever they change.
  */
-class Backdrops(private val send: (List<Float>, List<Float>) -> Unit) {
+class Backdrops(private val send: (List<Float>, List<Float>, List<Float>) -> Unit) {
     /**
      * Where the app's window is on the screen (pixels): not its corner in a split screen or a
      * window of its own, so a place on the screen is made one in the window.
@@ -53,18 +53,27 @@ class Backdrops(private val send: (List<Float>, List<Float>) -> Unit) {
 
     private val regions = LinkedHashMap<Any, FloatArray>()
     private val windows = LinkedHashMap<Any, FloatArray>()
+    private val liquid = LinkedHashMap<Any, FloatArray>()
 
-    private fun sendAll() = send(regions.values.flatMap { it.asList() }, windows.values.flatMap { it.asList() })
+    private fun sendAll() = send(
+        regions.values.flatMap { it.asList() },
+        windows.values.flatMap { it.asList() },
+        liquid.values.flatMap { it.asList() },
+    )
 
-    fun put(key: Any, region: FloatArray, window: Boolean = false) {
-        val into = if (window) windows else regions
+    fun put(key: Any, region: FloatArray, window: Boolean = false, liquid: Boolean = false) {
+        val into = when {
+            liquid -> this.liquid
+            window -> windows
+            else -> regions
+        }
         if (into[key]?.contentEquals(region) == true) return
         into[key] = region
         sendAll()
     }
 
     fun remove(key: Any) {
-        if (regions.remove(key) == null && windows.remove(key) == null) return
+        if (regions.remove(key) == null && windows.remove(key) == null && liquid.remove(key) == null) return
         sendAll()
     }
 }
@@ -79,9 +88,17 @@ fun rememberFrost(corner: Dp): Modifier = rememberFrost(corner, BarGlass())
 /**
  * How a bar's glass differs from a panel's: it shows as much as [shown], [moved] (window pixels) as
  * the bar slides out of its place, its box goes [pastLeft] and [pastRight] further (to take the
- * corners of a bar's screen edge off the screen), and as a [window] what is behind only softens.
+ * corners of a bar's screen edge off the screen), as a [window] what is behind only softens, and
+ * [liquid] (ProCraft Pocket's) it is bent by the rim as well, as Apple's liquid glass.
  */
-data class BarGlass(val shown: Float = 1f, val moved: Offset = Offset.Zero, val pastLeft: Dp = 0.dp, val pastRight: Dp = 0.dp, val window: Boolean = false)
+data class BarGlass(
+    val shown: Float = 1f,
+    val moved: Offset = Offset.Zero,
+    val pastLeft: Dp = 0.dp,
+    val pastRight: Dp = 0.dp,
+    val window: Boolean = false,
+    val liquid: Boolean = false,
+)
 
 /** [rememberFrost] for a bar, as [glass] says. */
 @Composable
@@ -103,7 +120,7 @@ fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
                 px + (x0 + dx - px) * k, py + (y0 + dy - py) * k, px + (x1 + dx - px) * k, py + (y1 + dy - py) * k,
                 corner * k, look.alpha * glass.shown,
             )
-            backdrops.put(key, region, glass.window)
+            backdrops.put(key, region, glass.window, glass.liquid)
         }
     }
     return Modifier.onGloballyPositioned { c ->

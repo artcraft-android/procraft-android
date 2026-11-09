@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -51,6 +52,12 @@ fun AppRoot(vm: CanvasViewModel) {
     val interfaceSize = fittedInterfaceSize(vm.plugins, vm.pluginList)
     androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
     ProCraftTheme(interfaceSize) {
+        // a phone keeps its status bar (ProCraft Pocket's), its icons dark over the light interface
+        val view = androidx.compose.ui.platform.LocalView.current
+        val window = androidx.compose.ui.platform.LocalContext.current.activity()?.window
+        androidx.compose.runtime.SideEffect {
+            if (window != null) androidx.core.view.WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = Pc.light
+        }
         if (vm.screen == Screen.GALLERY) {
             ZoomingGallery(vm, overlay = false)
             // a share from the gallery shows its card there, and a file brought in its own
@@ -105,9 +112,11 @@ fun AppRoot(vm: CanvasViewModel) {
                 // the bars keep clear of the screen's cutout, and the top bar takes two rows where one is too narrow
                 val density = androidx.compose.ui.platform.LocalDensity.current
                 val cutout = WindowInsets.displayCutout
+                val status = WindowInsets.statusBars
                 val direction = androidx.compose.ui.platform.LocalLayoutDirection.current
                 with(density) {
-                    Pc.safeTop = cutout.getTop(this).toDp()
+                    // a phone's status bar, kept, is as far down as the bars start
+                    Pc.safeTop = maxOf(cutout.getTop(this), status.getTop(this)).toDp()
                     Pc.safeLeft = cutout.getLeft(this, direction).toDp()
                     Pc.safeRight = cutout.getRight(this, direction).toDp()
                 }
@@ -184,7 +193,11 @@ fun AppRoot(vm: CanvasViewModel) {
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
-                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown, floating = Pc.pocket)
+                        if (Pc.pocket) {
+                            PocketSideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
+                        } else {
+                            SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
+                        }
                     }
                 }
                 NoticeBand(vm)

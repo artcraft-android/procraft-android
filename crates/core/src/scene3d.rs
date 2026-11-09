@@ -3634,13 +3634,13 @@ impl State {
         }
         gpu.queue.submit([encoder.finish()]);
         // frosted panels over the model: it drawn again, small, and blurred under each
-        let glass = !self.backdrops.is_empty() || !self.backdrop_windows.is_empty();
-        if let Some(canvas) = self.canvas.as_mut().filter(|_| glass) {
-            let backdrop = procraft_gpu::Backdrop {
-                regions: &self.backdrops,
-                windows: &self.backdrop_windows,
-                sigma: crate::BACKDROP_SIGMA_PT * self.display_scale,
-            };
+        let backdrop = procraft_gpu::Backdrop {
+            regions: &self.backdrops,
+            windows: &self.backdrop_windows,
+            liquid: &self.backdrop_liquid,
+            sigma: crate::BACKDROP_SIGMA_PT * self.display_scale,
+        };
+        if let Some(canvas) = self.canvas.as_mut().filter(|_| backdrop.shows()) {
             canvas.frost_over(gpu, target, format, size, s, backdrop, &mut |encoder, small, (w, h)| match studio {
                 Some(orbit) => view.render_studio(gpu, encoder, small, w, h, clear, orbit),
                 None => view.render(gpu, encoder, small, w, h, clear),

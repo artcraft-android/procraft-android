@@ -73,7 +73,23 @@ object Pc {
     val PocketGrabber = 14.dp
     val PocketCardHeight: Dp get() = PocketPadding * 2 + PocketRowHeight * 2 + PocketRowGap * 2 + PocketGrabber
     val PocketPillHeight: Dp get() = PocketPadding * 2 + PocketRowHeight
-    val PocketGlass: Color get() = pick(0xD9262626, 0xDEF2F2F2)
+    /**
+     * ProCraft Pocket's liquid glass: its tint (dark enough with the dark interface for its light
+     * glyphs to read over a white canvas), the shadow outside it, and its rim's light, strongest
+     * toward the top left ([LiquidKey]), fainter on the far side ([LiquidCounter]), and between.
+     */
+    val LiquidTint: Color get() = pick(0x8C1E1E1E, 0x61FFFFFF)
+    val LiquidShadow: Color get() = pick(0x47000000, 0x29000000)
+    val LiquidLight: Color get() = Color.White
+    val LiquidKey: Float get() = if (light) 1f else 0.6f
+    val LiquidCounter: Float get() = if (light) 0.7f else 0.3f
+    val LiquidFloor: Float get() = if (light) 0.35f else 0.1f
+    /** Liquid glass over the gallery, which has no canvas behind it to bend: a little more tint. */
+    val GalleryGlass: Color get() = pick(0x99383838, 0xB8FFFFFF)
+    /** A liquid slider's thumb (white glass, either way), its rim, and the notches along it. */
+    val LiquidBead: Color get() = pick(0xFFF2F2F2, 0xFFFFFFFF)
+    val LiquidBeadRim: Color get() = pick(0x1F000000, 0x17000000)
+    val LiquidNotch: Color get() = pick(0x47FFFFFF, 0x38000000)
     /** The disc under a round button in a panel's title row (ProCraft Pocket's ••• and +). */
     val HeaderDisc: Color get() = pick(0xFF3A3A3A, 0xFFFFFFFF)
 

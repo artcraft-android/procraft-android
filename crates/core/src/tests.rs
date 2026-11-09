@@ -4299,6 +4299,11 @@ fn frosted_panels_come_six_numbers_each() {
     assert_eq!(s.shared.lock().backdrop_windows, vec![[6.0, 7.0, 8.0, 9.0, 2.0, 0.5]]);
     s.set_backdrops(Vec::new());
     assert!(s.shared.lock().backdrop_windows.is_empty());
+    // and the liquid glass likewise
+    s.set_liquid_glass(Vec::new(), Vec::new(), vec![1.0, 2.0, 30.0, 40.0, 5.0, 1.0, 9.0]);
+    assert_eq!(s.shared.lock().backdrop_liquid, vec![[1.0, 2.0, 30.0, 40.0, 5.0, 1.0]]);
+    s.set_backdrops(Vec::new());
+    assert!(s.shared.lock().backdrop_liquid.is_empty());
 }
 
 #[test]

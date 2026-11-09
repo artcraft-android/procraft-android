@@ -18,6 +18,7 @@ import io.github.artcraftandroid.procraft.canvas.ProjectionPresentation
 import io.github.artcraftandroid.procraft.canvas.penKeyButton
 import kotlinx.coroutines.launch
 import io.github.artcraftandroid.procraft.ui.AppRoot
+import io.github.artcraftandroid.procraft.ui.Pc
 
 /** How long a finger's touch stays where it landed with tap assistance on. */
 private const val TAP_HOLD_MS = 300L
@@ -216,10 +217,18 @@ class MainActivity : ComponentActivity() {
         if (hasFocus) hideSystemBars()
     }
 
-    /** The canvas uses the whole screen; a swipe from the edge shows the bars for a moment. */
+    /**
+     * The canvas uses the whole screen; a swipe from the edge shows the bars for a moment. A phone
+     * (ProCraft Pocket's) keeps its status bar, as Procreate Pocket does, the interface under it.
+     */
     private fun hideSystemBars() {
         val controller = WindowCompat.getInsetsController(window, window.decorView)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller.hide(WindowInsetsCompat.Type.systemBars())
+        if (resources.configuration.smallestScreenWidthDp < Pc.PocketBelow.value) {
+            controller.hide(WindowInsetsCompat.Type.navigationBars())
+            controller.show(WindowInsetsCompat.Type.statusBars())
+        } else {
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        }
     }
 }

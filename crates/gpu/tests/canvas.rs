@@ -444,7 +444,7 @@ fn a_frosted_region_shows_what_is_behind_it_blurred() {
             surround: [0.0, 0.0, 0.0],
             grid: None,
             selection: None,
-            backdrop: Some(Backdrop { regions: &regions, windows: &[], sigma: 24.0 }),
+            backdrop: Some(Backdrop { regions: &regions, windows: &[], liquid: &[], sigma: 24.0 }),
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
@@ -494,7 +494,7 @@ fn frosted_edge(gpu: &Gpu, regions: &[[f32; 6]], windows: &[[f32; 6]]) -> Vec<u8
             surround: [0.0, 0.0, 0.0],
             grid: None,
             selection: None,
-            backdrop: Some(Backdrop { regions, windows, sigma: 24.0 }),
+            backdrop: Some(Backdrop { regions, windows, liquid: &[], sigma: 24.0 }),
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
@@ -582,7 +582,7 @@ fn glass_cost() {
         each.sort_by(f64::total_cmp);
         (each[each.len() / 2], each[each.len() * 9 / 10])
     };
-    let glass = Some(Backdrop { regions: &regions, windows: &windows, sigma });
+    let glass = Some(Backdrop { regions: &regions, windows: &windows, liquid: &[], sigma });
     for round in 0..3 {
         let (none, none_90) = frames(None);
         let (with, with_90) = frames(glass);
