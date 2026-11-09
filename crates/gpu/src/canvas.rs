@@ -74,6 +74,10 @@ struct OverlayUniform {
 /// a fair margin even at a hundredth of its speed. Much less costs more than it saves: a tiled
 /// GPU can read and write the whole stroke for each piece.
 const WORK_AT_ONCE: u64 = 64 << 20;
+/// The most stamps one render uploads (the rest in renders after it, at once): a long stroke's end
+/// redraws all of it, and its millions of stamps in one buffer could pass the most the GPU makes,
+/// leaving no buffer to draw this or any later stroke with. 1M stamps take about 100 MB.
+const STAMPS_AT_ONCE: u64 = 1 << 20;
 /// What a stamp counts for besides the pixels it covers; and a stamp painted in place, a compute
 /// pass for each, for each pixel and for itself.
 const STAMP_WORK: u64 = 1 << 10;
@@ -1837,6 +1841,8 @@ pub struct Canvas {
     stamp_capacity: u64,
     /// The most stamps' work sent to the GPU as one piece (see [`WORK_AT_ONCE`]).
     work_at_once: u64,
+    /// The most stamps one render uploads (see [`STAMPS_AT_ONCE`]).
+    stamps_at_once: u64,
     /// Pieces of work sent early, there being too much for one.
     pieces_sent: u64,
     /// How the last plugin filter's draw went, not yet asked for.
@@ -2159,6 +2165,7 @@ impl Canvas {
             stamp_buffer,
             stamp_capacity,
             work_at_once: WORK_AT_ONCE,
+            stamps_at_once: STAMPS_AT_ONCE,
             pieces_sent: 0,
             filter_run: None,
             composites: 0,
@@ -2773,6 +2780,17 @@ impl Canvas {
     #[doc(hidden)]
     pub fn set_work_at_once(&mut self, work: u64) {
         self.work_at_once = work;
+    }
+
+    /// Uploads at most this many stamps in a render, in place of [`STAMPS_AT_ONCE`]: for tests.
+    #[doc(hidden)]
+    pub fn set_stamps_at_once(&mut self, stamps: u64) {
+        self.stamps_at_once = stamps.max(1);
+    }
+
+    /// The most stamps one buffer of this device holds.
+    fn stamps_in_a_buffer(device: &wgpu::Device) -> u64 {
+        (device.limits().max_buffer_size / size_of::<StampInstance>() as u64).max(1)
     }
 
     /// How many pieces of work were sent early, there being too much for one: for tests.
@@ -3860,7 +3878,28 @@ impl Canvas {
         });
         let depth = flattening.max().unwrap_or(0);
         self.make_groups(device, depth);
-        let ops = in_pieces(without_passing_tips(std::mem::take(&mut self.ops)), self.full(), self.work_at_once);
+        // no more stamps than one upload takes (room left for the predicted tail): the rest wait for
+        // a render after this one's
+        let most_stamps = self.stamps_at_once.min(Self::stamps_in_a_buffer(device) / 2).max(1);
+        let ops =
+            in_pieces(without_passing_tips(std::mem::take(&mut self.ops)), self.full(), self.work_at_once, most_stamps);
+        let (ops, held_back) = {
+            let (mut taken, mut count) = (Vec::with_capacity(ops.len()), 0u64);
+            let mut ops = ops.into_iter();
+            let mut held_back = false;
+            while let Some(op) = ops.next() {
+                let n = if let Op::Stamps { instances, .. } = &op { instances.len() as u64 } else { 0 };
+                if count > 0 && count.saturating_add(n) > most_stamps {
+                    let rest: Vec<Op> = std::iter::once(op).chain(ops.by_ref()).collect();
+                    self.ops.splice(0..0, rest);
+                    held_back = true;
+                    break;
+                }
+                count = count.saturating_add(n);
+                taken.push(op);
+            }
+            (taken, held_back)
+        };
 
         // this frame's stamps in one upload
         let mut instances: Vec<StampInstance> = Vec::new();
@@ -3877,7 +3916,8 @@ impl Canvas {
         let predicted = predicted_first..u32::try_from(instances.len()).unwrap_or(u32::MAX);
         let needed = instances.len() as u64;
         if needed > self.stamp_capacity {
-            self.stamp_capacity = needed.next_power_of_two();
+            // doubled for the strokes to come, as far as a buffer goes
+            self.stamp_capacity = needed.next_power_of_two().min(Self::stamps_in_a_buffer(device)).max(needed);
             self.stamp_buffer = stamp_buffer(device, self.stamp_capacity);
         }
         if !instances.is_empty() {
@@ -3933,7 +3973,7 @@ impl Canvas {
         // the layers a stroke was put into in this render's work so far, and whether the rest of
         // the work waits for a render of its own
         let mut committed: Vec<LayerId> = Vec::new();
-        let mut deferred = false;
+        let mut deferred = held_back;
         // stamps' work recorded and not sent yet
         let mut recorded = 0u64;
         let mut ops = ops.into_iter();
@@ -8762,9 +8802,10 @@ fn stamps_work(stamps: &[StampInstance], full: IRect, in_place: bool) -> u64 {
     stamps.iter().fold(0, |work, s| work.saturating_add(stamp_work(s, full, in_place)))
 }
 
-/// `ops` with stamps of more work than `most` as several in a row of no more (a stamp is never cut
-/// in two): a stroke redrawn whole would otherwise reach the GPU as one piece.
-fn in_pieces(ops: Vec<Op>, full: IRect, most: u64) -> Vec<Op> {
+/// `ops` with stamps of more work than `most`, or more than `most_stamps` of them, as several in a
+/// row of no more (a stamp is never cut in two): a stroke redrawn whole would otherwise reach the
+/// GPU as one piece.
+fn in_pieces(ops: Vec<Op>, full: IRect, most: u64, most_stamps: u64) -> Vec<Op> {
     let mut pieces = Vec::with_capacity(ops.len());
     for op in ops {
         let Op::Stamps { second, instances, wet, times, style, clear, layer, pencil } = op else {
@@ -8777,7 +8818,7 @@ fn in_pieces(ops: Vec<Op>, full: IRect, most: u64) -> Vec<Op> {
         let (mut count, mut work) = (0usize, 0u64);
         for s in &instances {
             let more = stamp_work(s, full, in_place);
-            if count > 0 && work.saturating_add(more) > most {
+            if count > 0 && (work.saturating_add(more) > most || count as u64 >= most_stamps) {
                 counts.push(count);
                 (count, work) = (0, 0);
             }

@@ -3517,6 +3517,56 @@ fn a_stroke_sent_in_pieces_lays_what_it_would_in_one() {
     }
 }
 
+/// A long stroke's end redraws all of it in one render: no more stamps go up at once than a
+/// buffer holds (here 50), the rest in renders after it, and the stroke comes out the same, the
+/// strokes after it too.
+#[test]
+fn a_stroke_of_more_stamps_than_one_upload_takes_is_laid_whole() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let stamps = |n: usize, y: f32| -> Vec<Stamp> {
+        (0..n)
+            .map(|i| Stamp {
+                time_ms: i as f64 * 3.0,
+                ..Stamp::round(Vec2::new(10.0 + i as f32 * 0.5, y + (i as f32 * 0.1).sin() * 12.0), 7.0, 0.35)
+            })
+            .collect()
+    };
+    let styles = [
+        ("paint", StrokeStyle::new(StrokeTool::Paint, [0.1, 0.4, 0.9], 0.7)),
+        ("smudge", StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0)),
+    ];
+    for (name, stroke) in styles {
+        let laid = |most: Option<u64>| {
+            let mut doc = Document::new(128, 96);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            if let Some(most) = most {
+                canvas.set_stamps_at_once(most);
+            }
+            canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.5, 0.6, 0.2], 1.0));
+            canvas.add_stamps(&(0..96).map(|y| dot(Vec2::new(64.0, y as f32), 18.0)).collect::<Vec<_>>());
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            // drawn as it comes, then again whole as a stroke's end does: 220 stamps at once
+            canvas.begin_stroke(doc.current(), stroke);
+            canvas.add_stamps(&stamps(120, 30.0));
+            canvas.render(&gpu, &mut doc, None);
+            canvas.replace_stamps(&stamps(220, 30.0));
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            // and one after it
+            canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.9, 0.1, 0.3], 1.0));
+            canvas.add_stamps(&stamps(80, 70.0));
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            canvas.read_layer(&gpu, doc.current()).unwrap()
+        };
+        let whole = laid(None);
+        assert!(whole.chunks(4).any(|p| p[3] > 0), "{name}: something laid");
+        assert!(whole == laid(Some(50)), "{name}: laid differently 50 stamps at a time");
+    }
+}
+
 /// Behind with a fast stroke, a frame finds a tip for each input event since the last: only the
 /// last is ever seen, so the others are left out, and the stroke comes out the same.
 #[test]
