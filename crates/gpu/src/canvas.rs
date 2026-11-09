@@ -479,7 +479,8 @@ fn draw_glass(
 ) {
     let (tw, th) = (size.0.max(1) as f32, size.1.max(1) as f32);
     pass.set_pipeline(frost);
-    for (bind, regions) in [(&small.binds[2], backdrop.regions), (&small.binds[0], backdrop.windows)] {
+    for (bind, regions, window) in [(&small.binds[2], backdrop.regions, 0.0), (&small.binds[0], backdrop.windows, 1.0)]
+    {
         pass.set_bind_group(0, bind, &[]);
         for &[x0, y0, x1, y1, corner, alpha] in regions {
             let usable = [x0, y0, x1, y1, corner, alpha].iter().all(|v| v.is_finite());
@@ -489,7 +490,7 @@ fn draw_glass(
             let offset = uniforms.push(&BackdropUniform {
                 v0: [x0, y0, x1, y1],
                 v1: [corner, tw, th, k],
-                v2: [alpha.min(1.0), 0.0, 0.0, 0.0],
+                v2: [alpha.min(1.0), window, 0.0, 0.0],
             });
             pass.set_bind_group(1, uniform_bind, &[offset]);
             pass.draw(0..6, 0..1);

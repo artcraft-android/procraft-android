@@ -7,7 +7,8 @@ struct BackdropUniform {
     v0: vec4<f32>,
     // frost: (corner radius, target width, target height, target pixels per source texel)
     v1: vec4<f32>,
-    // frost: (how much it shows, 0..1, as the panel fades in and out; unused)
+    // frost: (how much it shows, 0..1, as the panel fades in and out; 1 for a window, which
+    // softens what is behind rather than blurring it; unused)
     v2: vec4<f32>,
 }
 
@@ -58,7 +59,20 @@ fn fs_frost(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let q = abs(pos.xy - centre) - (half - vec2<f32>(r));
     let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
     let cover = clamp(0.5 - d, 0.0, 1.0) * clamp(u.v2.x, 0.0, 1.0);
-    let uv = pos.xy / (u.v1.w * vec2<f32>(textureDimensions(source)));
-    let c = textureSampleLevel(source, smp, uv, 0.0);
+    let dims = vec2<f32>(textureDimensions(source));
+    let uv = pos.xy / (u.v1.w * dims);
+    var c = textureSampleLevel(source, smp, uv, 0.0);
+    // a window: the small scene spread over a texel each way (a tent), so its texels, each many
+    // target pixels across, don't show as steps along an edge
+    if (u.v2.y > 0.5) {
+        c = vec4<f32>(0.0);
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                let w = f32((2 - abs(dx)) * (2 - abs(dy)));
+                c += textureSampleLevel(source, smp, uv + vec2<f32>(f32(dx), f32(dy)) / dims, 0.0) * w;
+            }
+        }
+        c = c / 16.0;
+    }
     return vec4<f32>(c.rgb * cover, cover);
 }
