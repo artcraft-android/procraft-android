@@ -129,8 +129,35 @@ impl Importing {
     }
 }
 
-/// What the layers' textures may take on the GPU, bytes: as much as the layers may (2 GiB).
+/// What the layers' textures may take on the GPU, bytes: past it, the layers not worked on are kept
+/// compressed in memory until needed.
 const LAYERS_ON_GPU: u64 = 2 << 30;
+
+/// The computer's memory, bytes; none if the system doesn't say.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn memory_total() -> Option<u64> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    // SAFETY: `status` is a MEMORYSTATUSEX with its length set, as the call asks
+    unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+    Some(status.ullTotalPhys).filter(|&b| b > 0)
+}
+
+/// The computer's memory, bytes; none if the system doesn't say.
+#[cfg(target_os = "macos")]
+fn memory_total() -> Option<u64> {
+    Some(objc2_foundation::NSProcessInfo::processInfo().physicalMemory()).filter(|&b| b > 0)
+}
+
+/// The computer's memory, bytes; none if the system doesn't say.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn memory_total() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find_map(|l| l.strip_prefix("MemTotal:"))?;
+    let kb: u64 = line.trim().strip_suffix("kB")?.trim().parse().ok()?;
+    Some(kb * 1024).filter(|&b| b > 0)
+}
 
 /// How long an artwork opens before it says so, as the tablet's.
 const SLOW_OPENING: Duration = Duration::from_millis(500);
@@ -201,9 +228,12 @@ fn getting_ready_note(ctx: &egui::Context) {
 fn main() {
     // the log, to the app folder's file too, and a crash's message into it
     startup::init();
-    // the layers' textures may take what the layers themselves may (the engine's budget): none is
-    // ever kept off the GPU, but the composite is made around the layers not being worked on, so
-    // a frame composites only those (as the tablet's)
+    // the layers may take half the computer's memory, as on the tablet (so how many a canvas holds
+    // grows with it), their textures up to 2 GiB of it; the composite is made around the layers
+    // not being worked on, so a frame composites only those
+    if let Some(total) = memory_total() {
+        procraft_core::set_layer_budget(total / 2);
+    }
     procraft_core::set_resident_budget(LAYERS_ON_GPU);
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
@@ -1289,4 +1319,13 @@ impl App {
 fn frame_gap(window: &Window) -> Duration {
     let millihertz = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).filter(|&m| m > 0);
     Duration::from_secs_f64(1000.0 / f64::from(millihertz.unwrap_or(60_000)))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_computers_memory_is_read() {
+        let total = super::memory_total().expect("the system says how much memory there is");
+        assert!(total >= 1 << 30, "{total} bytes");
+    }
 }
