@@ -385,7 +385,8 @@ fn other_brushes(bytes: &[u8], name: String) -> Option<(String, Vec<Brush>)> {
     if let Some(brushes) = procraft_engine::csp::read(bytes) {
         return Some((name, each(&brushes, csp_brush)));
     }
-    // a preset alone has no images of its own: one it names comes round
+    // a preset alone has only the pictures it holds itself (newer ones do): one it only names (one
+    // that came with Krita) comes round
     let preset = krita::read_preset(bytes, &|_| None)?;
     Some((name, vec![krita_brush(&preset)]))
 }
@@ -564,7 +565,7 @@ fn tip_brush(t: &procraft_engine::abr::AbrTip) -> Brush {
 /// A brush of a Krita preset: its tip (round, or an image), spacing, angle, and what pressure
 /// changes.
 fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
-    use procraft_engine::krita::KritaTip;
+    use procraft_engine::krita::{KritaPicture, KritaTip};
     let image = match &k.tip {
         KritaTip::Round { .. } => None,
         KritaTip::Image(t) => Some(fitted(t)),
@@ -581,7 +582,7 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     };
     if let KritaTip::Round { hardness, roundness } = k.tip {
         b.hardness = hardness.clamp(0.0, 1.0);
-        b.shape.roundness = roundness.clamp(0.01, 1.0);
+        b.shape.roundness = roundness.clamp(0.05, 1.0);
     }
     if let Some(spacing) = k.spacing {
         b.spacing = Brush::spacing_within_reach(spacing);
@@ -590,6 +591,10 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     if k.follows {
         b.shape.follow = 1.0;
     }
+    if k.turns_at_random {
+        // a half turn either way: any angle
+        b.shape.scatter = 1.0;
+    }
     if !k.pressure_size {
         b.pressure_size = 0.0;
     }
@@ -597,9 +602,87 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
         b.pressure_opacity = 1.0;
     }
     if let Some(t) = &k.texture {
-        paper(&mut b, std::slice::from_ref(&t.png), t.invert, t.strength, t.scale);
+        let png = match &t.picture {
+            KritaPicture::Encoded(png) => png.clone(),
+            KritaPicture::Grey(g) => sized_gray_png(g.width, g.height, &g.pixels),
+        };
+        paper(&mut b, &[png], t.invert, t.strength, t.scale);
+    }
+    // a masking brush is a dual brush's second: its size a share of this one's, its coverage
+    // combined with this one's by the nearest of the modes
+    if let Some(m) = &k.masking {
+        let mut second = krita_brush(&m.brush);
+        second.min_size = b.min_size * m.size;
+        second.max_size = b.max_size * m.size;
+        masking_paint(&mut second, m);
+        b.secondary = Some(Box::new(second));
+        let mode = masking_mode(&m.op).unwrap_or_else(|| {
+            log::warn!("Krita preset \"{}\": masking op {} combines as multiply", k.name, m.op);
+            procraft_engine::document::BlendMode::Multiply.id()
+        });
+        b.set_setting("dual_blend", mode as f32);
+    }
+    if !k.missing.is_empty() {
+        log::warn!("Krita preset \"{}\": {} not in its file, or not readable", k.name, k.missing.join(", "));
     }
     b
+}
+
+/// Gives a masking brush's second how much it lays, as Krita's wash mode (the only one it masks
+/// in) has it: each stamp lays its flow, through its pressure curve, towards the most the stroke
+/// may reach, which is its opacity through its own.
+fn masking_paint(second: &mut Brush, m: &procraft_engine::krita::KritaMasking) {
+    use procraft_engine::brush::{FLOW_POWER, PressureCurve};
+    use procraft_engine::geom::Vec2;
+    second.max_opacity = 1.0;
+    second.flow = m.flow;
+    // a stamp lays its opacity's pressure to the power FLOW_POWER: the curve's root lays the curve
+    second.pressure_opacity = 0.0;
+    if let Some(points) = &m.flow_pressure {
+        let root: Vec<Vec2> = points.iter().map(|p| Vec2::new(p.x, p.y.max(0.0).powf(1.0 / FLOW_POWER))).collect();
+        second.pressure_opacity = 1.0;
+        second.opacity_curve = Curve::new(&root);
+    }
+    // the stroke builds up towards what its transfer lets through: the opacity, by the pressure
+    let most = match &m.opacity_pressure {
+        Some(points) => points.iter().map(|p| Vec2::new(p.x, p.y * m.opacity)).collect(),
+        None => vec![Vec2::new(0.0, m.opacity), Vec2::new(1.0, m.opacity)],
+    };
+    if m.opacity_pressure.is_some() || m.opacity < 1.0 {
+        second.set_setting("pressure_flow", 1.0);
+        second.pressure_curves.set(PressureCurve::Flow, Some(Curve::new(&most)));
+    }
+    second.set_setting("rendering_mode", 1.0);
+}
+
+/// The dual mode nearest a Krita masking brush's composite op (by Krita's name for it), if there
+/// is one. Each takes the main brush's coverage as the backdrop and the mask's as the source, as
+/// the dual modes do; Add and Vivid Light aren't ones the studio lists, but they draw.
+fn masking_mode(op: &str) -> Option<u32> {
+    use procraft_engine::document::BlendMode as B;
+    Some(match op {
+        "normal" | "over" => B::Normal.id(),
+        "multiply" => B::Multiply.id(),
+        "darken" => B::Darken.id(),
+        "burn" => B::ColorBurn.id(),
+        "linear_burn" => B::LinearBurn.id(),
+        "lighten" => B::Lighten.id(),
+        "screen" => B::Screen.id(),
+        "dodge" => B::ColorDodge.id(),
+        "linear_dodge" => B::Add.id(),
+        "overlay" => B::Overlay.id(),
+        "hard_mix_photoshop" => B::HardMix.id(),
+        // the softer one is the inverse subtract (Linear Burn's rule) with its two terms scaled up;
+        // Krita's own hard mix burns under a half and dodges over it, as Vivid Light does
+        "inverse_subtract" | "hard_mix_softer_photoshop" => B::LinearBurn.id(),
+        "hard_mix" => B::VividLight.id(),
+        "difference" => B::Difference.id(),
+        "subtract" => B::Subtract.id(),
+        "divide" => B::Divide.id(),
+        "height_photoshop" => procraft_engine::brush::GRAIN_HEIGHT,
+        "linear_height_photoshop" => procraft_engine::brush::GRAIN_LINEAR_HEIGHT,
+        _ => return None,
+    })
 }
 
 /// A PNG tip as a grey one: its opaque pixels paint, the light ones if `white`, else the dark.
@@ -1154,6 +1237,57 @@ pub(crate) fn sized_gray_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_masking_brush_lays_as_krita_s_wash_mode_does() {
+        use procraft_engine::brush::{FLOW_POWER, PressureCurve, Rendering};
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::krita::{KritaBrush, KritaMasking, KritaTip};
+        let brush = KritaBrush {
+            name: "Mask".into(),
+            tip: KritaTip::Round { hardness: 1.0, roundness: 1.0 },
+            spacing: None,
+            angle: 0.0,
+            follows: false,
+            turns_at_random: false,
+            pressure_size: true,
+            pressure_opacity: true,
+            texture: None,
+            missing: Vec::new(),
+            masking: None,
+        };
+        let curve = vec![Vec2::new(0.6, 0.0), Vec2::new(0.9, 0.75)];
+        let m = KritaMasking {
+            brush,
+            op: "linear_dodge".into(),
+            size: 0.5,
+            opacity: 0.8,
+            flow: 0.3,
+            opacity_pressure: Some(curve.clone()),
+            flow_pressure: Some(curve),
+        };
+        let mut second = Brush::round_pen();
+        masking_paint(&mut second, &m);
+        assert_eq!((second.rendering, second.max_opacity, second.flow), (Rendering::Capped, 1.0, 0.3));
+        // the stroke reaches the opacity times its curve: none under 0.6, 0.8 x 0.75 from 0.9
+        let most = second.pressure_curves.get(PressureCurve::Flow).unwrap();
+        assert!(most.eval(0.5) < 1e-3 && (most.eval(1.0) - 0.6).abs() < 1e-3);
+        assert_eq!(second.setting("pressure_flow"), 1.0);
+        // a stamp lays the flow's curve: its opacity's pressure to the power FLOW_POWER
+        assert_eq!(second.pressure_opacity, 1.0);
+        let laid = |p: f32| second.opacity_curve.eval(p).powf(FLOW_POWER);
+        assert!(laid(0.5) < 1e-3 && (laid(1.0) - 0.75).abs() < 5e-3);
+        // without pressure, a constant: none at full opacity, else the opacity
+        let fixed = KritaMasking { opacity_pressure: None, flow_pressure: None, ..m.clone() };
+        let mut second = Brush::round_pen();
+        masking_paint(&mut second, &fixed);
+        assert_eq!(second.pressure_opacity, 0.0);
+        assert!((second.pressure_curves.get(PressureCurve::Flow).unwrap().eval(0.1) - 0.8).abs() < 1e-3);
+        let mut second = Brush::round_pen();
+        masking_paint(&mut second, &KritaMasking { opacity: 1.0, ..fixed });
+        assert!(second.pressure_curves.get(PressureCurve::Flow).is_none());
+        assert_eq!(second.setting("pressure_flow"), 0.0);
+    }
 
     #[test]
     fn stock_names_find_our_nearest() {

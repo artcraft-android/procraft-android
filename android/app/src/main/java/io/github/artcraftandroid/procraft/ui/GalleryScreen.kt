@@ -854,8 +854,12 @@ private val RenameFieldFill = Color(0x14FFFFFF)
  */
 @Composable
 private fun RenameArtwork(a: Artwork, version: Int, from: androidx.compose.ui.geometry.Rect?, closing: Boolean, shown: Float, onDone: (String) -> Unit) {
-    val image by produceState<ImageBitmap?>(null, a.dir.path, a.modified, version) {
-        value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
+    // the last one decoded shows while it loads again (an artwork opened or closed, saved meanwhile),
+    // so a canvas of another colour never flashes white
+    val image by produceState(ThumbnailsShown.get(a.thumbnail.path), a.dir.path, a.modified, version) {
+        val decoded = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
+        if (decoded != null) ThumbnailsShown.put(a.thumbnail.path, decoded)
+        value = decoded ?: value
     }
     var text by remember(a) { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(a.name, androidx.compose.ui.text.TextRange(0, a.name.length))) }
     val rise = remember(a) { androidx.compose.animation.core.Animatable(if (from == null) 1f else 0f) }
@@ -1551,14 +1555,21 @@ private val ThumbShadowDrop = 5.dp
 private val ThumbShadow get() = if (Pc.light) Color(0x1D000000) else Color(0x45000000)
 private val ThumbRim get() = if (Pc.light) Color(0xFFBEBEBE) else Color(0xFF424242)
 
+/** The thumbnails last decoded, by file: shown while one loads again. */
+private val ThumbnailsShown = android.util.LruCache<String, ImageBitmap>(64)
+
 /**
  * An artwork's thumbnail, as large as fits in its cell's box, with a soft shadow; while selecting,
  * a circle at its top right ([chosen]: filled blue with a tick).
  */
 @Composable
 private fun Thumbnail(a: Artwork, version: Int, chosen: Boolean? = null, wash: Boolean = false, onPlaced: (androidx.compose.ui.geometry.Rect) -> Unit = {}) {
-    val image by produceState<ImageBitmap?>(null, a.dir.path, a.modified, version) {
-        value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
+    // the last one decoded shows while it loads again (an artwork opened or closed, saved meanwhile),
+    // so a canvas of another colour never flashes white
+    val image by produceState(ThumbnailsShown.get(a.thumbnail.path), a.dir.path, a.modified, version) {
+        val decoded = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
+        if (decoded != null) ThumbnailsShown.put(a.thumbnail.path, decoded)
+        value = decoded ?: value
     }
     val ratio = if (a.width > 0 && a.height > 0) a.width.toFloat() / a.height else 0.75f
     val cell = LocalCell.current

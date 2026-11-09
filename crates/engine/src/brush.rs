@@ -326,9 +326,12 @@ pub fn combine_modes() -> Vec<(u32, &'static str)> {
         B::Overlay,
         B::HardMix,
         B::Difference,
+        B::Subtract,
+        B::Divide,
     ]
     .iter()
     .map(|m| (m.id(), m.name()))
+    .chain([(GRAIN_LINEAR_HEIGHT, "Linear Height")])
     .collect()
 }
 
@@ -685,8 +688,8 @@ impl Brush {
         Brush {
             name: "Round Pen".to_owned(),
             spacing: 0.08,
-            streamline: 0.35,
-            pressure_smoothing: 0.2,
+            streamline: 0.015,
+            pressure_smoothing: 0.0,
             hardness: 0.92,
             min_size: 1.0,
             max_size: 120.0,

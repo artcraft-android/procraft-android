@@ -171,6 +171,33 @@ fn veil(ctx: &egui::Context, what: &str) {
     });
 }
 
+/// How long the canvases' pipelines are made before the window says so (on a slow GPU's shader
+/// compiler they take a minute or more, and a canvas opened meanwhile waits for them).
+const CANVASES_SLOW: Duration = Duration::from_secs(2);
+/// What the window says meanwhile.
+const GETTING_READY: &str = "Getting the canvas ready…";
+
+/// What a canvas's veil says while it opens: while the pipelines it waits for are still being
+/// made (`waiting`), that.
+fn opening_words(waiting: bool) -> &'static str {
+    if waiting { GETTING_READY } else { "Opening…" }
+}
+
+/// At the gallery's foot while the canvases' pipelines are still being made: a note saying so,
+/// over the gallery, which takes its presses as ever.
+fn getting_ready_note(ctx: &egui::Context) {
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("getting ready")));
+    let ink = look::argb(look::pc::TEXT);
+    let wide = painter.layout_no_wrap(GETTING_READY.to_owned(), look::Weight::Regular.font(15.0), ink).size().x;
+    let note = egui::Rect::from_center_size(
+        egui::pos2(screen.center().x, screen.bottom() - 24.0 - 18.0),
+        egui::vec2(wide + 36.0, 36.0),
+    );
+    painter.rect_filled(note, 18.0, look::argb(look::pc::BAR));
+    look::text(&painter, note.center(), egui::Align2::CENTER_CENTER, GETTING_READY, 15.0, look::Weight::Regular, ink);
+}
+
 fn main() {
     // the log, to the app folder's file too, and a crash's message into it
     startup::init();
@@ -181,7 +208,7 @@ fn main() {
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
         Err(e) => {
-            log::error!("no event loop: {e}");
+            startup::stopped(&format!("it couldn't make its window's event loop: {e}"));
             return;
         }
     };
@@ -222,12 +249,12 @@ fn main() {
     // (its message and place are in the log already)
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| event_loop.run_app(&mut app))) {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => log::error!("event loop: {e}"),
+        Ok(Err(e)) => startup::stopped(&format!("its window's event loop stopped: {e}")),
         Err(panic) => {
             if let Some(screen) = &app.screen {
                 screen.window.set_visible(false);
             }
-            startup::say_stopped(procraft_gpu::panic_message(panic.as_ref()));
+            startup::stopped(procraft_gpu::panic_message(panic.as_ref()));
             // what the app held is let go by the system: a driver that panicked may not take it back
             std::process::exit(101);
         }
@@ -316,18 +343,22 @@ impl ApplicationHandler for App {
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                log::error!("no window: {e}");
+                startup::stopped(&format!("it couldn't open its window: {e}"));
                 event_loop.exit();
                 return;
             }
         };
         // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
         pen::watch(&window, self.wake.clone());
-        // from the backend the last run used, or the next if that run never ended
-        let from = startup::gpu_start(procraft_gpu::Gpu::backend_count());
+        // in this machine's order, from the backend the last run used, or the next if that one
+        // was at risk when it stopped
+        let order = startup::backend_order();
+        let from = startup::gpu_start(order);
+        // what the start waits for logged while it does
+        startup::watch_start(self.wake.clone());
         let tried = startup::gpu_tried();
         let display = event_loop.owned_display_handle();
-        let screen = match Screen::new(window, &display, from, tried, startup::gpu_trying, self.wake.clone()) {
+        let screen = match Screen::new(window, &display, order, from, tried, startup::gpu_trying, self.wake.clone()) {
             Ok((s, backend)) => {
                 startup::gpu_made(backend);
                 s
@@ -375,11 +406,14 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 // the artwork open is kept in the gallery, and files still being written finish
+                let waits = self.hide_while_opening();
                 if self.leave_artwork() {
                     files::finish_writing();
                     files::tell_what_was_told();
                     self.closed = true;
                     event_loop.exit();
+                } else if waits && let Some(screen) = &self.screen {
+                    screen.window.set_visible(true);
                 }
             }
             WindowEvent::Resized(size) => {
@@ -423,6 +457,8 @@ impl ApplicationHandler for App {
 
     /// A pen read by the app itself moved: its touches and hovering, as winit's would come.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
+        // (the start's watch asks too)
+        startup::answered();
         let Some(window) = self.screen.as_ref().map(|s| (s.window.id(), s.window.scale_factor())) else { return };
         for event in pen::take_events(window.1) {
             self.window_event(event_loop, window.0, event);
@@ -439,6 +475,7 @@ impl ApplicationHandler for App {
         if std::mem::replace(&mut self.closed, true) {
             return;
         }
+        self.hide_while_opening();
         if !self.leave_artwork() {
             log::error!("the artwork open couldn't be kept as the app ended");
         }
@@ -463,6 +500,10 @@ impl ApplicationHandler for App {
         }
         if let Some(fine) = self.screen.as_mut().and_then(Screen::canvases_made) {
             self.canvases_made(fine, event_loop);
+            // the gallery's note that they are being made goes
+            if let Some(screen) = &self.screen {
+                screen.window.request_redraw();
+            }
         }
         // what the files written meanwhile had to say; looked at again soon while any is writing
         files::tell_what_was_told();
@@ -512,6 +553,11 @@ impl App {
         let size = screen.window.inner_size();
         let scale = screen.window.scale_factor() as f32;
         session.set_display_scale(scale);
+        // the system's ask for less motion: a dropped colour's fill shows at once
+        session.set_reduce_motion(colour_drop::reduce_motion());
+        // until it shows, a driver crashing counts against the backend (unless a canvas has drawn
+        // on it before)
+        startup::canvas_opening();
         // its layers go up on a thread of their own (an artwork of many takes seconds), the window
         // drawing meanwhile
         let (gpu, opened) = (screen.gpu.clone(), session.clone());
@@ -566,6 +612,13 @@ impl App {
         if self.screen.is_none() {
             return;
         }
+        // on OpenGL nothing is drawn while the canvases' pipelines are made (see
+        // `Screen::gl_busy`), and nothing that would draw is taken in: looked at again soon (the
+        // window answers meanwhile)
+        if self.screen.as_ref().is_some_and(Screen::gl_busy) {
+            self.again = Some(Instant::now() + Duration::from_millis(100));
+            return;
+        }
         self.take_dropped();
         self.imported();
         self.artwork_read();
@@ -603,6 +656,8 @@ impl App {
         // an export shows its own card; the veil is for a slow save
         let exporting = !self.ui.export_card.busy()
             && files::exporting_since().is_some_and(|since| since.elapsed() >= SLOW_OPENING);
+        // a canvas opening while the pipelines are still being made waits for them: it says so
+        let opening = opening_words(self.opening.is_some() && screen.canvases_waited().is_some());
         screen.size_interface(self.ui.plugins(), Some(session.as_ref()));
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
@@ -612,7 +667,7 @@ impl App {
                 zoom.over_canvas(ui.ctx(), &mut self.gallery, &mut self.ui.look);
             }
             if slow {
-                opening_veil(ui.ctx());
+                veil(ui.ctx(), opening);
             } else if exporting {
                 veil(ui.ctx(), "Exporting…");
             } else if finishing_slowly {
@@ -674,6 +729,10 @@ impl App {
                     || photo.as_ref().is_some_and(|(since, ..)| since.elapsed() >= SLOW_OPENING),
             ),
         };
+        // the canvases' pipelines still being made after a moment: said at the gallery's foot
+        let waited = screen.canvases_waited();
+        // (on OpenGL from the first frame, which stays while they are made)
+        let getting_ready = waited.is_some_and(|w| w >= CANVASES_SLOW) || screen.canvases_later();
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             interface.style_once(ui.ctx());
             // closing: the gallery settling back into place, the canvas fading over it
@@ -690,12 +749,19 @@ impl App {
             interface.plugin_alert(ui.ctx());
             if reading == Some(true) {
                 opening_veil(ui.ctx());
+            } else if getting_ready {
+                getting_ready_note(ui.ctx());
             }
         });
         self.again = screen.draw(None, self.started, output).map(|after| Instant::now() + after);
-        // looked at again soon while an artwork is read
-        if reading.is_some() {
-            let soon = Instant::now() + Duration::from_millis(50);
+        // looked at again soon while an artwork is read, and once the pipelines have taken long
+        // enough to say so (once made, the window is asked to draw again)
+        let soon = match waited {
+            _ if reading.is_some() => Some(Instant::now() + Duration::from_millis(50)),
+            Some(waited) if !getting_ready => Some(Instant::now() + CANVASES_SLOW.saturating_sub(waited)),
+            _ => None,
+        };
+        if let Some(soon) = soon {
             self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }
         if self.title != "ProCraft" {
@@ -1059,8 +1125,16 @@ impl App {
         // nothing they show can be drawn (and with the screen gone this happens once)
         self.projection = None;
         self.screen = None;
-        files::tell("The graphics device stopped", "ProCraft starts again, with the artwork as it was last saved.");
-        startup::start_again(None);
+        // as a backend starts, or a canvas first draws on it, that counts against the backend
+        if let Some(tried) = startup::device_lost() {
+            log::warn!("the graphics device stopped as this backend started: starting again on the next");
+            if !startup::start_on_next(tried) {
+                startup::stopped("the graphics device stopped, and it couldn't start itself again");
+            }
+        } else {
+            files::tell("The graphics device stopped", "ProCraft starts again, with the artwork as it was last saved.");
+            startup::start_again(None);
+        }
         event_loop.exit();
     }
 
@@ -1085,7 +1159,9 @@ impl App {
         log::warn!("the canvases' pipelines failed on this graphics backend: starting again on the next");
         self.screen = None;
         self.closed = true;
-        startup::start_again(Some(tried));
+        if !startup::start_again(Some(tried)) {
+            startup::stopped("its pipelines failed on this graphics backend, and it couldn't start itself again");
+        }
         event_loop.exit();
     }
 
@@ -1093,6 +1169,20 @@ impl App {
     fn artwork_folder(&self) -> Option<String> {
         let folder = self.artwork.as_deref().and_then(|d| std::path::Path::new(d).parent());
         folder.map(|f| f.to_string_lossy().into_owned()).filter(|f| *f != self.gallery.store.root())
+    }
+
+    /// The window goes from the screen while the artwork open is still being made (its canvas
+    /// waits for the canvases' pipelines: a minute or more on a slow GPU's shader compiler), as
+    /// keeping it waits for that: no window stands still meanwhile. True if it went.
+    fn hide_while_opening(&self) -> bool {
+        let waits = self.opening.as_ref().is_some_and(|(_, made)| !made.is_finished());
+        if waits && let Some(screen) = &self.screen {
+            log::info!(
+                "closing while a canvas is still being made: the window goes, the artwork is kept once it is made"
+            );
+            screen.window.set_visible(false);
+        }
+        waits
     }
 
     /// The artwork open is put away and kept; false if it couldn't be.

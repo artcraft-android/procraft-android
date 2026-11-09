@@ -291,6 +291,11 @@ pub struct Colours {
     /// saturation.
     coords: [f32; 3],
     coords_of: Option<(ColourModel, u32)>,
+    /// The panel picks the background's colour (the Layers panel's Background color row tapped):
+    /// titled so, with a tick that closes it, and its colour sent to no brush (the interface takes
+    /// it to the background); and the tick tapped.
+    pub background: bool,
+    pub background_done: bool,
 }
 
 impl Default for Colours {
@@ -327,6 +332,8 @@ impl Default for Colours {
             model_chosen: None,
             coords: [0.0; 3],
             coords_of: None,
+            background: false,
+            background_done: false,
         }
     }
 }
@@ -577,6 +584,10 @@ impl Colours {
     }
 
     pub fn send(&self, session: &CanvasSession) {
+        // picking the background's colour, the brush keeps its own
+        if self.background {
+            return;
+        }
         let [r, g, b] = self.rgb();
         session.set_color(r, g, b);
         let [r, g, b] = self.secondary;
@@ -641,7 +652,17 @@ impl Colours {
                 ui.allocate_rect(rect, Sense::click());
                 panel::frame(ui, look, "colour frame", rect, arrow_x, backdrops);
                 let body = panel::body(rect);
-                if self.mode == Mode::Palettes {
+                if self.background {
+                    // titled so on every page, with a tick 12 in from the right that closes it
+                    panel::header(ui, look, body, "Background", 20.0, false, false);
+                    let tick =
+                        Rect::from_min_size(pos2(body.right() - 12.0 - 44.0, body.top() + 19.0), vec2(44.0, 44.0));
+                    ui.painter().circle_filled(tick.center(), 22.0, argb(pc::ACCENT));
+                    look.icon(ui, &icons::DONE_TICK, tick.center(), 40.0, Color32::WHITE);
+                    if ui.interact(tick, ui.scope_id().with("background done"), Sense::click()).clicked() {
+                        self.background_done = true;
+                    }
+                } else if self.mode == Mode::Palettes {
                     panel::header(ui, look, body, "Palettes", 20.0, false, false);
                     // the plus: a new palette, from a file or a picture, or the examples back
                     let plus =
@@ -658,7 +679,7 @@ impl Colours {
                 let swatch = vec2(43.0, 25.0);
                 let second = Rect::from_min_size(pos2(body.right() - 20.0 - swatch.x, body.top() + 21.5), swatch);
                 let first = second.translate(vec2(-(swatch.x + 7.0), 0.0));
-                if self.mode != Mode::Palettes {
+                if self.mode != Mode::Palettes && !self.background {
                     // the colour model, for the pages that work in one
                     if self.mode != Mode::Harmony {
                         let model =
@@ -679,10 +700,12 @@ impl Colours {
                 }
                 let grabber = Rect::from_center_size(pos2(body.center().x, body.top() + 6.0), vec2(40.0, 4.0));
                 ui.painter().rect_filled(grabber, 2, argb(GRABBER));
-                // dragged out by its grabber, the panel floats as a window of its own
+                // dragged out by its grabber, the panel floats as a window of its own (not while
+                // it picks the background's colour)
                 let handle = Rect::from_center_size(pos2(body.center().x, body.top() + 15.0), vec2(150.0, 30.0));
                 let held = ui.interact(handle, ui.scope_id().with("undock"), Sense::drag());
-                if held.dragged()
+                if !self.background
+                    && held.dragged()
                     && let (Some(p), Some(from)) = (held.interact_pointer_pos(), ui.input(|i| i.pointer.press_origin()))
                     && p.distance(from) > UNDOCK_DRAG
                 {
@@ -2283,5 +2306,57 @@ mod tests {
             let back = hue_at(HueControl::Slider, hue_position(HueControl::Slider, hue));
             assert!((back - hue).abs() < 1e-3, "{hue} came back {back}");
         }
+    }
+
+    #[test]
+    fn picking_the_background_the_panel_says_so_and_leaves_the_brush_s_colour() {
+        use egui::{Event, Modifiers, PointerButton, RawInput};
+        let (ctx, mut look, mut drop) = (egui::Context::default(), Look::default(), ColourDrop::default());
+        crate::look::install_fonts(&ctx);
+        let session = CanvasSession::new(64, 64);
+        let mut colours = Colours { mode: Mode::Disc, ..Colours::default() };
+        colours.send(&session);
+        let brush = session.color();
+        colours.background = true;
+        // a colour taken while it picks the background goes to no brush
+        colours.set_rgb(&session, 0x3366CC);
+        assert_eq!(session.color(), brush);
+        assert_eq!(to_hex(colours.rgb()), 0x3366CC);
+        // its tick, 12 in from the right, level with the title, closes it
+        let button = Rect::from_min_size(pos2(1000.0, 10.0), vec2(40.0, 40.0));
+        let (mut tick, mut history) = (Pos2::ZERO, true);
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        for step in 0..6 {
+            let events = match step {
+                2 => vec![Event::PointerMoved(tick)],
+                3 => vec![press(tick, true)],
+                4 => vec![press(tick, false)],
+                _ => Vec::new(),
+            };
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 1100.0))),
+                time: Some(f64::from(step) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let shown =
+                    colours.show(ui.ctx(), &mut look, &session, &mut drop, button, &mut history, &mut Vec::new());
+                let body = panel::body(shown);
+                tick = pos2(body.right() - 12.0 - 22.0, body.top() + 19.0 + 22.0);
+            });
+            output.textures_delta.clear();
+        }
+        assert!(colours.background_done);
+        assert_eq!(session.color(), brush);
+        // picking done, the brush's colour goes to the brush again
+        colours.background = false;
+        colours.set_rgb(&session, 0xCC3366);
+        assert_ne!(session.color(), brush);
     }
 }

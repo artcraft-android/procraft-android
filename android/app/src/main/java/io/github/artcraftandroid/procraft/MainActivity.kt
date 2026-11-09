@@ -15,6 +15,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.ProjectionPresentation
+import io.github.artcraftandroid.procraft.canvas.PEN_DOUBLE_TAP_KEY
+import io.github.artcraftandroid.procraft.canvas.PenDoubleTaps
 import io.github.artcraftandroid.procraft.canvas.penKeyButton
 import kotlinx.coroutines.launch
 import io.github.artcraftandroid.procraft.ui.AppRoot
@@ -156,8 +158,15 @@ class MainActivity : ComponentActivity() {
         return super.dispatchTouchEvent(e)
     }
 
+    private val penDoubleTaps = PenDoubleTaps()
+
     /** A hardware keyboard's shortcuts on the canvas (keys no text field took). */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        // a pen's double-tap that comes as a key of its own: as its first button, once for each
+        if (keyCode == PEN_DOUBLE_TAP_KEY) {
+            if (event.repeatCount == 0 && penDoubleTaps.isNew(event.eventTime)) vm.penKey(false)
+            return true
+        }
         // a pen's side button that comes as a key
         val penButton = event.device?.let { penKeyButton(keyCode, it.sources or event.source, it.keyboardType, it.name) }
         if (penButton != null && (event.repeatCount > 0 || vm.penKey(penButton))) return true

@@ -525,6 +525,59 @@ fn a_window_in_the_glass_only_softens_what_is_behind() {
     assert_eq!(pixel(&alone, 400, 99, 25)[0], 255, "above the window: as it was");
 }
 
+#[test]
+fn a_window_in_the_glass_shows_a_slanted_edge_without_steps() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the white canvas turned 30 degrees on black, its edge running down through a window; the
+    // frost's 24 px blur draws the scene four times smaller, whose texels would show as steps
+    let mut doc = Document::new(100, 100);
+    doc.background = [1.0, 1.0, 1.0];
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("slanted glass"),
+        size: wgpu::Extent3d { width: 400, height: 200, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let turned =
+        View::centred(procraft_engine::geom::Vec2::new(50.0, 50.0), 1.6, 30f32.to_radians(), (400, 200)).unwrap();
+    let window = [[0.0, 0.0, 400.0, 200.0, 0.0, 1.0]];
+    canvas.render(
+        &gpu,
+        &mut doc,
+        Some(Target {
+            view: &view,
+            format,
+            size: (400, 200),
+            to_screen: turned.to_screen(),
+            surround: [0.0, 0.0, 0.0],
+            grid: None,
+            selection: None,
+            backdrop: Some(Backdrop { regions: &[], windows: &window, sigma: 24.0 }),
+            convert: None,
+            lut: None,
+            crisp_from: f32::INFINITY,
+            grey: false,
+        }),
+    );
+    let px = read(&gpu, &target, 400, 200);
+    // where each row first turns light, going in from the left: along a straight edge it moves
+    // a little each row, never in jumps of a texel's size
+    let crossing = |y: u32| (0..400u32).find(|&x| pixel(&px, 400, x, y)[0] >= 128);
+    let rows: Vec<u32> = (60..140).filter_map(crossing).collect();
+    assert!(rows.len() > 70, "the edge crosses the rows looked at");
+    let jumps: Vec<u32> = rows.windows(2).map(|w| w[0].abs_diff(w[1])).collect();
+    let most = jumps.iter().copied().max().unwrap_or(0);
+    assert!(most <= 2, "the edge jumps {most} px between rows: {jumps:?}");
+}
+
 /// What the glass over the bars costs a frame: the canvas shown with and without it, at the
 /// tablet's size, waiting for the GPU each time. Run with `--ignored --nocapture`.
 #[test]
@@ -1763,6 +1816,36 @@ fn a_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
     let (plain, bled) = (laid(0.0), laid(1.0));
     assert!(plain.0 > 240 && bled.0 > 240, "{plain:?} {bled:?}");
     assert!(plain.1 > 20 && bled.1 == 0, "{plain:?} {bled:?}");
+}
+
+#[test]
+fn a_little_pressure_bleed_lays_even_a_stamp_s_whole_middle_short_of_full() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the bleed's contrast is (1 + b) a - b / sqrt(b p), b eight times the bleed and p its
+    // pressure: a little bleed cuts more than it lifts, so even a whole part lays 1 + b - sqrt(b)
+    // at full pressure (0.815 for a bleed of 0.0075), less at a lighter one; a bleed of 1/8 or
+    // more lays it whole
+    let laid = |bleed: f32, press: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+        canvas.add_stamps(&[Stamp { grain_bleed: bleed, grain_press: press, ..dot(Vec2::new(32.0, 32.0), 24.0) }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        i32::from(pixel(&layer, 64, 32, 32)[3])
+    };
+    let contrast = |bleed: f32, press: f32| {
+        let b = 8.0 * bleed;
+        (((1.0 + b) - b / (b * press).sqrt()).clamp(0.0, 1.0) * 255.0).round() as i32
+    };
+    assert!(laid(0.0, 1.0) > 250, "{}", laid(0.0, 1.0));
+    for (bleed, press) in [(0.0075, 1.0), (0.0075, 0.5), (0.125, 1.0)] {
+        let (got, formula) = (laid(bleed, press), contrast(bleed, press));
+        assert!((got - formula).abs() <= 3, "bleed {bleed} at {press}: {got}, formula {formula}");
+    }
+    assert!(contrast(0.0075, 1.0) < 210 && contrast(0.125, 1.0) == 255);
 }
 
 #[test]
@@ -3490,4 +3573,43 @@ fn a_long_stroke_of_large_stamps_is_more_than_one_piece() {
     canvas.end_stroke();
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(canvas.pieces_sent(), sent);
+}
+
+#[test]
+fn a_hard_round_tip_s_thinnest_line_keeps_close_to_its_size() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the ink across a line of hard round stamps (pixels of full paint, wherever the line falls
+    // on the pixels), laid as a stroke spaces them
+    let ink = |radius: f32, gap: f32| {
+        let offsets = [0.0, 0.25, 0.5, 0.75];
+        let total: f32 = offsets
+            .iter()
+            .map(|&off| {
+                let mut doc = Document::new(64, 64);
+                let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+                let mut s = style(StrokeTool::Paint, 1.0);
+                s.hardness = 0.98;
+                canvas.begin_stroke(doc.current(), s);
+                let stamps: Vec<Stamp> = (0..)
+                    .map(|i| 8.0 + i as f32 * gap)
+                    .take_while(|&x| x < 56.0)
+                    .map(|x| dot(Vec2::new(x, 32.0 + off), radius))
+                    .collect();
+                canvas.add_stamps(&stamps);
+                canvas.end_stroke();
+                canvas.render(&gpu, &mut doc, None);
+                let px = canvas.read_composite(&gpu).unwrap();
+                (16..48).map(|y| f32::from(255 - pixel(&px, 64, 32, y)[0]) / 255.0).sum::<f32>()
+            })
+            .sum();
+        total / offsets.len() as f32
+    };
+    // the least tip (half a pixel across) lays a line about one and a half pixels of paint, not
+    // the two and a quarter a tip reaching as far as a big one's would
+    let least = ink(0.25, 0.6);
+    assert!(least > 1.2 && least < 1.8, "{least}");
+    // from about 6 px across a line is as wide as before: d + 1.5 or so
+    let wide = ink(4.0, 1.35);
+    assert!((wide - 9.5).abs() < 0.3, "{wide}");
 }

@@ -152,6 +152,15 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
     bar
 }
 
+/// Where the side bar is in `window`, against its right edge or its left.
+pub fn side_bar_rect(window: Rect, right: bool) -> Rect {
+    let (top, track_height) = pc::side_bar_fit(window.height());
+    // shorter tracks bring what is under each up with them
+    let shorter = pc::SLIDER_HEIGHT - track_height;
+    let left = if right { window.right() - pc::SIDE_BAR_WIDTH } else { window.left() };
+    Rect::from_min_size(pos2(left, window.top() + top), vec2(pc::SIDE_BAR_WIDTH, pc::SIDE_BAR_HEIGHT - shorter * 2.0))
+}
+
 /// The side bar's sliders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Slider {
@@ -222,15 +231,11 @@ impl SideBar {
         let mut taps = SideTaps::default();
         let ctx = ui.ctx().clone();
         let window = ctx.content_rect();
-        let (top, track_height) = pc::side_bar_fit(window.height());
+        let (_, track_height) = pc::side_bar_fit(window.height());
         // shorter tracks bring what is under each up with them
         let shorter = pc::SLIDER_HEIGHT - track_height;
         let opacity_top = OPACITY_TRACK_TOP - shorter;
-        let left = if right { window.right() - pc::SIDE_BAR_WIDTH } else { window.left() };
-        let bar = Rect::from_min_size(
-            pos2(left, window.top() + top),
-            vec2(pc::SIDE_BAR_WIDTH, pc::SIDE_BAR_HEIGHT - shorter * 2.0),
-        );
+        let bar = side_bar_rect(window, right);
         // a control's left edge in the bar, mirrored on the right
         let x = |left: f32, width: f32| if right { pc::SIDE_BAR_WIDTH - left - width } else { left };
         let at = |l: f32, y: f32, w: f32, h: f32| Rect::from_min_size(bar.min + vec2(x(l, w), y), vec2(w, h));

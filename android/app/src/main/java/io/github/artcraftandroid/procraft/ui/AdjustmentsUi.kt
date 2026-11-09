@@ -259,15 +259,37 @@ private fun Adjustment.icon() = when (this) {
     Adjustment.PLUGIN -> PcIcons.Adjustments
 }
 
-/**
- * Whether the adjustment toolbars lay their sliders side by side: on a screen wider than tall, as
- * measured in landscape (upright they stack).
- */
+/** The window's width, which the adjustment toolbars and the animation bar lay themselves out by (not its shape). */
 @Composable
-private fun widePanels(): Boolean {
-    val screen = androidx.compose.ui.platform.LocalConfiguration.current
-    return screen.screenWidthDp > screen.screenHeightDp
-}
+internal fun windowWidth(): Dp =
+    with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width.toDp() }
+
+/**
+ * Where each toolbar lays its sliders side by side (as measured in landscape; upright, stacked): the
+ * window less 8 each side at least this. Liquify's whole row: the window itself at least this.
+ */
+private val HsbSideBySide = 800.dp
+private val BalanceSideBySide = 820.dp
+private val GlitchSideBySide = 820.dp
+private val NoiseSideBySide = 904.dp
+private val BloomSideBySide = 800.dp
+private val GradientSideBySide = 800.dp
+private val LiquifyFullFrom = 1000.dp
+
+/** Whether a toolbar lays its sliders side by side in a window [window] wide, from [from]. */
+internal fun sideBySide(window: Dp, from: Dp): Boolean = window - 16.dp >= from
+
+/** A toolbar [natural] wide where there is room, in a window [window] wide: no wider than the window less 8 each side. */
+internal fun toolbarWidth(natural: Dp, window: Dp): Dp = minOf(natural, window - 16.dp).coerceAtLeast(0.dp)
+
+/** Each of [count] sliders [natural] wide in a toolbar [full] wide, now the toolbar is [width] wide: what it gave up shared among them. */
+internal fun squeezed(natural: Dp, count: Int, full: Dp, width: Dp): Dp = natural - (full - width) / count
+
+/**
+ * Liquify's whole row in a window [window] wide: its four sliders a quarter of the window less 108
+ * (at most 300 each), the row 40 less than the window (1093 on a 1133 window, as measured).
+ */
+internal fun liquifyFullWidth(window: Dp): Dp = minOf(window - 40.dp, 1268.dp)
 
 /** The floating panel of hue, saturation and brightness, each 0..100% with 50% leaving the layer as it was. */
 @Composable
@@ -278,10 +300,11 @@ fun HsbPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
         HsbRow("Saturation", s, Brush.horizontalGradient(listOf(Color(0xFF808080), Color(0xFFFF0000))), { lerp(Color(0xFF808080), Color.Red, it) }, m) { vm.setHsb(h, it, b) }
         HsbRow("Brightness", b, Brush.horizontalGradient(listOf(Color.Black, Color.White)), { lerp(Color.Black, Color.White, it) }, m) { vm.setHsb(h, s, it) }
     }
-    if (widePanels()) {
-        // side by side, 301 wide and 13 apart
+    val window = windowWidth()
+    if (sideBySide(window, HsbSideBySide)) {
+        // side by side, 301 wide and 13 apart (narrower where the window is)
         Row(
-            modifier.offset(y = (-25).dp).size(961.dp, 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
+            modifier.offset(y = (-25).dp).size(toolbarWidth(961.dp, window), 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(13.dp),
         ) { rows(Modifier.weight(1f)) }
     } else {
@@ -347,13 +370,15 @@ private val BALANCE_TONES = listOf("Shadows", "Midtones", "Highlights")
 @Composable
 fun ColorBalancePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     val tone = vm.balanceTone
-    if (widePanels()) {
+    val window = windowWidth()
+    if (sideBySide(window, BalanceSideBySide)) {
+        val width = toolbarWidth(903.dp, window)
         Row(
-            modifier.offset(y = (-25).dp).size(903.dp, 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, top = 24.dp, bottom = 16.dp),
+            modifier.offset(y = (-25).dp).size(width, 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, top = 24.dp, bottom = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(19.dp),
         ) {
             BALANCE_PAIRS.forEachIndexed { k, (left, right, colours) ->
-                BalanceRow(left, right, vm.balance[tone * 3 + k], Brush.horizontalGradient(colours), Modifier.width(251.dp)) { vm.setBalance(k, it) }
+                BalanceRow(left, right, vm.balance[tone * 3 + k], Brush.horizontalGradient(colours), Modifier.width(squeezed(251.dp, 3, 903.dp, width))) { vm.setBalance(k, it) }
             }
             MoreButton("Color Balance") {
                 OptionsGroup {
@@ -520,8 +545,9 @@ private val CurveMenuFill get() = if (Pc.light) Color(0xFFF0F0F0) else Color(0xF
 @Composable
 fun GradientMapPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     val editing = vm.gradientEditing
-    // wider on a wide screen, showing more of the library
-    val width = if (widePanels()) 835.dp else 544.dp
+    // wider in a wide window, showing more of the library
+    val window = windowWidth()
+    val width = if (sideBySide(window, GradientSideBySide)) toolbarWidth(835.dp, window) else 544.dp
     Column(modifier.offset(y = (-25).dp).size(width, 159.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(horizontal = 14.dp, vertical = 12.dp)) {
         Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (editing != null) "Gradient Map" else "Gradient Library", color = MenuText, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f).padding(start = 14.dp))
@@ -787,9 +813,10 @@ fun LiquifyPanel(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifie
 
 @Composable
 private fun LiquifyPanelAndMenus(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifier: Modifier) {
-    // upright too where the wide panel's 1093 won't fit, a big interface size leaving that little room
-    val wide = widePanels() && androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 1093
-    if (wide) LiquifyWide(vm, modifier) else LiquifyUpright(vm, modifier)
+    // the whole row in a window wide enough for it
+    val wide = screenWidth >= LiquifyFullFrom
+    val full = liquifyFullWidth(screenWidth)
+    if (wide) LiquifyWide(vm, full, modifier) else LiquifyUpright(vm, modifier)
     // the way's list and the adjust slider open over the panel's buttons
     val panelLeft = (screenWidth - 654.dp) / 2
     val buttonsTop = if (wide) screenHeight - 25.dp - 162.dp + 28.dp else screenHeight - 25.dp - 16.dp - 40.dp
@@ -816,8 +843,8 @@ private fun LiquifyPanelAndMenus(vm: CanvasViewModel, screenWidth: Dp, screenHei
             }
         }
         2 -> {
-            // over the Adjust button: the middle one upright, the ninth of the row when wide
-            val centre = if (wide) (screenWidth - 1093.dp) / 2 + 86.dp + 94.dp * 8 + 37.5.dp else screenWidth / 2
+            // over the Adjust button: the middle one upright, the ninth of the row (921 wide, centred) when wide
+            val centre = if (wide) (screenWidth - full) / 2 + (full - 921.dp) / 2 + 94.dp * 8 + 37.5.dp else screenWidth / 2
             val left = (centre - 130.dp).coerceIn(0.dp, screenWidth - 260.dp)
             MenuPopover(centre - left, left, buttonsTop) {
                 MenuTitle("Strength")
@@ -846,14 +873,15 @@ private val LiquifyLabel get() = if (Pc.light) Color(0xFF414141) else Color(0xFF
 private val LiquifyDim get() = if (Pc.light) Color(0xFF989898) else Color(0xFF575757)
 
 /**
- * Liquify on a wide screen (1093 x 162): its ways, Adjust and Reset as a row of icon buttons (75
- * wide, 94 apart; the chosen way's icon blue), and the four sliders side by side under them.
+ * Liquify in a wide window ([width] x 162: 1093 on a 1133 window): its ways, Adjust and Reset as a
+ * row of icon buttons (75 wide, 94 apart; the chosen way's icon blue), and the four sliders side by
+ * side under them.
  */
 @Composable
-private fun LiquifyWide(vm: CanvasViewModel, modifier: Modifier) {
+private fun LiquifyWide(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
     val percent = { v: Float, none: String? -> if (v >= 1f) "Max" else if (v <= 0f && none != null) none else "${(v * 100).roundToInt()}%" }
     Column(
-        modifier.offset(y = (-25).dp).size(1093.dp, 162.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 28.dp),
+        modifier.offset(y = (-25).dp).size(width, 162.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         val canAdjust = vm.liquified
@@ -1084,9 +1112,11 @@ private val GLITCH_KINDS = listOf(
 /** The glitch toolbar: its four kinds above the kind's sliders, two to a row. */
 @Composable
 fun GlitchPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
-    val wide = widePanels()
+    val window = windowWidth()
+    val wide = sideBySide(window, GlitchSideBySide)
+    val width = if (wide) toolbarWidth(973.dp, window) else 640.dp
     Column(
-        modifier.offset(y = (-25).dp).size(if (wide) 973.dp else 640.dp, if (wide) 120.dp else 167.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(top = 8.dp),
+        modifier.offset(y = (-25).dp).size(width, if (wide) 120.dp else 167.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(top = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         KindsSwitch(466.dp, GLITCH_KINDS.map { (kind, label, width) -> Kind(kind.icon(), label, width) }, GLITCH_KINDS.indexOfFirst { it.first == vm.glitchKind }) {
@@ -1099,10 +1129,11 @@ fun GlitchPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
         }
         val values = vm.glitchValues[vm.glitchKind].orEmpty()
         Spacer(Modifier.height(12.dp))
-        // on a wide screen all in one row, 19 apart
+        // in a wide window all in one row, 19 apart
         if (wide) {
-            val each = (941.dp - 19.dp * (names.size - 1)) / names.size
-            Row(Modifier.width(941.dp).height(54.dp), horizontalArrangement = Arrangement.spacedBy(19.dp)) {
+            val inner = width - 32.dp
+            val each = (inner - 19.dp * (names.size - 1)) / names.size
+            Row(Modifier.width(inner).height(54.dp), horizontalArrangement = Arrangement.spacedBy(19.dp)) {
                 for (k in names.indices) {
                     val both = vm.glitchKind == GlitchKind.DIVERGE && k < 3
                     val v = values.getOrElse(k) { 0f }
@@ -1241,7 +1272,7 @@ fun NoisePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
             vm.chooseNoiseKind(kinds[it])
         }
     }
-    if (widePanels()) {
+    if (sideBySide(windowWidth(), NoiseSideBySide)) {
         // the sliders side by side, single or multi channel and additive in the "•••" menu
         OptionsPanel(903.dp, 113.dp, modifier, 8.dp) {
             switch()
@@ -1301,13 +1332,16 @@ private val NoiseButton get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF1
 /** The bloom toolbar: transition, size and burn. */
 @Composable
 fun BloomPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
-    if (widePanels()) {
-        // side by side, 301 wide and 39 apart
-        OptionsPanel(1013.dp, 95.dp, modifier, 24.dp) {
-            Row(Modifier.width(981.dp), horizontalArrangement = Arrangement.spacedBy(39.dp)) {
-                OptionSlider("Transition", vm.bloomTransition, shown(vm.bloomTransition, max = true), 301.dp) { vm.setBloomValue(0, it) }
-                OptionSlider("Size", vm.bloomSize, shown(vm.bloomSize, max = true), 301.dp) { vm.setBloomValue(1, it) }
-                OptionSlider("Burn", vm.bloomBurn, shown(vm.bloomBurn, max = true), 301.dp) { vm.setBloomValue(2, it) }
+    val window = windowWidth()
+    if (sideBySide(window, BloomSideBySide)) {
+        // side by side, 301 wide and 39 apart (narrower where the window is)
+        val width = toolbarWidth(1013.dp, window)
+        val slider = squeezed(301.dp, 3, 1013.dp, width)
+        OptionsPanel(width, 95.dp, modifier, 24.dp) {
+            Row(Modifier.width(width - 32.dp), horizontalArrangement = Arrangement.spacedBy(39.dp)) {
+                OptionSlider("Transition", vm.bloomTransition, shown(vm.bloomTransition, max = true), slider) { vm.setBloomValue(0, it) }
+                OptionSlider("Size", vm.bloomSize, shown(vm.bloomSize, max = true), slider) { vm.setBloomValue(1, it) }
+                OptionSlider("Burn", vm.bloomBurn, shown(vm.bloomBurn, max = true), slider) { vm.setBloomValue(2, it) }
             }
         }
         return

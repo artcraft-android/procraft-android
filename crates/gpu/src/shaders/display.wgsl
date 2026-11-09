@@ -52,7 +52,11 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_display(i: Out) -> @location(0) vec4<f32> {
-    let c = textureSample(composite, smp, i.uv);
+    return shown(textureSample(composite, smp, i.uv));
+}
+
+// a canvas colour (premultiplied) as the target shows it
+fn shown(c: vec4<f32>) -> vec4<f32> {
     // see-through parts (a hidden background) show what is drawn behind the canvas, the surround
     if (c.a <= 0.0) {
         return vec4<f32>(0.0);
@@ -81,6 +85,59 @@ fn fs_display(i: Out) -> @location(0) vec4<f32> {
         rgb = srgb_to_linear(rgb);
     }
     return vec4<f32>(rgb * c.a, c.a);
+}
+
+// ---- a veil: part of the canvas as it was, over it but for a hole ---------------------------
+// The texture bound as `composite` is the veil's picture, and du maps its 0..1 to clip space.
+
+struct VeilUniform {
+    // the veil's rectangle on the canvas: left, top, width, height (canvas pixels)
+    rect: vec4<f32>,
+    // the colour round the canvas as the target takes it, for the picture's see-through parts;
+    // then how many points the hole's outline has
+    surround: vec4<f32>,
+    // the hole's outline in canvas pixels, two points an entry
+    points: array<vec4<f32>, 32>,
+}
+
+@group(3) @binding(0) var<uniform> vu: VeilUniform;
+
+fn hole_point(k: u32) -> vec2<f32> {
+    let e = vu.points[k / 2u];
+    return select(e.xy, e.zw, (k & 1u) == 1u);
+}
+
+@fragment
+fn fs_veil(i: Out) -> @location(0) vec4<f32> {
+    let c = textureSample(composite, smp, i.uv);
+    let p = vu.rect.xy + i.uv * vu.rect.zw;
+    // the canvas pixels a target pixel spans: the hole's edge is smoothed over one target pixel
+    let across = max(length(dpdx(p)), 1e-4);
+    let n = min(u32(vu.surround.w), 64u);
+    var inside = false;
+    var near = 1e9;
+    for (var k = 0u; k < n; k++) {
+        let a = hole_point(k);
+        let b = hole_point((k + 1u) % n);
+        if ((a.y > p.y) != (b.y > p.y)) {
+            let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if (p.x < x) {
+                inside = !inside;
+            }
+        }
+        let ab = b - a;
+        let t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+        near = min(near, length(p - a - ab * t));
+    }
+    // how much of this pixel is outside the hole (all of it with no hole)
+    let cover = select(clamp(select(near, -near, inside) / across + 0.5, 0.0, 1.0), 1.0, n < 3u);
+    if (cover <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let s = shown(c);
+    // where the picture is see-through, what was round the canvas showed through it
+    let rgb = s.rgb + vu.surround.rgb * (1.0 - s.a);
+    return vec4<f32>(rgb * cover, cover);
 }
 
 // ---- thumbnails: part of a layer box-filtered down to the target ----------------------------

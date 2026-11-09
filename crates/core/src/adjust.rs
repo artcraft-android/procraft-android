@@ -333,8 +333,10 @@ impl CanvasSession {
         if st.doc.is_locked(current) || st.doc.layer(current).is_none_or(|l| !l.visible || l.text.is_some()) {
             return false;
         }
+        let alpha_locked = st.doc.layer(current).is_some_and(|l| l.alpha_lock);
         let Some(canvas) = st.canvas.as_mut() else { return false };
         canvas.mark_steps();
+        canvas.set_filter_keeps_alpha(alpha_locked);
         canvas.begin_transform(current);
         st.adjusting = true;
         st.last_filter = None;

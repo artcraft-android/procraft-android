@@ -132,7 +132,6 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
             val shown = when (vm.referenceMode) {
                 CanvasViewModel.ReferenceMode.CANVAS, CanvasViewModel.ReferenceMode.MODEL -> vm.referenceCanvas
                 CanvasViewModel.ReferenceMode.IMAGE -> vm.referenceImage
-                CanvasViewModel.ReferenceMode.FACE -> null
             }
             val view = if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE) vm.referenceImageView else vm.referenceCanvasView
             val glass = remember(shown) { shown?.let(::glassOf) }
@@ -172,7 +171,6 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                             }
                         }
                     }
-                    CanvasViewModel.ReferenceMode.FACE -> Text("Not available on this device", color = Muted, fontSize = 14.sp)
                 }
             }
             // what a bar at [top] (window pixels) has behind it: the window, and the picture blurred
@@ -213,9 +211,10 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                     Modifier.width(270.dp).height(35.dp).clip(CircleShape).background(SegmentTrack).padding(2.dp),
                     horizontalArrangement = Arrangement.spacedBy(11.dp),
                 ) {
-                    // on a model the third is the model itself
-                    val third = if (vm.modelOpen) CanvasViewModel.ReferenceMode.MODEL to "3D" else CanvasViewModel.ReferenceMode.FACE to "Face"
-                    for ((mode, label) in listOf(CanvasViewModel.ReferenceMode.CANVAS to "Canvas", CanvasViewModel.ReferenceMode.IMAGE to "Image", third)) {
+                    // on a model the third is the model itself; no Face without face tracking
+                    val kinds = listOf(CanvasViewModel.ReferenceMode.CANVAS to "Canvas", CanvasViewModel.ReferenceMode.IMAGE to "Image") +
+                        listOfNotNull((CanvasViewModel.ReferenceMode.MODEL to "3D").takeIf { vm.modelOpen })
+                    for ((mode, label) in kinds) {
                         val on = vm.referenceMode == mode
                         Box(
                             Modifier.weight(1f).fillMaxHeight().clip(CircleShape).background(if (on) Pc.Accent else Color.Transparent)

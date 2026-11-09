@@ -177,7 +177,10 @@ impl Shape {
             ShapeKind::Triangle => polygon(stroke, 3).unwrap_or_else(|| self.clone()),
             ShapeKind::EquilateralTriangle => equilateral(&polygon(stroke, 3).unwrap_or_else(|| self.clone())),
             ShapeKind::Line => line_of(stroke),
-            _ => self.clone(),
+            ShapeKind::Arc => fit_arc(stroke).unwrap_or_else(|| self.clone()),
+            ShapeKind::Polyline => {
+                Shape { kind: ShapeKind::Polyline, nodes: simplify(stroke, CORNER_TOLERANCE * size(stroke)) }
+            }
         }
     }
 
@@ -356,6 +359,36 @@ impl Shape {
 
 /// The shapes a held stroke (canvas points, in drawing order) could be, best first; empty if it is
 /// too short to be anything.
+/// `stroke` as a shape is fitted to, without a hook at its end: over its last stretch, from the
+/// last point farther than `reach` from its end, the line should only come closer to that end;
+/// where it first turns away again (a flick as the pen lifts), the rest is left off.
+pub fn without_end_hook(stroke: &[Vec2], reach: f32) -> &[Vec2] {
+    let n = stroke.len();
+    let Some(&end) = stroke.last() else { return stroke };
+    if n < 4 || !reach.is_finite() {
+        return stroke;
+    }
+    let away = |i: usize| stroke.get(i).map_or(0.0, |p| p.distance(end));
+    // the last point out of reach (at least the third)
+    let from = (3..n).rev().find(|&i| away(i) > reach).unwrap_or(2);
+    let mut before = away(from);
+    for (i, p) in stroke.iter().enumerate().skip(from + 1) {
+        let now = p.distance(end);
+        if now > before {
+            return stroke.get(..i).unwrap_or(stroke);
+        }
+        before = now;
+    }
+    stroke
+}
+
+/// How near its end a stroke's hook is looked for ([`without_end_hook`]): a quarter of the
+/// stroke's box across, and no more than `most` (canvas pixels).
+pub fn end_hook_reach(stroke: &[Vec2], most: f32) -> f32 {
+    let (lo, hi) = bounds(stroke);
+    (lo.distance(hi) / 4.0).min(most)
+}
+
 pub fn recognise(stroke: &[Vec2]) -> Vec<Shape> {
     let pts: Vec<Vec2> = stroke.iter().copied().filter(|p| p.is_finite()).collect();
     let length = path_length(&pts);
@@ -1054,6 +1087,50 @@ mod tests {
         let before = bent.clone();
         bent.move_handle(1, start.lerp(end, 0.5));
         assert_eq!(bent, before);
+    }
+
+    #[test]
+    fn a_line_chosen_goes_back_to_the_arc_or_polyline_it_was_offered_beside() {
+        let arc: Vec<Vec2> = (0..=40)
+            .map(|i| {
+                let t = i as f32 / 40.0 * 2.0;
+                Vec2::new(200.0 + 150.0 * t.cos(), 200.0 + 150.0 * t.sin())
+            })
+            .collect();
+        let bend: Vec<Vec2> = (0..=40)
+            .map(|i| {
+                let t = i as f32;
+                if i <= 20 { Vec2::new(10.0 * t, 0.0) } else { Vec2::new(200.0, 10.0 * (t - 20.0)) }
+            })
+            .collect();
+        for (stroke, kind) in [(&arc, ShapeKind::Arc), (&bend, ShapeKind::Polyline)] {
+            let found = recognise(stroke);
+            assert_eq!(found.iter().map(|s| s.kind).collect::<Vec<_>>(), [kind, ShapeKind::Line]);
+            let line = found[0].as_kind(ShapeKind::Line, stroke);
+            assert_eq!(line.kind, ShapeKind::Line);
+            let back = line.as_kind(kind, stroke);
+            assert_eq!(back.kind, kind);
+            assert_eq!(back.nodes, found[0].nodes);
+        }
+    }
+
+    #[test]
+    fn a_hook_at_the_end_is_left_off_and_a_clean_end_kept() {
+        // a straight line left to right that runs on past where it ends, then comes back to it
+        // as the pen lifts
+        let mut line: Vec<Vec2> = (0..=50).map(|i| Vec2::new(4.0 * i as f32, 100.0)).collect();
+        let clean = line.len();
+        line.extend([Vec2::new(204.0, 98.0), Vec2::new(200.0, 95.0), Vec2::new(194.0, 94.0)]);
+        let reach = end_hook_reach(&line, 30.0);
+        assert_eq!(reach, 30.0);
+        let kept = without_end_hook(&line, reach);
+        assert!(kept.len() <= clean + 1 && kept.len() > clean - 10, "{} of {}", kept.len(), line.len());
+        assert_eq!(recognise(kept)[0].kind, ShapeKind::Line);
+        // a line that comes straight in to its end keeps all of it
+        let straight: Vec<Vec2> = (0..=50).map(|i| Vec2::new(4.0 * i as f32, 100.0)).collect();
+        assert_eq!(without_end_hook(&straight, 30.0).len(), straight.len());
+        // a small stroke looks for a hook only near its end
+        assert_eq!(end_hook_reach(&straight[..6], 30.0), 5.0);
     }
 
     #[test]

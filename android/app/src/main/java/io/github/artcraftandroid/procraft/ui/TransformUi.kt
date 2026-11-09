@@ -31,10 +31,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,6 +62,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -100,7 +103,6 @@ private const val HELD_SCALE = 1.5f
 /** How long a let-go rotate or box-turning node takes to spring back (ms). */
 private const val HANDLE_RETURN_MS = 500
 
-private val ToolbarWidth = 728.dp
 private val ToolbarHeight = 126.dp
 private val ToolbarBottom = 25.dp
 private val ToolbarCorner = 33.dp
@@ -114,12 +116,21 @@ private val SegmentText get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFC
 private val ButtonText get() = if (Pc.light) Color(0xFF414141) else Color(0xFFA3A3A3)
 private val ButtonDimmed get() = if (Pc.light) Color(0xFF989898) else Color(0xFF575757)
 private val SegmentGap = 11.33.dp
-/** The transform toolbar's buttons: with room (landscape), and where the screen is narrow. */
+/** The transform toolbar's buttons with room for all of it (landscape), its widest icon, and its ways' pill. */
 private val TransformButtonRoomy = 89.dp
+private val TransformIcon = 50.dp
+private val TransformPill = 481.dp
 internal val ButtonWidth = 83.dp
 private val ButtonHeight = 60.dp
-/** The space between a roomy toolbar's buttons. */
+/** The space between a floating toolbar's buttons, however wide they are. */
 private val ButtonGap = 19.dp
+/** A floating toolbar is kept this far from each side of the window, its buttons this far inside it. */
+private val ToolbarMargin = 8.dp
+private val ToolbarPadding = 16.dp
+/** The buttons' names show only where the room beside the margins is at least this. */
+private val NamesFrom = 700.dp
+/** The ways' pill, as measured and tightened: the space between the ways and inside each. */
+private val SegmentGapTight = 2.dp
 
 internal val MenuWidth = 260.dp
 private val MenuArrow = 15.dp
@@ -258,7 +269,7 @@ internal fun Modifier.tap(onClick: () -> Unit): Modifier = composed {
 @Composable
 fun TransformToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = Modifier) {
     FloatingToolbar(
-        toolbarLayout(screenWidth, 7, TransformButtonRoomy, ButtonWidth),
+        toolbarLayout(screenWidth, 7, TransformButtonRoomy, TransformIcon, TransformPill),
         onBackground = { vm.transformPopup = TransformPopup.NONE },
         modifier = modifier,
         segments = {
@@ -289,17 +300,54 @@ fun TransformToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
     }
 }
 
-/** A floating toolbar's width and its buttons' width. */
-internal data class ToolbarLayout(val width: Dp, val button: Dp)
+/**
+ * A floating toolbar's width and its buttons' width; how big their icons are drawn (1: as
+ * measured) and whether their names show; and whether its ways' pill is tightened.
+ */
+internal data class ToolbarLayout(val width: Dp, val button: Dp, val iconScale: Float = 1f, val names: Boolean = true, val tightPill: Boolean = false)
 
 /**
- * A floating toolbar of [count] buttons on a screen [screenWidth] wide: with room, [roomy]-wide
- * buttons 19 apart inside its padding (as measured in landscape); else across the screen (8 clear
- * of each side, at most 728) with [narrow]-wide buttons spread over it.
+ * A floating toolbar of [count] buttons in a window [screenWidth] wide. With room, its buttons are
+ * [roomy] wide (as measured in landscape); where the window less 8 each side is narrower, it is
+ * that wide and its buttons share what is left inside its padding, 19 apart (on a 744 window:
+ * 728, as measured upright). Where the room beside the margins is under 700, the buttons' names
+ * go. Icons as big as [icon] are drawn smaller only where they would run into each other; the
+ * ways' pill, [pill] wide as measured, is tightened only where it doesn't fit.
  */
-internal fun toolbarLayout(screenWidth: Dp, count: Int, roomy: Dp, narrow: Dp): ToolbarLayout {
-    val wide = roomy * count + ButtonGap * (count - 1) + 32.dp
-    return if (wide <= screenWidth - 16.dp) ToolbarLayout(wide, roomy) else ToolbarLayout(minOf(ToolbarWidth, screenWidth - 16.dp), narrow)
+internal fun toolbarLayout(screenWidth: Dp, count: Int, roomy: Dp, icon: Dp, pill: Dp): ToolbarLayout {
+    val gaps = ButtonGap * (count - 1)
+    val room = screenWidth - ToolbarMargin * 2
+    val width = minOf(roomy * count + gaps + ToolbarPadding * 2, room).coerceAtLeast(0.dp)
+    val inner = width - ToolbarPadding * 2
+    val button = ((inner - gaps) / count).coerceAtLeast(0.dp)
+    val iconScale = ((button + ButtonGap) / icon).coerceIn(0f, 1f)
+    return ToolbarLayout(width, button, iconScale, names = room >= NamesFrom, tightPill = pill > inner)
+}
+
+/** How a floating toolbar's buttons are drawn: their icons' scale, whether their names show. */
+private val LocalToolbarFit = staticCompositionLocalOf { ToolbarLayout(0.dp, 0.dp) }
+
+/** Whether the ways' pill is tightened. */
+private val LocalTightPill = staticCompositionLocalOf { false }
+
+/**
+ * Shows its content as wide as it asks, or where there is less room, scaled down to fit it
+ * (touches and all), centred.
+ */
+private fun Modifier.fitWidth(): Modifier = layout { measurable, constraints ->
+    val p = measurable.measure(constraints.copy(minWidth = 0, maxWidth = Constraints.Infinity))
+    val room = constraints.maxWidth
+    if (p.width <= room) {
+        layout(p.width, p.height) { p.place(0, 0) }
+    } else {
+        val k = room.toFloat() / p.width
+        layout(room, p.height) {
+            p.placeWithLayer((room - p.width) / 2, 0) {
+                scaleX = k
+                scaleY = k
+            }
+        }
+    }
 }
 
 /**
@@ -320,15 +368,20 @@ internal fun FloatingToolbar(
             .clip(RoundedCornerShape(ToolbarCorner))
             .background(Brush.verticalGradient(0f to ToolbarTop, 0.12f to ToolbarFill))
             .tap(onBackground)
-            .padding(16.dp),
+            .padding(ToolbarPadding),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(
-            Modifier.height(34.dp).clip(CircleShape).background(SegmentTrack).border(0.5.dp, SegmentEdge, CircleShape).padding(2.dp),
-            horizontalArrangement = Arrangement.spacedBy(SegmentGap),
-            content = segments,
-        )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { buttons(layout.button) }
+        // a pill that still doesn't fit once tightened is drawn smaller
+        CompositionLocalProvider(LocalTightPill provides layout.tightPill) {
+            Row(
+                Modifier.fitWidth().height(34.dp).clip(CircleShape).background(SegmentTrack).border(0.5.dp, SegmentEdge, CircleShape).padding(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (layout.tightPill) SegmentGapTight else SegmentGap),
+                content = segments,
+            )
+        }
+        CompositionLocalProvider(LocalToolbarFit provides layout) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { buttons(layout.button) }
+        }
     }
 }
 
@@ -346,9 +399,10 @@ internal fun toolbarButtonsTop(screenHeight: Dp): Dp = screenHeight - ToolbarBot
 @Composable
 internal fun Segment(icon: ImageVector, label: String, selected: Boolean, iconSize: Dp = 26.5.dp, onClick: () -> Unit) {
     val tint = if (selected) Color.White else SegmentText
+    val tight = LocalTightPill.current
     Row(
         Modifier.height(30.dp).clip(CircleShape).background(if (selected) Pc.Accent else Color.Transparent).tap(onClick)
-            .padding(start = 14.dp, end = 20.dp),
+            .padding(start = if (tight) 6.dp else 14.dp, end = if (tight) 8.dp else 20.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
@@ -359,7 +413,10 @@ internal fun Segment(icon: ImageVector, label: String, selected: Boolean, iconSi
     }
 }
 
-/** A toolbar button: an icon over its name; blue while its popover is open. */
+/**
+ * A toolbar button: an icon over its name (in a narrow window the icon alone, drawn smaller where
+ * the buttons are too narrow for it); blue while its popover is open.
+ */
 @Composable
 internal fun ToolbarButton(
     icon: ImageVector,
@@ -376,10 +433,12 @@ internal fun ToolbarButton(
         active -> Pc.Accent
         else -> ButtonText
     }
+    val fit = LocalToolbarFit.current
+    val drawn = iconSize * fit.iconScale
     Box(Modifier.size(width, ButtonHeight).then(if (enabled) Modifier.tap(onClick) else Modifier)) {
         // icons centred 30 below the top, labels' capitals 50 below it
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.align(Alignment.TopCenter).offset(y = 30.dp - iconSize / 2).requiredSize(iconSize))
-        Text(
+        Icon(icon, contentDescription = if (fit.names) null else label, tint = tint, modifier = Modifier.align(Alignment.TopCenter).offset(y = 30.dp - drawn / 2).requiredSize(drawn))
+        if (fit.names) Text(
             label,
             color = if (enabled) ButtonText else ButtonDimmed,
             fontSize = labelSize,
@@ -406,7 +465,7 @@ private fun interpolationName(i: Interpolation, short: Boolean): String = when (
 fun TransformPopover(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
     val popup = vm.transformPopup
     if (popup == TransformPopup.NONE) return
-    val layout = toolbarLayout(screenWidth, 7, TransformButtonRoomy, ButtonWidth)
+    val layout = toolbarLayout(screenWidth, 7, TransformButtonRoomy, TransformIcon, TransformPill)
     val buttonCentre = toolbarButtonCentre(screenWidth, layout, if (popup == TransformPopup.SNAPPING) 0 else 5, 7)
     val left = (buttonCentre - MenuWidth / 2).coerceIn(0.dp, screenWidth - MenuWidth)
     MenuPopover(buttonCentre - left, left, bottom = toolbarButtonsTop(screenHeight)) {

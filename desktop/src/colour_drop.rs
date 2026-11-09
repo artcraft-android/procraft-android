@@ -4,12 +4,15 @@
 //! fills (the shared touches do that), one slid across the screen changing the threshold, until
 //! the band's tick. Held still a moment while dragged, the colour comes to rest where it is and a
 //! slide sets the threshold, the fill shown as it goes (the core's `ColourDrag` says when).
+//! Dragged, the colour is drawn as the core's `ColourBlob` works it out: a drop pulled out of the
+//! colour button that lets go and follows as a ball. Its fill spreads in (the core's
+//! `pour_drop`).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
-use procraft_core::{CanvasSession, ColourDrag, DragStep, Fill};
+use procraft_core::{BlobShape, CanvasSession, ColourBlob, ColourDrag, DragStep, Fill};
 
 use crate::colours::{of_hex, srgb};
 use crate::look::{Themed, Weight, argb, pc, text};
@@ -19,8 +22,6 @@ use crate::overlays::ease;
 const SLOP: f32 = 8.0;
 /// A press held still this long is a hold.
 const HOLD: Duration = Duration::from_millis(400);
-/// The dragged colour's dot, across.
-const DOT: f32 = 55.5;
 /// How long the band offers to continue filling after a drop.
 const OFFERED: Duration = Duration::from_millis(2500);
 const SLIDE: f32 = 0.3;
@@ -65,6 +66,8 @@ struct Press {
     avoid: Option<Rect>,
     /// The colour being dragged out: where it is, and whether it has come to rest.
     drag: Option<Arc<ColourDrag>>,
+    /// And as it is drawn.
+    blob: Option<Arc<ColourBlob>>,
 }
 
 pub struct ColourDrop {
@@ -84,6 +87,9 @@ pub struct ColourDrop {
     /// The dragged colour came to rest and its slid threshold began filling (or was refused).
     poured: bool,
     refused: bool,
+    /// The colour button's centre, as last drawn: over the bars a dragged colour shrinks the
+    /// further it is from it.
+    button: Option<Pos2>,
 }
 
 impl Default for ColourDrop {
@@ -98,6 +104,7 @@ impl Default for ColourDrop {
             sliding: false,
             poured: false,
             refused: false,
+            button: None,
         }
     }
 }
@@ -120,6 +127,9 @@ impl ColourDrop {
     ) -> Option<Touch> {
         let response = ui.interact(rect, id, Sense::click_and_drag());
         let ctx = ui.ctx();
+        if !swatch {
+            self.button = Some(rect.center());
+        }
         let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
         // pressed and let go between two frames: a tap never seen down
         if response.clicked() && self.press.as_ref().is_none_or(|p| p.id != id) {
@@ -129,8 +139,16 @@ impl ColourDrop {
             && response.is_pointer_button_down_on()
             && let Some(origin) = at
         {
-            self.press =
-                Some(Press { id, origin, since: Instant::now(), held: false, dragging: false, avoid, drag: None });
+            self.press = Some(Press {
+                id,
+                origin,
+                since: Instant::now(),
+                held: false,
+                dragging: false,
+                avoid,
+                drag: None,
+                blob: None,
+            });
         }
         let press = self.press.as_mut().filter(|p| p.id == id)?;
         let at = at.unwrap_or(press.origin);
@@ -144,7 +162,7 @@ impl ColourDrop {
             return (!held && !dragging).then_some(Touch::Tap);
         }
         if press.dragging {
-            let (drag, avoid) = (press.drag.clone(), press.avoid);
+            let (drag, avoid, blob) = (press.drag.clone(), press.avoid, press.blob.clone());
             let ms = ctx.input(|i| i.time) * 1000.0;
             let step = drag.as_ref().map_or(
                 DragStep { dot_x: at.x, dot_y: at.y, resting: false, threshold: self.threshold, slid: false },
@@ -172,6 +190,10 @@ impl ColourDrop {
             }
             // poured, the fill shows instead of the dot
             self.dot = (!self.poured).then_some((dot, rgb));
+            if let Some(blob) = blob {
+                let button = self.button.unwrap_or(dot);
+                blob.point_to(dot.x, dot.y, over_bar(ctx, dot), button.x, button.y);
+            }
             if step.slid {
                 self.slide(ctx, session, step, rgb);
             }
@@ -182,8 +204,17 @@ impl ColourDrop {
         }
         if at.distance(press.origin) > SLOP {
             press.dragging = true;
+            let ms = ctx.input(|i| i.time) * 1000.0;
             // a mouse or a pen: a little wobble still rests
-            press.drag = Some(ColourDrag::new(at.x, at.y, ctx.input(|i| i.time) * 1000.0, true, self.threshold));
+            press.drag = Some(ColourDrag::new(at.x, at.y, ms, true, self.threshold));
+            // pulled out of the colour button's centre, or from where a swatch was pressed; a pen
+            // moving the pointer drags a pen's dot
+            let from = if swatch { press.origin } else { rect.center() };
+            let pen = crate::pen::mouse_pen().is_some();
+            let blob = ColourBlob::new(from.x, from.y, !swatch, pen, reduce_motion(), ms);
+            let button = self.button.unwrap_or(from);
+            blob.point_to(at.x, at.y, over_bar(ctx, at), button.x, button.y);
+            press.blob = Some(blob);
             self.poured = false;
             self.refused = false;
             self.swatch = swatch.then_some(rgb);
@@ -222,7 +253,7 @@ impl ColourDrop {
             (Some(at), Some((_, rgb))) => {
                 let ppp = ctx.pixels_per_point();
                 let [r, g, b] = of_hex(rgb);
-                session.pour_begin(at.x * ppp, at.y * ppp, r, g, b, self.threshold)
+                session.pour_drop(at.x * ppp, at.y * ppp, r, g, b, self.threshold)
             }
             _ => false,
         };
@@ -253,7 +284,7 @@ impl ColourDrop {
         }
         let ppp = ctx.pixels_per_point();
         let [r, g, b] = of_hex(rgb);
-        self.poured = session.pour_begin(at.x * ppp, at.y * ppp, r, g, b, threshold);
+        self.poured = session.pour_drop(at.x * ppp, at.y * ppp, r, g, b, threshold);
         self.refused = !self.poured;
     }
 
@@ -305,12 +336,14 @@ impl ColourDrop {
         if self.band != Band::None {
             self.shown = self.band;
         }
-        if let Some((at, rgb)) = self.dot {
-            ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("colour drop dot"))).circle_filled(
-                at,
-                DOT / 2.0,
-                srgb(of_hex(rgb)),
-            );
+        // the dragged colour, pulled out and carried along as the core works it out
+        let blob = self.press.as_ref().filter(|p| p.dragging).and_then(|p| p.blob.clone());
+        if let (Some((_, rgb)), Some(blob)) = (self.dot, blob) {
+            let shape = blob.shape(ctx.input(|i| i.time) * 1000.0);
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("colour drop dot")));
+            paint_blob(&painter, &shape, srgb(of_hex(rgb)), ctx.pixels_per_point());
+            // it springs and wobbles on its own
+            ctx.request_repaint();
         }
         let out = ease(ctx.animate_bool_with_time(Id::unique("colour drop band"), self.band != Band::None, SLIDE));
         if out <= 0.0 {
@@ -386,4 +419,54 @@ impl ColourDrop {
             ctx.request_repaint();
         }
     }
+}
+
+/// Whether window point `p` (points) is over one of the bars: the top bar, or the side bar.
+fn over_bar(ctx: &egui::Context, p: Pos2) -> bool {
+    p.y <= pc::BAR_HEIGHT || crate::panel::side_bar_shown_at(ctx).is_some_and(|bar| bar.contains(p))
+}
+
+/// Fills `shape` in `colour`: its triangles, their edges smoothed by its rims drawn a pixel wide.
+fn paint_blob(painter: &egui::Painter, shape: &BlobShape, colour: Color32, ppp: f32) {
+    let mut mesh = egui::Mesh::default();
+    for [ax, ay, bx, by, cx, cy] in shape.triangles.as_chunks::<6>().0 {
+        let first = mesh.vertices.len() as u32;
+        for (x, y) in [(ax, ay), (bx, by), (cx, cy)] {
+            mesh.colored_vertex(pos2(*x, *y), colour);
+        }
+        mesh.add_triangle(first, first + 1, first + 2);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    for rim in &shape.rims {
+        let points: Vec<Pos2> = rim.points.as_chunks::<2>().0.iter().map(|[x, y]| pos2(*x, *y)).collect();
+        if points.len() > 1 {
+            painter.add(egui::Shape::line(points, Stroke::new(1.0 / ppp.max(0.1), colour)));
+        }
+    }
+}
+
+/// Whether the system asks for less motion: Windows' animation effects turned off.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn reduce_motion() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut on = windows::core::BOOL(1);
+    // reads one BOOL into `on`, which outlives the call
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&raw mut on).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    read.is_ok() && !on.as_bool()
+}
+
+/// Whether the system asks for less motion: not known here.
+#[cfg(not(windows))]
+pub fn reduce_motion() -> bool {
+    false
 }

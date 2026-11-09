@@ -399,10 +399,20 @@ impl CanvasSession {
         self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
     }
 
-    /// A new empty root-level layer (outside any group), placed above the active
+/// A new empty root-level layer (outside any group), placed above the active
     /// root frame/group; made current.
     pub fn add_root_layer(&self) -> u64 {
-        self.change("new layer", |d| d.has_room(1).then(|| d.add_root_layer().0)).unwrap_or(0)
+        self.change("new layer", |d| {
+            if !d.has_room(1) {
+                return None;
+            }
+            let pages = d.animation.as_ref().is_some_and(|a| a.pages);
+            let id = d.add_root_layer();
+            let n = procraft_engine::animation::frames(d).len();
+            d.rename(id, &format!("{} {n}", if pages { "Page" } else { "Frame" }));
+            Some(id.0)
+        })
+        .unwrap_or(0)
     }
 
     /// Makes `id` the layer painting goes to, and the only one chosen (no picks): an undo step,
@@ -613,6 +623,15 @@ impl CanvasSession {
         } else {
             None
         }
+    }
+
+    /// Why `adjustment` can't start on the current layer, if it can't: as [`Self::why_blocked`],
+    /// and Liquify turns away a layer whose alpha is locked.
+    pub fn why_not_adjusted(&self, adjustment: crate::adjust_menu::Adjustment) -> Option<Blocked> {
+        self.why_blocked().or_else(|| {
+            let liquify = adjustment == crate::adjust_menu::Adjustment::Liquify;
+            (liquify && self.layers().iter().any(|l| l.current && l.alpha_lock)).then_some(Blocked::AlphaLocked)
+        })
     }
 
     /// Why a change to the current layer would go unseen, if it would (what a hidden alert
@@ -1070,6 +1089,8 @@ pub enum Blocked {
     /// A group is current where a stroke or a fill takes a layer
     /// ([`CanvasSession::why_unpainted`]).
     Group,
+    /// Liquify on a layer whose alpha is locked ([`CanvasSession::why_not_adjusted`]).
+    AlphaLocked,
 }
 
 /// Why a change to the current layer would go unseen (see [`CanvasSession::hidden_by`]).

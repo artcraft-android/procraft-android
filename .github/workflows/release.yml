@@ -3,7 +3,7 @@
 # GitHub and publish the draft) of:
 #
 #   procraft-<version>-android-arm64.apk          64-bit ARM tablets, signed with the release key
-#   procraft-<version>-android-arm32.apk          32-bit ARM tablets, signed likewise
+#   procraft-<version>-android-legacy-arm32.apk   older 32-bit ARM tablets, signed likewise (named to list after arm64)
 #   procraft-<version>-windows-x64.msi            the desktop app's installer (packaging/windows)
 #   procraft-<version>-windows-x64-portable.zip   the desktop app to run from anywhere
 #   procraft-<version>-windows-arm64.msi          the same for Windows on ARM (Snapdragon PCs)
@@ -114,7 +114,7 @@ jobs:
           PROCRAFT_KEY_PASSWORD: ${{ secrets.PROCRAFT_KEY_PASSWORD }}
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          for build in arm64-v8a:arm64 armeabi-v7a:arm32; do
+          for build in arm64-v8a:arm64 armeabi-v7a:legacy-arm32; do
             ./gradlew --no-daemon :app:assembleRelease "-Pprocraft.abis=${build%:*}" "-Pprocraft.version=$VERSION"
             cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/procraft-$VERSION-android-${build#*:}.apk"
           done

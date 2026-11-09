@@ -196,7 +196,7 @@ impl AnimationBar {
             if tapped(ui, add, "add") {
                 self.stop(session);
                 self.options_open = false;
-                if session.add_layer() == 0 {
+                if session.add_frame() == 0 {
                     said = Some(Said::NoRoom);
                 }
             }

@@ -20,7 +20,10 @@ import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +57,7 @@ fun AppRoot(vm: CanvasViewModel) {
             ExportProgress(vm.exportShown, vm::cancelExport)
             ImportProgress(vm.importShown, vm::cancelImport)
             PluginOfferAlert(vm)
+            WrongBuildAlert(vm)
             return@ProCraftTheme
         }
         // back closes an open panel first, then leaves the artwork for the gallery
@@ -158,7 +162,15 @@ fun AppRoot(vm: CanvasViewModel) {
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
-                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
+                        // where it is, for a dragged colour over it
+                        DisposableEffect(Unit) { onDispose { vm.sideBarBounds = null } }
+                        SideBar(
+                            vm,
+                            aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInWindow() },
+                            right = vm.rightHanded,
+                            trackHeight = sideBar.track,
+                            shown = barsShown,
+                        )
                     }
                 }
                 NoticeBand(vm)
@@ -366,6 +378,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.MESH_LOCKED -> "Mesh is locked"
                 CanvasViewModel.Blocked.GROUP_HIDDEN -> "Group is hidden"
                 CanvasViewModel.Blocked.GROUP -> "Group is selected"
+                CanvasViewModel.Blocked.ALPHA_LOCKED -> "Alpha Lock is on"
             }
         },
         message = { (w, l) ->
@@ -376,19 +389,21 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.GROUP -> "“${l.name}” is a group: choose one of its layers to paint on."
                 CanvasViewModel.Blocked.MESH_HIDDEN -> "“${vm.meantMeshName()}” can't be painted while it is hidden."
                 CanvasViewModel.Blocked.MESH_LOCKED -> "“${vm.meantMeshName()}” can't be painted while it is locked."
+                CanvasViewModel.Blocked.ALPHA_LOCKED -> "“${l.name}” can't be liquified while its alpha is locked."
             }
         },
         action = "Open Layers",
         onCancel = { vm.answerBlocked(fix = false, openLayers = false) },
         onAction = { vm.answerBlocked(fix = false, openLayers = true) },
         icon = when (why) {
-            CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> PcIcons.PageLocked
+            CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED, CanvasViewModel.Blocked.ALPHA_LOCKED -> PcIcons.PageLocked
             CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> PcIcons.EyeStruck
             else -> PcIcons.Folder
         },
         destructive = false,
         extra = when (why) {
             CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> "Unlock"
+            CanvasViewModel.Blocked.ALPHA_LOCKED -> "Turn Off"
             CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> "Show"
             else -> null
         },

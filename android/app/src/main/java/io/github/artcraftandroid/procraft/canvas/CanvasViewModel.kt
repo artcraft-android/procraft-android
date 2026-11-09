@@ -417,6 +417,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** When the cursor's size was last read (uptime ms). */
     private var cursorReadAt = 0L
 
+    /** Where Liquify's ring is (window pixels), and its radius there: its reach while it is open. */
+    var liquifyRingAt by mutableStateOf<Offset?>(null)
+        private set
+    var liquifyRingRadius by mutableStateOf(0f)
+        private set
+
+    /** Shows Liquify's ring at window point [p] (none hides it), sized for its brush and the zoom. */
+    fun showLiquifyRing(p: Offset?) {
+        val s = session
+        if (p == null || s == null || adjustment != Adjustment.LIQUIFY) {
+            liquifyRingAt = null
+            return
+        }
+        liquifyRingRadius = io.github.artcraftandroid.procraft.core.liquifyReach(liquifySize) * s.info().zoom
+        liquifyRingAt = p
+    }
+
     /** The light interface: light grey panels and bars with dark text. */
     var lightInterface by mutableStateOf(interfacePrefs.getBoolean(LIGHT_INTERFACE, false).also { io.github.artcraftandroid.procraft.ui.Pc.light = it })
         private set
@@ -451,6 +468,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun movedNoticeRead() {
         movedNotice = null
     }
+
+    /**
+     * The 32-bit build running on a tablet that runs 64-bit apps: the 64-bit build is the one for
+     * it (newer Android warns about 32-bit apps). Said once for each version.
+     */
+    var wrongBuildNotice by mutableStateOf(
+        !android.os.Process.is64Bit() && android.os.Build.SUPPORTED_64_BIT_ABIS.isNotEmpty() &&
+            interfacePrefs.getString(WRONG_BUILD_SAID, null) != appVersion(),
+    )
+        private set
+
+    fun wrongBuildNoticeRead() {
+        wrongBuildNotice = false
+        interfacePrefs.edit().putString(WRONG_BUILD_SAID, appVersion()).apply()
+    }
+
+    private fun appVersion(): String =
+        getApplication<Application>().let { a -> runCatching { a.packageManager.getPackageInfo(a.packageName, 0).versionName }.getOrNull() } ?: ""
 
     /** A plugin file waiting on the one screen that asks about it, and what it holds. */
     var pluginOffer by mutableStateOf<io.github.artcraftandroid.procraft.core.PluginOffer?>(null)
@@ -2495,6 +2530,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.setBrushScaling(brushOnScreen)
         s.setLightInterface(lightInterface)
         s.setInterfaceSize(interfaceShown)
+        // the system's animations off: a dropped colour's fill shows at once
+        s.setReduceMotion(!android.animation.ValueAnimator.areAnimatorsEnabled())
         applyPlugins(s)
         // as it was left, or fitted
         if (!orientationMemory) s.forgetSavedView()
@@ -2873,8 +2910,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             KeyShortcut.CopyLayer -> copyLayer()
             KeyShortcut.CutLayer -> cutLayer()
             KeyShortcut.Paste -> paste()
-            KeyShortcut.Paint -> select(ToolKind.PAINT)
-            KeyShortcut.Erase -> select(ToolKind.ERASE)
+            KeyShortcut.Paint -> toolKey(ToolKind.PAINT)
+            KeyShortcut.Erase -> toolKey(ToolKind.ERASE)
             KeyShortcut.Eyedropper -> pickNext = !pickNext
             KeyShortcut.Selection -> toggleSelecting()
             KeyShortcut.Transform -> toggleTransform()
@@ -3354,6 +3391,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshFlags()
     }
 
+    /** A tool's key: whatever mode is open ends, keeping what it made, as for the tool's button. */
+    private fun toolKey(tool: ToolKind) {
+        switchModes(ModeButton.Tool)
+        select(tool)
+    }
+
     fun toolPressed(tool: ToolKind) {
         // leaving a mode for a tool keeps what it made, and only picks the tool
         if (!switchModes(ModeButton.Tool)) {
@@ -3660,7 +3703,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- the reference window ----
 
-    enum class ReferenceMode { CANVAS, IMAGE, FACE, MODEL }
+    /** What the window shows. A face needs face tracking, which this app doesn't have yet, so an
+     *  artwork saved showing one opens on the canvas, and Face isn't offered. */
+    enum class ReferenceMode { CANVAS, IMAGE, MODEL }
 
     var referenceOn by mutableStateOf(false)
         private set
@@ -3731,9 +3776,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         forgetReference()
         val w = s.referenceWindow()
         referenceMode = when (w.shows) {
-            io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS -> ReferenceMode.CANVAS
             io.github.artcraftandroid.procraft.core.ReferenceShows.IMAGE -> ReferenceMode.IMAGE
-            io.github.artcraftandroid.procraft.core.ReferenceShows.FACE -> ReferenceMode.FACE
+            io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS,
+            io.github.artcraftandroid.procraft.core.ReferenceShows.FACE -> ReferenceMode.CANVAS
             io.github.artcraftandroid.procraft.core.ReferenceShows.MODEL -> ReferenceMode.MODEL
         }
         if (w.sized) referenceSize = DpSize(w.width.dp, w.height.dp)
@@ -3785,7 +3830,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 shows = when (referenceMode) {
                     ReferenceMode.CANVAS -> io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS
                     ReferenceMode.IMAGE -> io.github.artcraftandroid.procraft.core.ReferenceShows.IMAGE
-                    ReferenceMode.FACE -> io.github.artcraftandroid.procraft.core.ReferenceShows.FACE
                     ReferenceMode.MODEL -> io.github.artcraftandroid.procraft.core.ReferenceShows.MODEL
                 },
                 sized = referenceSize != DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp),
@@ -4174,7 +4218,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun currentIsText() = layers.firstOrNull { it.current }?.text == true
 
     /** Why the current layer turned a change away. */
-    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP, MESH_HIDDEN, MESH_LOCKED, GROUP_HIDDEN, GROUP }
+    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP, MESH_HIDDEN, MESH_LOCKED, GROUP_HIDDEN, GROUP, ALPHA_LOCKED }
 
     /** The current layer turned a change away, and why: a dialog offers to unlock or show it, or open Layers. */
     var blocked by mutableStateOf<Pair<Blocked, LayerInfo>?>(null)
@@ -4189,10 +4233,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * cutting); if not (locked, hidden, or an empty group), a dialog says why. What was tried is
      * not done afterwards. With [paint] (a stroke or a fill) a group current says so too.
      */
-    fun currentTakesChanges(paint: Boolean = false): Boolean {
+    fun currentTakesChanges(paint: Boolean = false, adjustment: Adjustment? = null): Boolean {
         val l = layers.firstOrNull { it.current } ?: return true
         // the shared core decides
-        val why = when (if (paint) session?.whyUnpainted() else session?.whyBlocked()) {
+        val asked = when {
+            paint -> session?.whyUnpainted()
+            adjustment != null -> session?.whyNotAdjusted(adjustment)
+            else -> session?.whyBlocked()
+        }
+        val why = when (asked) {
             io.github.artcraftandroid.procraft.core.Blocked.LOCKED -> Blocked.LOCKED
             io.github.artcraftandroid.procraft.core.Blocked.HIDDEN -> Blocked.HIDDEN
             io.github.artcraftandroid.procraft.core.Blocked.EMPTY_GROUP -> Blocked.EMPTY_GROUP
@@ -4200,6 +4249,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             io.github.artcraftandroid.procraft.core.Blocked.MESH_LOCKED -> Blocked.MESH_LOCKED
             io.github.artcraftandroid.procraft.core.Blocked.GROUP_HIDDEN -> Blocked.GROUP_HIDDEN
             io.github.artcraftandroid.procraft.core.Blocked.GROUP -> Blocked.GROUP
+            io.github.artcraftandroid.procraft.core.Blocked.ALPHA_LOCKED -> Blocked.ALPHA_LOCKED
             null -> return true
         }
         blockedBy = session?.hiddenBy()
@@ -4214,6 +4264,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (fix) {
             when (why) {
                 Blocked.LOCKED -> toggleLocked(l)
+                Blocked.ALPHA_LOCKED -> if (l.alphaLock) toggleAlphaLock(l)
                 // its own box ticked (what else hides it stays)
                 Blocked.HIDDEN, Blocked.GROUP_HIDDEN -> {
                     var said: String? = null
@@ -5892,7 +5943,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Opens adjustment [a] on the current layer (keeping one already open). */
     fun startAdjustment(a: Adjustment) {
         val s = session ?: return
-        if (!currentTakesChanges()) return
+        if (!currentTakesChanges(adjustment = a)) return
         switchModes(ModeButton.Adjustment)
         // the list fades away rather than going at once
         if (panel == Panel.ADJUSTMENTS) panelFading = true
@@ -5956,6 +6007,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Ends the adjustment: [commit] keeps it as one undo step, otherwise the layer goes back. */
     fun endAdjustment(commit: Boolean) {
+        liquifyRingAt = null
         if (adjustment == null) return
         // a gradient being edited is kept as it is
         if (gradientEditing != null) endGradientEdit()
@@ -6376,6 +6428,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var dropDot by mutableStateOf<Pair<Offset, Int>?>(null)
         private set
 
+    /** The dragged colour as it is drawn (the core's spring), while it is dragged. */
+    var dropBlob by mutableStateOf<io.github.artcraftandroid.procraft.core.ColourBlob?>(null)
+        private set
+
+    /** The colour button's centre and the side bar, where they are (window pixels): over the bars a dragged colour shrinks the further it is from the button. */
+    var dropButton: Offset? = null
+    var sideBarBounds: androidx.compose.ui.geometry.Rect? = null
+
     /** The threshold the colour fills with (0..1), kept from one drop to the next. */
     var dropThreshold by mutableFloatStateOf(transformPrefs.getFloat(DROP_THRESHOLD, 0.5f))
         private set
@@ -6400,9 +6460,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * A colour starts being dragged from the colour button, or [swatch] from the palette, at
-     * uptime [ms], by a pen or not ([pen]).
+     * uptime [ms], by a pen or not ([pen]), pulled out [from] the button's centre or the swatch.
      */
-    fun dropDragStart(at: Offset, swatch: Int? = null, pen: Boolean = false, ms: Long = android.os.SystemClock.uptimeMillis()) {
+    fun dropDragStart(at: Offset, swatch: Int? = null, pen: Boolean = false, ms: Long = android.os.SystemClock.uptimeMillis(), from: Offset = at) {
         if (swatch == null) closePanels()
         dropBandTimer?.cancel()
         dropSwatch = swatch
@@ -6411,6 +6471,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropPoured = false
         dropPourRefused = false
         colourDrag = io.github.artcraftandroid.procraft.core.ColourDrag(at.x / density, at.y / density, ms.toDouble(), pen, dropThreshold)
+        // with the system's animations off it neither stretches nor wobbles
+        val still = !android.animation.ValueAnimator.areAnimatorsEnabled()
+        dropBlob = io.github.artcraftandroid.procraft.core.ColourBlob(from.x / density, from.y / density, swatch == null, pen, still, ms.toDouble())
+        blobTo(at)
+    }
+
+    /** The drawn colour goes after window point [p]. */
+    private fun blobTo(p: Offset) {
+        val button = dropButton ?: p
+        val overBar = p.y <= io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density || sideBarBounds?.contains(p) == true
+        dropBlob?.pointTo(p.x / density, p.y / density, overBar, button.x / density, button.y / density)
     }
 
     /** The dragged colour's pointer moved to [at] at uptime [ms]: the dot follows, or, resting, the threshold slides. */
@@ -6419,6 +6490,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val step = drag.moved(at.x / density, at.y / density, ms.toDouble())
         val dot = Offset(step.dotX * density, step.dotY * density)
         dropDot = dropDot?.let { dot to it.second }
+        blobTo(dot)
         if (!step.slid) return
         if (dropPoured) {
             pourThreshold(step.threshold)
@@ -6462,6 +6534,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun dropDragEnd(at: Offset?) {
         val step = colourDrag?.now()
         colourDrag = null
+        dropBlob = null
         // come to rest, it fills where it rests (already, if its threshold was slid)
         val rested = step?.takeIf { it.resting }?.let { Offset(it.dotX * density, it.dotY * density) }
         if (dropPoured) {
@@ -6520,7 +6593,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val c = dropSwatch ?: colorRgb()
         val t = dropThreshold
-        return pourNow { s.pourBegin(p.x, p.y, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t) }
+        // made at once, and shown spreading in from where it landed
+        return pourNow { s.pourDrop(p.x, p.y, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t) }
     }
 
     /** Continue filling: the colour and threshold the canvas's (shared) touches fill with; none when not filling. */
@@ -7074,7 +7148,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun addFrame() {
         stopPlaying()
         frameOptionsOpen = false
-        addRootLayer()
+addRootLayer()
     }
 
     fun addPage() {
@@ -7531,6 +7605,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val FEEDBACK_SOUNDS = "feedback_sounds"
         const val SINGLE_TOUCH_COMPANION = "single_touch_companion"
         const val TAP_ASSISTANCE = "tap_assistance"
+
+        /** The version whose start last said the 32-bit build isn't the one for this tablet. */
+        const val WRONG_BUILD_SAID = "wrong_build_said"
 
         /**
          * The layered package's file extensions, and their names in the Share lists: ours, and the

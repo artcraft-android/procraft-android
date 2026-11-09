@@ -42,9 +42,10 @@ import io.github.artcraftandroid.procraft.canvas.SelectionKind
 import io.github.artcraftandroid.procraft.canvas.SelectionPopup
 import kotlin.math.roundToInt
 
-/** The selection toolbar's buttons: with room (landscape), and where the screen is narrow. */
+/** The selection toolbar's buttons with room for all of it (landscape), its widest icon, and its ways' pill. */
 private val SelectionButtonRoomy = 83.dp
-private val SelectionButtonWidth = 70.dp
+private val SelectionIcon = 44.dp
+private val SelectionPill = 524.dp
 private val FeatherWidth = 250.dp
 private val StartDot = Color(0xFFC7C7C7)
 private val SavedThumb = Color(0xFF000000)
@@ -55,7 +56,7 @@ fun SelectionToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
     val has = vm.hasSelection
     val drawing = vm.freehand.isNotEmpty()
     FloatingToolbar(
-        toolbarLayout(screenWidth, 8, SelectionButtonRoomy, SelectionButtonWidth),
+        toolbarLayout(screenWidth, 8, SelectionButtonRoomy, SelectionIcon, SelectionPill),
         onBackground = { vm.selectionPopup = SelectionPopup.NONE },
         modifier = modifier,
         segments = {
@@ -100,7 +101,7 @@ fun SelectionPopover(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
     val popup = vm.selectionPopup
     if (popup == SelectionPopup.NONE) return
     val width = if (popup == SelectionPopup.FEATHER) FeatherWidth else MenuWidth
-    val layout = toolbarLayout(screenWidth, 8, SelectionButtonRoomy, SelectionButtonWidth)
+    val layout = toolbarLayout(screenWidth, 8, SelectionButtonRoomy, SelectionIcon, SelectionPill)
     val centre = toolbarButtonCentre(screenWidth, layout, if (popup == SelectionPopup.FEATHER) 4 else 5, 8)
     val left = (centre - width / 2).coerceIn(0.dp, screenWidth - width)
     MenuPopover(centre - left, left, toolbarButtonsTop(screenHeight), width) {

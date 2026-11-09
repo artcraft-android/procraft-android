@@ -32,6 +32,12 @@ pub fn side_bar_at(ctx: &egui::Context, shown: bool, right: bool) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("side bar place"), SideBarPlace { shown, right }));
 }
 
+/// Where the side bar is this frame, if it shows.
+pub fn side_bar_shown_at(ctx: &egui::Context) -> Option<Rect> {
+    let side = ctx.data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place")))?;
+    side.shown.then(|| crate::chrome::side_bar_rect(ctx.content_rect(), side.right))
+}
+
 /// Where a panel `width` wide goes in the window, hanging from a button centred at `button_x`:
 /// its left edge and its arrow's tip from that edge. It is centred on the button (the tip
 /// `ARROW_SHIFT` right of the button's centre) and kept inside the window, clear of the side bar
