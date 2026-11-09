@@ -399,7 +399,7 @@ impl CanvasSession {
         self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
     }
 
-/// A new empty root-level layer (outside any group), placed above the active
+    /// A new empty root-level layer (outside any group), placed above the active
     /// root frame/group; made current.
     pub fn add_root_layer(&self) -> u64 {
         self.change("new layer", |d| {
