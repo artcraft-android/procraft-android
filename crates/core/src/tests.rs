@@ -6117,6 +6117,8 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
     let read = |b: &[u8]| brushfile::read(b).map(|f| BrushFile { thumbnail: None, ..f });
     let mut failures = Vec::new();
     let (mut brushes, mut grained, mut tipped) = (0, 0, 0);
+    // dual brushes, by the mode their two strokes combine by
+    let mut duals = std::collections::BTreeMap::<u32, usize>::new();
     for path in &files {
         let Some(s) = session(64, 64) else { return };
         let bytes = std::fs::read(path).unwrap();
@@ -6155,18 +6157,23 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
         }
         for i in 0..count {
             brushes += 1;
-            // whether it came with a grain, and a tip image (not our round one), of its own
-            let (grain, tip) = s
-                .shared
-                .lock()
-                .library
-                .get(set as usize)
-                .and_then(|l| l.brushes.get(i as usize))
-                .map_or((false, false), |b| (b.grain.source.is_some(), b.shape.source.is_some()));
+            // whether it came with a grain, and a tip image (not our round one), of its own, and
+            // a second's mode
+            let (grain, tip, dual) =
+                s.shared.lock().library.get(set as usize).and_then(|l| l.brushes.get(i as usize)).map_or(
+                    (false, false, None),
+                    |b| {
+                        let dual = b.secondary.as_ref().map(|_| b.setting("dual_blend").round() as u32);
+                        (b.grain.source.is_some(), b.shape.source.is_some(), dual)
+                    },
+                );
             grained += usize::from(grain);
             tipped += usize::from(tip);
+            if let Some(mode) = dual {
+                *duals.entry(mode).or_default() += 1;
+            }
             if std::env::var_os("BRUSH_CORPUS_LIST").is_some() {
-                eprintln!("{} #{}: tip {tip}, grain {grain}", path.display(), i + 1);
+                eprintln!("{} #{}: tip {tip}, grain {grain}, dual {dual:?}", path.display(), i + 1);
             }
             let at = format!("{} #{}", path.display(), i + 1);
             let drawn =
@@ -6198,6 +6205,7 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
         }
     }
     eprintln!("{} files, {brushes} brushes, {tipped} with a tip and {grained} with a grain of their own", files.len());
+    eprintln!("{} dual brushes, by mode: {duals:?}", duals.values().sum::<usize>());
     assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures.join("\n"));
 }
 
@@ -6404,6 +6412,86 @@ fn a_krita_preset_holding_its_pictures_keeps_its_tip_and_texture() {
     // its texture as paper grain, its 64 px tiles at half size
     assert!(b.grain.source.is_some());
     assert_eq!(b.grain.scale, 32.0);
+}
+
+#[test]
+fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
+    use procraft_engine::document::BlendMode;
+    // the masking brush's tip: a GIMP brush 4 x 4, its top half painting, held in the preset
+    let mut tip = Vec::new();
+    for v in [29u32, 2, 4, 4, 1] {
+        tip.extend_from_slice(&v.to_be_bytes());
+    }
+    tip.extend_from_slice(b"GIMP");
+    tip.extend_from_slice(&10u32.to_be_bytes());
+    tip.push(0);
+    tip.extend((0..16).map(|i| if i < 8 { 255 } else { 0 }));
+    let tip = procraft_engine::base64::encode(&tip);
+    let kpp = |op: &str| {
+        let xml = format!(
+            r#"<Preset paintopid="paintbrush" name="Eroded" embedded_resources="1"><resources><resource md5sum="dd" filename="Debris.gbr" name="Debris" type="brushes"><![CDATA[{tip}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.1" useAutoSpacing="0"><MaskGenerator type="circle" hfade="0.8" vfade="0.8"/></Brush>]]></param><param name="MaskingBrush/Enabled"><![CDATA[true]]></param><param name="MaskingBrush/MaskingCompositeOp"><![CDATA[{op}]]></param><param name="MaskingBrush/UseMasterSize"><![CDATA[true]]></param><param name="MaskingBrush/MasterSizeCoeff"><![CDATA[0.5]]></param><param name="MaskingBrush/Preset/brush_definition"><![CDATA[<Brush md5sum="dd" type="gbr_brush" filename="Debris.gbr" spacing="0.3" useAutoSpacing="0"/>]]></param><param name="MaskingBrush/Preset/PressureSize"><![CDATA[false]]></param><param name="MaskingBrush/Preset/FlowValue"><![CDATA[0.4]]></param><param name="MaskingBrush/Preset/OpacityValue"><![CDATA[0.9]]></param></Preset>"#
+        );
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&[0; 4]);
+            out
+        };
+        let mut kpp = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+        let mut text = b"preset\0".to_vec();
+        text.extend_from_slice(xml.as_bytes());
+        kpp.extend(chunk(b"tEXt", &text));
+        kpp.extend(chunk(b"IEND", &[]));
+        kpp
+    };
+    let s = CanvasSession::new(64, 64);
+    let set = s.import_other_brushes(kpp("subtract"), "Krita".to_owned()).unwrap();
+    {
+        let st = s.shared.lock();
+        let b = &st.library[set as usize].brushes[0];
+        // the main brush round; its second the masking tip, painting at the top and not the bottom
+        assert!(b.shape.source.is_none() && (b.hardness - 0.8).abs() < 1e-6);
+        let second = b.secondary.as_deref().unwrap();
+        let shape = second.shape.source.as_ref().unwrap();
+        let n = procraft_engine::textures::TEXTURE_SIZE;
+        assert!(shape.pixels[n * n / 4 + n / 2] == 255 && shape.pixels[n * n * 3 / 4 + n / 2] == 0);
+        assert_eq!(b.setting("dual_blend"), BlendMode::Subtract.id() as f32);
+        // half the main brush's size at every slider, its own spacing, flow, opacity and pressure
+        for slider in [0.0, 0.3, 1.0] {
+            assert!((second.diameter(slider) / b.diameter(slider) - 0.5).abs() < 1e-4);
+        }
+        assert!((second.spacing - 0.3).abs() < 1e-6 && (second.flow - 0.4).abs() < 1e-6);
+        assert_eq!((second.pressure_size, second.pressure_opacity), (0.0, 0.0));
+        assert!(second.grain.source.is_none() && second.secondary.is_none());
+        // as Krita masks, in its wash mode: the stroke builds up to its opacity and no further
+        assert_eq!((second.rendering, second.max_opacity), (procraft_engine::brush::Rendering::Capped, 1.0));
+        let most = second.pressure_curves.get(procraft_engine::brush::PressureCurve::Flow).unwrap();
+        assert!((most.eval(0.2) - 0.9).abs() < 1e-3 && (most.eval(1.0) - 0.9).abs() < 1e-3);
+        assert_eq!(second.setting("pressure_flow"), 1.0);
+    }
+    // written out it is a dual brush that comes back the same
+    let file = s.brush_as_file(set, 0).unwrap();
+    let read = procraft_engine::brushfile::read(&file).unwrap();
+    assert!(read.secondary.is_some());
+    let t = CanvasSession::new(64, 64);
+    let back = t.import_brushes(file).unwrap();
+    let again = t.shared.lock().library[back as usize].brushes[0].clone();
+    assert_eq!(again.setting("dual_blend"), BlendMode::Subtract.id() as f32);
+    assert!(again.secondary.as_deref().is_some_and(|s| s.shape.source.is_some()));
+    // each op by the nearest mode: Krita's linear dodge as Add, which draws though not listed
+    for (op, mode) in [
+        ("linear_dodge", BlendMode::Add.id()),
+        ("burn", BlendMode::ColorBurn.id()),
+        ("hard_mix_softer_photoshop", BlendMode::LinearBurn.id()),
+        ("hard_mix_photoshop", BlendMode::HardMix.id()),
+        ("linear_height_photoshop", procraft_engine::brush::GRAIN_LINEAR_HEIGHT),
+        ("no such op", BlendMode::Multiply.id()),
+    ] {
+        let set = s.import_other_brushes(kpp(op), "Krita".to_owned()).unwrap();
+        assert_eq!(s.shared.lock().library[set as usize].brushes[0].setting("dual_blend"), mode as f32, "{op}");
+    }
 }
 
 #[test]

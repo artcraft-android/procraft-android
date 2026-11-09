@@ -19,12 +19,20 @@ pub fn read(bytes: &[u8]) -> Option<Vec<AbrTip>> {
     pipe(bytes, MOST_IN_PIPE)
 }
 
-/// The first tip in a GIMP brush or pipe file (a pipe's others not read); none if it is neither.
+/// The first tip in a GIMP brush or pipe file that paints anything (a pipe's brushes read only
+/// until one does: an animated one may start blank), else its first; none if it is neither.
 pub fn read_first(bytes: &[u8]) -> Option<AbrTip> {
-    match brush(bytes) {
-        Some((tip, _)) => Some(tip),
-        None => pipe(bytes, 1)?.into_iter().next(),
+    if let Some((tip, _)) = brush(bytes) {
+        return Some(tip);
     }
+    let mut first = None;
+    for tip in pipe_brushes(bytes)?.take(MOST_IN_PIPE) {
+        if tip.pixels.iter().any(|&v| v > 0) {
+            return Some(tip);
+        }
+        first.get_or_insert(tip);
+    }
+    first
 }
 
 /// A GIMP pattern (`.pat`) as grey, each pixel its lightness times its alpha; none if it isn't
@@ -196,25 +204,32 @@ pub fn generated_tip(g: &Generated) -> Option<AbrTip> {
 /// A pipe: its name, a line starting with how many brushes it has, then the brushes (the first
 /// `most` of them read).
 fn pipe(bytes: &[u8], most: usize) -> Option<Vec<AbrTip>> {
+    let tips: Vec<AbrTip> = pipe_brushes(bytes)?.take(most).collect();
+    (!tips.is_empty()).then_some(tips)
+}
+
+/// A pipe's brushes, each read as it is come to; none if it isn't one.
+fn pipe_brushes(bytes: &[u8]) -> Option<impl Iterator<Item = AbrTip> + '_> {
     let first = bytes.iter().position(|&b| b == b'\n')?;
     let second = first + 1 + bytes.get(first + 1..)?.iter().position(|&b| b == b'\n')?;
     let name = String::from_utf8_lossy(bytes.get(..first)?).trim().to_owned();
     let line = String::from_utf8_lossy(bytes.get(first + 1..second)?).into_owned();
     let count: usize = line.split_whitespace().next()?.parse().ok()?;
-    let mut at = second + 1;
-    let mut tips = Vec::new();
-    for n in 1..=count.min(most) {
-        let Some((mut tip, used)) = brush(bytes.get(at..)?) else { break };
+    let (mut at, mut n) = (second + 1, 0);
+    Some(std::iter::from_fn(move || {
+        if n >= count {
+            return None;
+        }
+        let (mut tip, used) = brush(bytes.get(at..)?)?;
+        (n, at) = (n + 1, at + used);
         // the pipe's name for its only brush; numbered for those with none of their own
         if count == 1 {
             tip.name = name.clone();
         } else if tip.name.is_empty() {
             tip.name = format!("{name} {n}");
         }
-        tips.push(tip);
-        at += used;
-    }
-    (!tips.is_empty()).then_some(tips)
+        Some(tip)
+    }))
 }
 
 #[cfg(test)]
@@ -275,6 +290,23 @@ mod tests {
         assert_eq!(read_first(&file).unwrap().name, "First");
         assert_eq!(read_first(&gbr(2, "Alone", 3, 2, 1, 50)).unwrap().name, "Alone");
         assert!(read_first(b"nothing").is_none());
+        // an animated pipe that starts blank: its first brush that paints
+        let blank = |name: &str| {
+            let mut b = gbr(2, name, 3, 2, 1, 50);
+            let len = b.len();
+            b[len - 6..].fill(0);
+            b
+        };
+        let mut file = b"Stars\n3 ncells:3\n".to_vec();
+        file.extend(blank("Empty"));
+        file.extend(gbr(2, "Star", 3, 2, 1, 50));
+        file.extend(gbr(2, "Bigger", 3, 2, 1, 50));
+        assert_eq!(read_first(&file).unwrap().name, "Star");
+        // all blank: the first
+        let mut file = b"Blank\n2 ncells:2\n".to_vec();
+        file.extend(blank("One"));
+        file.extend(blank("Two"));
+        assert_eq!(read_first(&file).unwrap().name, "One");
     }
 
     #[test]

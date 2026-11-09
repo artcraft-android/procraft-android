@@ -1,10 +1,12 @@
 //! Reading Krita brushes: a preset (`.kpp`) is a PNG whose `preset` text holds the brush's
 //! settings as XML, its tip either drawn from a few numbers (an auto brush) or a picture it names,
-//! and maybe a texture it names. A newer preset carries the pictures it names itself: a `resources`
-//! element holds each as base64, with its kind (`brushes`, `patterns`), file name, name and MD5
-//! sum. A bundle (`.bundle`) is a zip of presets (`paintoppresets/`) and the pictures they name
-//! (`brushes/`: GIMP brushes and pipes, PNGs, ABR files; `patterns/`: PNGs and GIMP patterns), its
-//! manifest giving each file's MD5 sum.
+//! maybe a texture it names, and maybe a masking brush: a second brush along the same stroke, its
+//! settings the same names under `MaskingBrush/Preset/`, its size a share of the main brush's and
+//! its coverage combined with the main brush's by a composite op. A newer preset carries the
+//! pictures it names itself: a `resources` element holds each as base64, with its kind
+//! (`brushes`, `patterns`), file name, name and MD5 sum. A bundle (`.bundle`) is a zip of presets
+//! (`paintoppresets/`) and the pictures they name (`brushes/`: GIMP brushes and pipes, PNGs, ABR
+//! files; `patterns/`: PNGs and GIMP patterns), its manifest giving each file's MD5 sum.
 
 use std::cell::Cell;
 
@@ -33,8 +35,31 @@ pub struct KritaBrush {
     /// The texture it paints through, if it has one.
     pub texture: Option<KritaTexture>,
     /// The pictures it names that neither it nor its bundle holds in a form we read (pictures that
-    /// came with Krita, say), by file name: those come round, or without the texture.
+    /// came with Krita, say), by file name: those come round, or without the texture, or without
+    /// the masking brush.
     pub missing: Vec<String>,
+    /// Its masking brush, if it has one turned on whose tip can be had.
+    pub masking: Option<Box<KritaMasking>>,
+}
+
+/// A preset's masking brush: a second brush painted along the same stroke, its coverage combined
+/// with the main brush's by a composite op.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KritaMasking {
+    /// Its tip, spacing, angle and what pressure changes (no texture, no masking of its own).
+    pub brush: KritaBrush,
+    /// How it combines with the main brush, by Krita's name for the op (`multiply`, `subtract`).
+    pub op: String,
+    /// Its size for each 1 of the main brush's.
+    pub size: f32,
+    /// Its own opacity (the most its stroke reaches) and flow (what each stamp lays), 0 to 1, as
+    /// Krita's wash mode (the only one it masks in) takes them.
+    pub opacity: f32,
+    pub flow: f32,
+    /// How pen pressure scales each of those, if it does: a curve's points, the pressure across
+    /// and the share kept up.
+    pub opacity_pressure: Option<Vec<Vec2>>,
+    pub flow_pressure: Option<Vec<Vec2>>,
 }
 
 /// A preset's texture: its picture, its scale (1 the picture's own size), how strongly it shows (0
@@ -163,13 +188,48 @@ fn preset(kpp: &[u8], file: &dyn Fn(&Wanted<'_>) -> Option<Vec<u8>>, most_text: 
         );
         own.and_then(|e| base64(&e.text)).or_else(|| file(w))
     };
+    let name = root.attribute("name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Krita Brush");
+    let mut read = brush_of(name, &param, &find);
+    // the masking brush: its settings are the main brush's names under its own prefix. Without
+    // its tip it is left off (a round stand-in would mask the stroke all over), and said so.
+    let value = |name: &str| param(name).and_then(real);
+    let masked = param("MaskingBrush/Enabled") == Some("true");
+    let own = |key: &str| param(&format!("MaskingBrush/Preset/{key}"));
+    if masked && own("brush_definition").and_then(xml::parse).is_some_and(|d| d.find("Brush").is_some()) {
+        let brush = brush_of(name, &own, &find);
+        if brush.missing.is_empty() {
+            let unit = |key: &str| own(key).and_then(real).unwrap_or(1.0).clamp(0.0, 1.0);
+            read.masking = Some(Box::new(KritaMasking {
+                op: param("MaskingBrush/MaskingCompositeOp").unwrap_or("multiply").trim().to_owned(),
+                size: value("MaskingBrush/MasterSizeCoeff").filter(|s| *s > 0.0).unwrap_or(1.0),
+                opacity: unit("OpacityValue"),
+                flow: unit("FlowValue"),
+                opacity_pressure: pressure_curve(&own, "Opacity"),
+                flow_pressure: pressure_curve(&own, "Flow"),
+                brush,
+            }));
+        } else {
+            read.missing.extend(brush.missing);
+        }
+    }
+    Some((read, length))
+}
+
+/// The brush that the settings `param` gives describe, called `called`, the pictures it names
+/// looked up with `find`. The masking brush's own settings are under a prefix: `param` takes the
+/// names without it.
+fn brush_of<'p>(
+    called: &str,
+    param: &dyn Fn(&str) -> Option<&'p str>,
+    find: &dyn Fn(&Wanted<'_>) -> Option<Vec<u8>>,
+) -> KritaBrush {
     let mut missing = Vec::new();
     let definition = param("brush_definition").and_then(xml::parse);
     let brush = definition.as_ref().and_then(|d| d.find("Brush"));
     let number = |e: Option<&Element>, key: &str| e.and_then(|e| e.attribute(key)).and_then(real);
     let automatic = brush.and_then(|b| b.attribute("useAutoSpacing")).is_some_and(|v| v == "1" || v == "true");
     let (tip, turns_at_random) = brush
-        .and_then(|b| tip(b, &find, &mut missing))
+        .and_then(|b| tip(b, find, &mut missing))
         .unwrap_or((KritaTip::Round { hardness: 1.0, roundness: 1.0 }, false));
     let flag = |name: &str| param(name).is_some_and(|v| v == "true");
     let value = |name: &str| param(name).and_then(real);
@@ -210,8 +270,8 @@ fn preset(kpp: &[u8], file: &dyn Fn(&Wanted<'_>) -> Option<Vec<u8>>, most_text: 
                 .clamp(0.0, 1.0),
             invert: flag("Texture/Pattern/Invert"),
         });
-    let read = KritaBrush {
-        name: root.attribute("name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Krita Brush").to_owned(),
+    KritaBrush {
+        name: called.to_owned(),
         tip,
         spacing: if automatic { None } else { number(brush, "spacing").filter(|s| *s > 0.0) },
         angle: number(brush, "angle").unwrap_or(0.0),
@@ -222,8 +282,37 @@ fn preset(kpp: &[u8], file: &dyn Fn(&Wanted<'_>) -> Option<Vec<u8>>, most_text: 
         pressure_opacity: param("PressureOpacity").is_some_and(|v| v == "true"),
         texture,
         missing,
-    };
-    Some((read, length))
+        masking: None,
+    }
+}
+
+/// How pen pressure scales the setting `option` (`Opacity`, `Flow`) of those `param` gives, if it
+/// does: its pressure sensor's curve (alone or among other sensors, which aren't taken), the one
+/// its sensors share if they share one, a straight line if it keeps none. None if its pen settings
+/// are switched off (`UseCurve`) or the setting is turned off; only a `false` turns it off, as
+/// older presets keep its sensors and not whether it is on.
+fn pressure_curve<'p>(param: &dyn Fn(&str) -> Option<&'p str>, option: &str) -> Option<Vec<Vec2>> {
+    let key = |what: &str| param(&format!("{option}{what}"));
+    if param(&format!("Pressure{option}")) == Some("false") || key("UseCurve") == Some("false") {
+        return None;
+    }
+    let sensors = xml::parse(key("Sensor")?)?;
+    let pressure =
+        std::iter::once(&sensors).chain(sensors.all("ChildSensor")).find(|s| s.attribute("id") == Some("pressure"))?;
+    let shared = key("UseSameCurve").filter(|v| *v == "true").and_then(|_| key("commonCurve"));
+    let own = pressure.child("curve").map(|c| c.text.as_str());
+    let points = shared.or(own).map(curve_points).unwrap_or_default();
+    Some(if points.len() >= 2 { points } else { vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)] })
+}
+
+/// A curve's points as a preset keeps them: `x,y;x,y;...`.
+fn curve_points(text: &str) -> Vec<Vec2> {
+    text.split(';')
+        .filter_map(|p| {
+            let (x, y) = p.split_once(',')?;
+            Some(Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
+        })
+        .collect()
 }
 
 /// A number as a preset keeps it, a comma for the point where the app that saved it used one.
@@ -307,14 +396,17 @@ pub fn read_bundle(bytes: &[u8]) -> Option<(String, Vec<KritaBrush>)> {
             continue;
         };
         text_left = text_left.saturating_sub(length);
-        // its tip and texture count as well (one from the bundle twice over: a rough budget)
-        let tip_bytes = match &p.tip {
+        // its tips and texture count as well (one from the bundle twice over: a rough budget)
+        let tip_bytes = |tip: &KritaTip| match tip {
             KritaTip::Round { .. } => 0,
             KritaTip::Image(t) => t.pixels.len(),
             KritaTip::Png(png) => png.len(),
         };
-        if !take(tip_bytes) {
+        if !take(tip_bytes(&p.tip)) {
             p.tip = KritaTip::Round { hardness: 1.0, roundness: 1.0 };
+        }
+        if p.masking.as_ref().is_some_and(|m| !take(tip_bytes(&m.brush.tip))) {
+            p.masking = None;
         }
         let texture_bytes = p.texture.as_ref().map_or(0, |t| match &t.picture {
             KritaPicture::Encoded(png) => png.len(),
@@ -403,16 +495,7 @@ fn auto_tip(brush: &Element) -> Option<(KritaTip, bool)> {
     let falloff = match mask.attribute("id") {
         Some("gauss") => Falloff::Blur,
         Some("soft") => {
-            // "x,y;x,y;..."
-            let points: Vec<Vec2> = mask
-                .attribute("softness_curve")
-                .unwrap_or_default()
-                .split(';')
-                .filter_map(|p| {
-                    let (x, y) = p.split_once(',')?;
-                    Some(Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
-                })
-                .collect();
+            let points = curve_points(mask.attribute("softness_curve").unwrap_or_default());
             if points.len() >= 2 { Falloff::Curve(crate::curve::Curve::new(&points)) } else { Falloff::Fade }
         }
         _ => Falloff::Fade,
@@ -847,6 +930,136 @@ mod tests {
         crate::damaged::survives("Krita preset with its pictures", &kpp(&xml), |b| {
             let _ = read_preset(b, &|_| None);
         });
+    }
+
+    /// A preset whose masking brush (`masking`, its settings without their prefix) is on, combined
+    /// by `op` at `size` times the main brush's.
+    fn masked(masking: &[(&str, &str)], op: &str, size: &str) -> String {
+        let main = r#"<Brush type="auto_brush" spacing="0.1" useAutoSpacing="0"><MaskGenerator type="circle" diameter="40"/></Brush>"#;
+        let own: String = masking.iter().map(|(k, v)| param(&format!("MaskingBrush/Preset/{k}"), v)).collect();
+        let on = [
+            param("MaskingBrush/Enabled", "true"),
+            param("MaskingBrush/MaskingCompositeOp", op),
+            param("MaskingBrush/UseMasterSize", "true"),
+            param("MaskingBrush/MasterSizeCoeff", size),
+        ]
+        .concat();
+        preset("Grainy", main, true).replace("</Preset>", &format!("{on}{own}</Preset>"))
+    }
+
+    #[test]
+    fn a_masking_brush_is_a_second_brush_with_its_own_tip() {
+        let tip = crate::base64::encode(&gbr(&[10, 20, 30]));
+        let held = format!(
+            r#"<resources><resource md5sum="cc33" filename="Debris.gbr" name="Debris" type="brushes"><![CDATA[{tip}]]></resource></resources>"#
+        );
+        let mask = [
+            (
+                "brush_definition",
+                r#"<Brush md5sum="cc33" type="gbr_brush" filename="Debris.gbr" spacing="0.4" angle="0.5" useAutoSpacing="0"/>"#,
+            ),
+            ("PressureSize", "false"),
+            ("PressureOpacity", "true"),
+            ("OpacityValue", "0,8"),
+            ("FlowValue", "0.25"),
+        ];
+        let xml = masked(&mask, "subtract", "0.5")
+            .replace(r#"name="Grainy">"#, &format!(r#"name="Grainy" embedded_resources="1">{held}"#));
+        let b = read_preset(&kpp(&xml), &|_| None).unwrap();
+        // the main brush as it was
+        assert!(matches!(b.tip, KritaTip::Round { .. }) && b.spacing == Some(0.1) && b.missing.is_empty());
+        let m = b.masking.as_deref().unwrap();
+        assert_eq!((m.op.as_str(), m.size, m.opacity, m.flow), ("subtract", 0.5, 0.8, 0.25));
+        // its own tip, spacing, angle and pressure, and nothing of its own beyond
+        let KritaTip::Image(t) = &m.brush.tip else { panic!("{:?}", m.brush.tip) };
+        assert_eq!(t.pixels, [10, 20, 30]);
+        assert_eq!((m.brush.spacing, m.brush.angle, m.brush.name.as_str()), (Some(0.4), 0.5, "Grainy"));
+        assert!(!m.brush.pressure_size && m.brush.pressure_opacity);
+        assert!(m.brush.texture.is_none() && m.brush.masking.is_none());
+        // an auto brush masks too, as our round tip; the op saved or not
+        let auto = [(
+            "brush_definition",
+            r#"<Brush type="auto_brush"><MaskGenerator type="circle" hfade="0.5" vfade="0.5"/></Brush>"#,
+        )];
+        let b = read_preset(&kpp(&masked(&auto, "linear_dodge", "1,5")), &|_| None).unwrap();
+        let m = b.masking.unwrap();
+        assert_eq!((m.op.as_str(), m.size, m.opacity, m.flow), ("linear_dodge", 1.5, 1.0, 1.0));
+        assert_eq!(m.brush.tip, KritaTip::Round { hardness: 0.5, roundness: 1.0 });
+        let none = masked(&auto, "", "0").replace(&param("MaskingBrush/MaskingCompositeOp", ""), "");
+        let m = read_preset(&kpp(&none), &|_| None).unwrap().masking.unwrap();
+        assert_eq!((m.op.as_str(), m.size), ("multiply", 1.0));
+        // turned off, or with no tip of its own: none
+        let off = masked(&auto, "multiply", "1")
+            .replace(&param("MaskingBrush/Enabled", "true"), &param("MaskingBrush/Enabled", "false"));
+        assert_eq!(read_preset(&kpp(&off), &|_| None).unwrap().masking, None);
+        let bare = read_preset(&kpp(&masked(&[("PressureSize", "true")], "multiply", "1")), &|_| None).unwrap();
+        assert_eq!(bare.masking, None);
+        // its tip not there: none, and said so
+        let gone = [("brush_definition", r#"<Brush type="png_brush" filename="square_rough.png"/>"#)];
+        let b = read_preset(&kpp(&masked(&gone, "subtract", "1")), &|_| None).unwrap();
+        assert_eq!((b.masking, b.missing), (None, vec!["square_rough.png".to_owned()]));
+        crate::damaged::survives("Krita preset with a masking brush", &kpp(&xml), |b| {
+            let _ = read_preset(b, &|_| None);
+        });
+    }
+
+    #[test]
+    fn a_masking_brushs_opacity_and_flow_follow_the_pressure_by_their_curves() {
+        let auto = r#"<Brush type="auto_brush"><MaskGenerator type="circle"/></Brush>"#;
+        let read = |pairs: &[(&str, &str)]| {
+            let mask: Vec<(&str, &str)> =
+                [("brush_definition", auto)].into_iter().chain(pairs.iter().copied()).collect();
+            read_preset(&kpp(&masked(&mask, "linear_dodge", "0.5")), &|_| None).unwrap().masking.unwrap()
+        };
+        let pts = |v: &[(f32, f32)]| Some(v.iter().map(|&(x, y)| Vec2::new(x, y)).collect::<Vec<_>>());
+        // the pressure sensor's own curve, as Krita 4 keeps it (its sensors' shared one not saved)
+        let m = read(&[
+            ("PressureOpacity", "true"),
+            ("OpacityUseCurve", "true"),
+            ("OpacityUseSameCurve", "true"),
+            (
+                "OpacitySensor",
+                r#"<!DOCTYPE params> <params id="pressure"> <curve>0.6,0;0.83,0.38;0.9,0.74;</curve> </params> "#,
+            ),
+        ]);
+        assert_eq!(m.opacity_pressure, pts(&[(0.6, 0.0), (0.83, 0.38), (0.9, 0.74)]));
+        assert_eq!(m.flow_pressure, None);
+        // among other sensors; the shared curve when they share one; straight when it keeps none
+        let listed = r#"<!DOCTYPE params> <params id="sensorslist"> <ChildSensor id="fade" length="100"/> <ChildSensor id="pressure"> <curve>0,0;1,0.5;</curve> </ChildSensor> </params> "#;
+        let m = read(&[("PressureFlow", "true"), ("FlowUseCurve", "true"), ("FlowSensor", listed)]);
+        assert_eq!(m.flow_pressure, pts(&[(0.0, 0.0), (1.0, 0.5)]));
+        let m = read(&[
+            ("PressureFlow", "true"),
+            ("FlowUseSameCurve", "true"),
+            ("FlowcommonCurve", "0,0.2;1,1;"),
+            ("FlowSensor", listed),
+        ]);
+        assert_eq!(m.flow_pressure, pts(&[(0.0, 0.2), (1.0, 1.0)]));
+        let plain = r#"<!DOCTYPE params> <params id="pressure"/> "#;
+        let m = read(&[("PressureFlow", "true"), ("FlowUseCurve", "true"), ("FlowSensor", plain)]);
+        assert_eq!(m.flow_pressure, pts(&[(0.0, 0.0), (1.0, 1.0)]));
+        // on when not said to be off (older presets), so long as it has a sensor
+        let m = read(&[("FlowSensor", listed)]);
+        assert_eq!(m.flow_pressure, pts(&[(0.0, 0.0), (1.0, 0.5)]));
+        assert_eq!(m.opacity_pressure, None);
+        // driven by something else, its pen settings off, or turned off: not by the pressure
+        assert_eq!(read(&[("FlowUseCurve", "false"), ("FlowSensor", listed)]).flow_pressure, None);
+        let fuzzy = r#"<!DOCTYPE params> <params id="fuzzy"/> "#;
+        assert_eq!(read(&[("PressureOpacity", "true"), ("OpacitySensor", fuzzy)]).opacity_pressure, None);
+        assert_eq!(read(&[("PressureFlow", "false"), ("FlowSensor", listed)]).flow_pressure, None);
+    }
+
+    #[test]
+    fn a_masking_brushs_tip_comes_from_its_bundle() {
+        let mask = [("brush_definition", r#"<Brush type="gbr_brush" filename="random-debris.gbr" spacing="0.7"/>"#)];
+        let mut z = ZipWriter::new();
+        z.add("mimetype", b"application/x-krita-resourcebundle");
+        z.add("brushes/random-debris.gbr", &gbr(&[1, 2]));
+        z.add("paintoppresets/eroded.kpp", &kpp(&masked(&mask, "darken", "0.75")));
+        let (_, presets) = read_bundle(&z.finish()).unwrap();
+        let m = presets[0].masking.as_deref().unwrap();
+        assert!(matches!(&m.brush.tip, KritaTip::Image(t) if t.pixels == [1, 2]));
+        assert_eq!((m.op.as_str(), m.size, m.brush.spacing), ("darken", 0.75, Some(0.7)));
     }
 
     #[test]
