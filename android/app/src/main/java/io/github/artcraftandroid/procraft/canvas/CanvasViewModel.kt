@@ -417,6 +417,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** When the cursor's size was last read (uptime ms). */
     private var cursorReadAt = 0L
 
+    /** Where Liquify's ring is (window pixels), and its radius there: its reach while it is open. */
+    var liquifyRingAt by mutableStateOf<Offset?>(null)
+        private set
+    var liquifyRingRadius by mutableStateOf(0f)
+        private set
+
+    /** Shows Liquify's ring at window point [p] (none hides it), sized for its brush and the zoom. */
+    fun showLiquifyRing(p: Offset?) {
+        val s = session
+        if (p == null || s == null || adjustment != Adjustment.LIQUIFY) {
+            liquifyRingAt = null
+            return
+        }
+        liquifyRingRadius = io.github.artcraftandroid.procraft.core.liquifyReach(liquifySize) * s.info().zoom
+        liquifyRingAt = p
+    }
+
     /** The light interface: light grey panels and bars with dark text. */
     var lightInterface by mutableStateOf(interfacePrefs.getBoolean(LIGHT_INTERFACE, false).also { io.github.artcraftandroid.procraft.ui.Pc.light = it })
         private set
@@ -5970,6 +5987,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Ends the adjustment: [commit] keeps it as one undo step, otherwise the layer goes back. */
     fun endAdjustment(commit: Boolean) {
+        liquifyRingAt = null
         if (adjustment == null) return
         // a gradient being edited is kept as it is
         if (gradientEditing != null) endGradientEdit()

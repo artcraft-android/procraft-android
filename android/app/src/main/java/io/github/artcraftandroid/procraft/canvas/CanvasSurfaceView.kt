@@ -300,6 +300,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             )
         }
         if (skipping) return true
+        // Liquify's brush shows as a ring of its reach where the touch presses, until it lifts
+        if (vm.adjustment == Adjustment.LIQUIFY) {
+            val lifted = e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL
+            vm.showLiquifyRing(if (lifted || e.pointerCount > 1) null else Offset(e.x, e.y))
+        }
         route(e, s)
         // Layer opacity: the shared touches drag it; the band shows it as they go
         if (vm.opacityLayer != null) vm.layerOpacityTouched(e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL)
@@ -369,11 +374,14 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 session?.setTouchPenHovering(true)
                 penHovering = true
                 if (painting()) vm.showCursor(Offset(e.x, e.y), hovering = true)
+                // and Liquify's ring where the pen hovers
+                if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(Offset(e.x, e.y))
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
                 session?.setTouchPenHovering(false)
                 penHovering = false
                 vm.showCursor(null)
+                vm.showLiquifyRing(null)
             }
         }
         return true
