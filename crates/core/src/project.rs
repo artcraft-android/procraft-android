@@ -1284,11 +1284,13 @@ pub(crate) enum Opened {
 }
 
 impl Opened {
-    /// The pixels, which must be `width` × `height`.
+    /// The pixels, `width` × `height`: a layer's file of another size (one a crop's save left as
+    /// it was) comes in from its top left corner, cut or with clear pixels to fill, rather than
+    /// be lost.
     pub(crate) fn pixels(self, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
         match self {
             Opened::Pixels(rgba) => Ok(rgba),
-            Opened::Png(bytes) => decode_png(std::io::Cursor::new(bytes), width, height),
+            Opened::Png(bytes) => decode_png_into(std::io::Cursor::new(bytes), width, height, true),
         }
     }
 }
@@ -1320,23 +1322,44 @@ pub(crate) fn read_png(path: &Path, width: u32, height: u32) -> Result<Vec<u8>, 
 
 /// The RGBA8 pixels of the PNG `from` reads, which must be `width` × `height`.
 fn decode_png(from: impl std::io::BufRead + std::io::Seek, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
+    decode_png_into(from, width, height, false)
+}
+
+/// As [`decode_png`]; `fit`, a PNG of another size is taken from its top left corner into
+/// `width` × `height` (cut, or clear where it is smaller).
+fn decode_png_into(
+    from: impl std::io::BufRead + std::io::Seek,
+    width: u32,
+    height: u32,
+    fit: bool,
+) -> Result<Vec<u8>, MobileError> {
     let decoder = png::Decoder::new(from);
     let mut reader = decoder.read_info().map_err(|e| file_error("opening a layer", e))?;
     let (color, depth) = reader.output_color_type();
     let (w, h, interlaced) = (reader.info().width, reader.info().height, reader.info().interlaced);
-    if w != width || h != height || color != png::ColorType::Rgba || depth != png::BitDepth::Eight {
+    let sized = w == width && h == height;
+    if (!sized && !fit) || color != png::ColorType::Rgba || depth != png::BitDepth::Eight {
         return Err(file_error("opening a layer", format!("{w}×{h} {color:?}")));
+    }
+    if !sized {
+        log::warn!("a layer of {w}×{h} opened into {width}×{height}, from its top left");
     }
     let line = width as usize * 4;
     let mut buf = vec![0; line * height as usize];
     if interlaced {
         // not one of ours: whole or not at all
-        reader.next_frame(&mut buf).map_err(|e| file_error("opening a layer", e))?;
+        let mut whole = vec![0; w as usize * 4 * h as usize];
+        reader.next_frame(&mut whole).map_err(|e| file_error("opening a layer", e))?;
+        for (row, from) in buf.chunks_mut(line).zip(whole.chunks(w as usize * 4)) {
+            for (to, from) in row.iter_mut().zip(from) {
+                *to = *from;
+            }
+        }
         return Ok(buf);
     }
     // row by row: one damaged part way keeps the rows before the damage (the rest clear) rather
     // than the whole layer being lost
-    for (y, row) in buf.chunks_mut(line).enumerate() {
+    for (y, row) in buf.chunks_mut(line).enumerate().take(h as usize) {
         match reader.next_row() {
             Ok(Some(read)) => {
                 for (to, from) in row.iter_mut().zip(read.data()) {
@@ -1687,6 +1710,34 @@ mod signature_tests {
         assert!(cut[kept * line..].iter().all(|&v| v == 0));
         // cut before any row: none can be read
         assert!(Opened::Png(whole[..40].to_vec()).pixels(w, h).is_err());
+    }
+
+    #[test]
+    fn a_layer_file_of_another_size_opens_from_its_top_left() {
+        let (w, h) = (6u32, 4u32);
+        let rgba: Vec<u8> = (0..w * h).flat_map(|i| [(i % w) as u8 * 40, (i / w) as u8 * 60, 7, 255]).collect();
+        let path = std::env::temp_dir().join(format!("procraft-sized-layer-{}.png", std::process::id()));
+        write_png(&path, w, h, &rgba, &[]).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        let at = |px: &[u8], cw: u32, x: u32, y: u32| px[((y * cw + x) * 4) as usize..][..4].to_vec();
+        // smaller: the top left part
+        let cut = Opened::Png(bytes.clone()).pixels(4, 3).unwrap();
+        assert_eq!(cut.len(), 4 * 3 * 4);
+        for (x, y) in [(0, 0), (3, 0), (0, 2), (3, 2)] {
+            assert_eq!(at(&cut, 4, x, y), at(&rgba, w, x, y));
+        }
+        // bigger: all of it at the top left, clear around it
+        let grown = Opened::Png(bytes.clone()).pixels(8, 5).unwrap();
+        assert_eq!(at(&grown, 8, 5, 3), at(&rgba, w, 5, 3));
+        assert_eq!(at(&grown, 8, 6, 0), vec![0; 4]);
+        assert_eq!(at(&grown, 8, 0, 4), vec![0; 4]);
+        // anything else read by size still must be that size
+        assert!(read_png_bytes_sized(&bytes, 4, 3).is_err());
+    }
+
+    fn read_png_bytes_sized(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
+        decode_png(std::io::Cursor::new(bytes.to_vec()), width, height)
     }
 
     #[test]
