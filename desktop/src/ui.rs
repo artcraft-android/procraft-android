@@ -1662,7 +1662,8 @@ impl Interface {
 
     /// Opens adjustment `a` on the current layer (anything else open ends first).
     fn start_adjustment(&mut self, session: &CanvasSession, a: procraft_core::Adjustment) {
-        if !self.takes_changes(session) {
+        let why = session.why_not_adjusted(a);
+        if !self.say_blocked(session, why) {
             return;
         }
         self.switch_modes(session, ModeButton::Adjustment);
@@ -1900,6 +1901,12 @@ impl Interface {
                 &crate::icons::EYE_STRUCK,
                 Some("Show"),
             ),
+            Blocked::AlphaLocked => (
+                "Alpha Lock is on",
+                format!("\u{201c}{}\u{201d} can't be liquified while its alpha is locked.", l.name),
+                &crate::icons::PAGE_LOCKED,
+                Some("Turn Off"),
+            ),
             Blocked::MeshLocked => (
                 "Mesh is locked",
                 format!(
@@ -1999,6 +2006,7 @@ impl Interface {
         let Some((why, id)) = self.blocked.take() else { return };
         match answer {
             Answer::Extra if why == Blocked::Locked => _ = session.set_layer_locked(id, false),
+            Answer::Extra if why == Blocked::AlphaLocked => _ = session.set_layer_alpha_lock(id, false),
             // its own box ticked (what else hides it stays)
             Answer::Extra if matches!(why, Blocked::Hidden | Blocked::GroupHidden) => {
                 if let Some(said) = session.show_layer(id) {

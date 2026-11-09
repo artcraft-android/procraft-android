@@ -6,7 +6,7 @@ struct FilterUniform {
     // the filter's own values
     a: vec4<f32>,
     b: vec4<f32>,
-    // (the target's width, height, 1 with a selection, unused)
+    // (the target's width, height, 1 with a selection, 1 with the layer's alpha locked)
     size: vec4<f32>,
     c: vec4<f32>,
 }
@@ -36,9 +36,22 @@ fn taken(i: vec2<i32>) -> f32 {
     return 1.0;
 }
 
+// the filtered colour on a pixel that held `was`: with the alpha locked, the pixel covered as much
+// as it was (nothing filtered onto it: as it was)
+fn on_alpha(was: vec4<f32>, filtered: vec4<f32>) -> vec4<f32> {
+    if (fu.size.w < 0.5) {
+        return filtered;
+    }
+    if (filtered.a < 1e-4) {
+        return was;
+    }
+    return vec4<f32>(min(filtered.rgb * (was.a / filtered.a), vec3<f32>(was.a)), was.a);
+}
+
 // the filtered colour mixed with the copy by the selection
 fn kept(i: vec2<i32>, filtered: vec4<f32>) -> vec4<f32> {
-    return mix(textureLoad(before, i, 0), filtered, taken(i));
+    let was = textureLoad(before, i, 0);
+    return mix(was, on_alpha(was, filtered), taken(i));
 }
 
 // luma and the two chroma differences (Rec. 601)

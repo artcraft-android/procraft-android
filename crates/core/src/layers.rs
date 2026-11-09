@@ -609,6 +609,15 @@ impl CanvasSession {
         }
     }
 
+    /// Why `adjustment` can't start on the current layer, if it can't: as [`Self::why_blocked`],
+    /// and Liquify turns away a layer whose alpha is locked.
+    pub fn why_not_adjusted(&self, adjustment: crate::adjust_menu::Adjustment) -> Option<Blocked> {
+        self.why_blocked().or_else(|| {
+            let liquify = adjustment == crate::adjust_menu::Adjustment::Liquify;
+            (liquify && self.layers().iter().any(|l| l.current && l.alpha_lock)).then_some(Blocked::AlphaLocked)
+        })
+    }
+
     /// Why a change to the current layer would go unseen, if it would (what a hidden alert
     /// says, [`Blocked::Hidden`] and [`Blocked::GroupHidden`]).
     pub fn hidden_by(&self) -> Option<HiddenBy> {
@@ -1064,6 +1073,8 @@ pub enum Blocked {
     /// A group is current where a stroke or a fill takes a layer
     /// ([`CanvasSession::why_unpainted`]).
     Group,
+    /// Liquify on a layer whose alpha is locked ([`CanvasSession::why_not_adjusted`]).
+    AlphaLocked,
 }
 
 /// Why a change to the current layer would go unseen (see [`CanvasSession::hidden_by`]).

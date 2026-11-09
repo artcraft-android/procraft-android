@@ -2682,6 +2682,43 @@ fn copy_cut_paste_and_flip() {
 }
 
 #[test]
+fn an_adjustment_leaves_an_alpha_locked_layer_s_alpha_as_it_is() {
+    use crate::adjust::SwipeAdjustment;
+    let Some(s) = session(100, 100) else { return };
+    // red beside blue, with clear all round
+    let mut rgba = vec![0u8; 100 * 100 * 4];
+    for y in 20..80 {
+        for x in 20..80 {
+            rgba[(y * 100 + x) * 4..][..4].copy_from_slice(if x < 50 { &[255, 0, 0, 255] } else { &[0, 0, 255, 255] });
+        }
+    }
+    let id = s.paste(crate::layers::ThumbnailImage { width: 100, height: 100, rgba }).unwrap();
+    let alpha = |s: &CanvasSession| -> Vec<u8> {
+        s.copy_layer_contents(id).unwrap().rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect()
+    };
+    let before = alpha(&s);
+    let blur = |s: &CanvasSession| {
+        assert!(s.adjust_begin());
+        s.adjust_swipe(SwipeAdjustment::GaussianBlur, 0.5);
+        s.adjust_end(true);
+    };
+    assert!(s.set_layer_alpha_lock(id, true));
+    blur(&s);
+    assert!(alpha(&s) == before, "the blur stayed inside what was painted");
+    let at = |s: &CanvasSession, x: usize| {
+        <[u8; 4]>::try_from(&s.copy_layer_contents(id).unwrap().rgba[(50 * 100 + x) * 4..][..4]).unwrap()
+    };
+    // it did blur: where the colours meet they mix, at full cover
+    let [r, _, b, a] = at(&s, 50);
+    assert!(r > 40 && b > 40 && a == 255, "{r} {b} {a}");
+    // the same blur without the lock spreads past the edge
+    s.undo();
+    assert!(s.set_layer_alpha_lock(id, false));
+    blur(&s);
+    assert!(at(&s, 18)[3] > 0);
+}
+
+#[test]
 fn a_copy_from_a_bigger_canvas_pastes_whole() {
     let Some(s) = session(100, 100) else { return };
     // a 400 × 300 canvas's copy: a red block near its top left corner, and a blue one near the
@@ -10166,4 +10203,23 @@ fn a_dip_pen_at_its_least_draws_a_fine_line_at_any_zoom_and_pressure() {
         assert!(light < least + 0.1, "{light} {least}");
         assert!(ink(0.335, 1.0, 1.0, off).unwrap() > 5.0);
     }
+}
+
+#[test]
+fn liquify_turns_away_an_alpha_locked_layer_and_other_adjustments_take_it() {
+    use crate::adjust_menu::Adjustment;
+    use crate::layers::Blocked;
+    let Some(s) = session(64, 64) else { return };
+    let id = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    assert!(s.set_layer_alpha_lock(id, true));
+    assert_eq!(s.why_not_adjusted(Adjustment::Liquify), Some(Blocked::AlphaLocked));
+    assert!(!s.adjustment_start(Adjustment::Liquify));
+    assert_eq!(s.why_not_adjusted(Adjustment::GaussianBlur), None);
+    assert!(s.adjustment_start(Adjustment::GaussianBlur));
+    s.adjustment_end(false);
+    // the lock off, Liquify starts
+    assert!(s.set_layer_alpha_lock(id, false));
+    assert_eq!(s.why_not_adjusted(Adjustment::Liquify), None);
+    assert!(s.adjustment_start(Adjustment::Liquify));
+    s.adjustment_end(false);
 }

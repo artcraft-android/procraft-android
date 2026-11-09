@@ -1781,6 +1781,8 @@ pub struct Canvas {
     /// Where an adjustment is painted on (Pencil), instead of everywhere the selection takes.
     pencil: Option<PencilMask>,
     liquify: Option<LiquifyField>,
+    /// An adjustment leaves the layer's alpha as it is (the layer's Alpha Lock).
+    filter_keeps_alpha: bool,
     /// The curves or gradient adjustments read (256 RGBA8 entries).
     table: wgpu::Texture,
     table_view: wgpu::TextureView,
@@ -2105,6 +2107,7 @@ impl Canvas {
             everything,
             pencil: None,
             liquify: None,
+            filter_keeps_alpha: false,
             table,
             table_view,
             selection: None,
@@ -3559,6 +3562,11 @@ impl Canvas {
     /// `filter`; [`Self::end_transform`] keeps it or puts the layer back.
     pub fn set_filter(&mut self, filter: Filter) {
         self.replace_placement(Op::FilterSet(filter));
+    }
+
+    /// Whether adjustments leave the layer's alpha as it is, as its Alpha Lock asks.
+    pub fn set_filter_keeps_alpha(&mut self, on: bool) {
+        self.filter_keeps_alpha = on;
     }
 
     /// Queues a redraw of the layer being transformed; only the latest needs drawing.
@@ -5547,7 +5555,7 @@ impl Canvas {
         let Some(t) = &self.transforming else { return };
         let Some(layer) = self.layers.get(&t.layer) else { return };
         let (w, h) = (self.width as f32, self.height as f32);
-        let full = [w, h, if t.masked { 1.0 } else { 0.0 }, 0.0];
+        let full = [w, h, if t.masked { 1.0 } else { 0.0 }, if self.filter_keeps_alpha { 1.0 } else { 0.0 }];
         let values = |a: [f32; 4], b: [f32; 4]| FilterUniform { a, b, size: full, c: [0.0; 4] };
         // most adjustments are one pass from the copy into the layer
         let (pass, uniform) = match filter {

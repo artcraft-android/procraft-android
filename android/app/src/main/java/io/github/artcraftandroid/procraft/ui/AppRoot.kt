@@ -366,6 +366,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.MESH_LOCKED -> "Mesh is locked"
                 CanvasViewModel.Blocked.GROUP_HIDDEN -> "Group is hidden"
                 CanvasViewModel.Blocked.GROUP -> "Group is selected"
+                CanvasViewModel.Blocked.ALPHA_LOCKED -> "Alpha Lock is on"
             }
         },
         message = { (w, l) ->
@@ -376,19 +377,21 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.GROUP -> "“${l.name}” is a group: choose one of its layers to paint on."
                 CanvasViewModel.Blocked.MESH_HIDDEN -> "“${vm.meantMeshName()}” can't be painted while it is hidden."
                 CanvasViewModel.Blocked.MESH_LOCKED -> "“${vm.meantMeshName()}” can't be painted while it is locked."
+                CanvasViewModel.Blocked.ALPHA_LOCKED -> "“${l.name}” can't be liquified while its alpha is locked."
             }
         },
         action = "Open Layers",
         onCancel = { vm.answerBlocked(fix = false, openLayers = false) },
         onAction = { vm.answerBlocked(fix = false, openLayers = true) },
         icon = when (why) {
-            CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> PcIcons.PageLocked
+            CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED, CanvasViewModel.Blocked.ALPHA_LOCKED -> PcIcons.PageLocked
             CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> PcIcons.EyeStruck
             else -> PcIcons.Folder
         },
         destructive = false,
         extra = when (why) {
             CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> "Unlock"
+            CanvasViewModel.Blocked.ALPHA_LOCKED -> "Turn Off"
             CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> "Show"
             else -> null
         },

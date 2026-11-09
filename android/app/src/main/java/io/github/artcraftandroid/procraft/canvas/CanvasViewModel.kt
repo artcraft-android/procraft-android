@@ -4175,7 +4175,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun currentIsText() = layers.firstOrNull { it.current }?.text == true
 
     /** Why the current layer turned a change away. */
-    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP, MESH_HIDDEN, MESH_LOCKED, GROUP_HIDDEN, GROUP }
+    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP, MESH_HIDDEN, MESH_LOCKED, GROUP_HIDDEN, GROUP, ALPHA_LOCKED }
 
     /** The current layer turned a change away, and why: a dialog offers to unlock or show it, or open Layers. */
     var blocked by mutableStateOf<Pair<Blocked, LayerInfo>?>(null)
@@ -4190,10 +4190,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * cutting); if not (locked, hidden, or an empty group), a dialog says why. What was tried is
      * not done afterwards. With [paint] (a stroke or a fill) a group current says so too.
      */
-    fun currentTakesChanges(paint: Boolean = false): Boolean {
+    fun currentTakesChanges(paint: Boolean = false, adjustment: Adjustment? = null): Boolean {
         val l = layers.firstOrNull { it.current } ?: return true
         // the shared core decides
-        val why = when (if (paint) session?.whyUnpainted() else session?.whyBlocked()) {
+        val asked = when {
+            paint -> session?.whyUnpainted()
+            adjustment != null -> session?.whyNotAdjusted(adjustment)
+            else -> session?.whyBlocked()
+        }
+        val why = when (asked) {
             io.github.artcraftandroid.procraft.core.Blocked.LOCKED -> Blocked.LOCKED
             io.github.artcraftandroid.procraft.core.Blocked.HIDDEN -> Blocked.HIDDEN
             io.github.artcraftandroid.procraft.core.Blocked.EMPTY_GROUP -> Blocked.EMPTY_GROUP
@@ -4201,6 +4206,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             io.github.artcraftandroid.procraft.core.Blocked.MESH_LOCKED -> Blocked.MESH_LOCKED
             io.github.artcraftandroid.procraft.core.Blocked.GROUP_HIDDEN -> Blocked.GROUP_HIDDEN
             io.github.artcraftandroid.procraft.core.Blocked.GROUP -> Blocked.GROUP
+            io.github.artcraftandroid.procraft.core.Blocked.ALPHA_LOCKED -> Blocked.ALPHA_LOCKED
             null -> return true
         }
         blockedBy = session?.hiddenBy()
@@ -4215,6 +4221,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (fix) {
             when (why) {
                 Blocked.LOCKED -> toggleLocked(l)
+                Blocked.ALPHA_LOCKED -> if (l.alphaLock) toggleAlphaLock(l)
                 // its own box ticked (what else hides it stays)
                 Blocked.HIDDEN, Blocked.GROUP_HIDDEN -> {
                     var said: String? = null
@@ -5893,7 +5900,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Opens adjustment [a] on the current layer (keeping one already open). */
     fun startAdjustment(a: Adjustment) {
         val s = session ?: return
-        if (!currentTakesChanges()) return
+        if (!currentTakesChanges(adjustment = a)) return
         switchModes(ModeButton.Adjustment)
         // the list fades away rather than going at once
         if (panel == Panel.ADJUSTMENTS) panelFading = true
