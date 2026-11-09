@@ -10730,3 +10730,61 @@ fn undo_while_transforming_takes_back_the_transforms_change_not_a_step_under_it(
     assert_eq!(s.undo().as_deref(), Some("Paint stroke"));
     assert!(dark(20, 20) && !dark(30, 30));
 }
+
+/// Each layer's pixels, the paint layers' only, as a hash each (top first).
+fn layer_hashes(s: &CanvasSession) -> Vec<u64> {
+    s.layers()
+        .iter()
+        .filter(|l| l.kind == crate::layers::LayerType::Paint)
+        .map(|l| s.copy_layer_contents(l.id).map_or(0, |p| crate::project::pixels_hash(&p.rgba)))
+        .collect()
+}
+
+#[test]
+fn whole_canvas_changes_with_layers_off_the_gpu_save_and_reopen_as_with_them_all_on_it() {
+    type Change = fn(&CanvasSession);
+    let changes: [(&str, Change); 5] = [
+        ("flip across", |s| s.flip_canvas(true)),
+        ("flip down", |s| s.flip_canvas(false)),
+        ("merge down", |s| {
+            // (the list is top first)
+            let top = s.layers().iter().find(|l| l.kind == crate::layers::LayerType::Paint).unwrap().id;
+            assert!(s.merge_down(top));
+        }),
+        ("duplicate", |s| {
+            let first = s.layers().iter().find(|l| l.kind == crate::layers::LayerType::Paint).unwrap().id;
+            assert!(s.duplicate_layer(first).is_some());
+        }),
+        ("flip, undone", |s| {
+            s.flip_canvas(true);
+            assert!(s.undo().is_some());
+        }),
+    ];
+    for (name, change) in changes {
+        let run = |budgeted: bool| -> Option<(Vec<u64>, Vec<u64>)> {
+            let s = six_layers_two_on_the_gpu()?;
+            let gpu = s.shared.lock().gpu.clone().unwrap();
+            if !budgeted {
+                s.shared.lock().canvas.as_mut().unwrap().set_resident_budget(0);
+            }
+            let dir = std::env::temp_dir().join(format!(
+                "procraft-whole-{}-{budgeted}-{}",
+                name.replace([' ', ','], "-"),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            s.save(dir.to_string_lossy().into_owned()).unwrap();
+            change(&s);
+            let shown = layer_hashes(&s);
+            s.save(dir.to_string_lossy().into_owned()).unwrap();
+            let reopened = layer_hashes(&reopened_at(&dir, &gpu));
+            let _ = std::fs::remove_dir_all(&dir);
+            Some((shown, reopened))
+        };
+        let Some((all_on, all_on_reopened)) = run(false) else { return };
+        let (budgeted, budgeted_reopened) = run(true).unwrap();
+        assert_eq!(all_on, all_on_reopened, "{name}: all on the GPU, reopened");
+        assert_eq!(budgeted, all_on, "{name}: kept off the GPU, shown");
+        assert_eq!(budgeted_reopened, all_on, "{name}: kept off the GPU, reopened");
+    }
+}
