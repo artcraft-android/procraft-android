@@ -10540,3 +10540,93 @@ fn add_frame_names_its_layer_frame_or_page_by_the_count() {
     let layer = s.add_layer();
     assert!(name(&s, layer).starts_with("Layer"));
 }
+
+/// Six painted layers with GPU room for only two (the rest kept compressed, as on a smaller
+/// tablet), two masked and one hidden.
+fn six_layers_two_on_the_gpu() -> Option<std::sync::Arc<CanvasSession>> {
+    let s = session(300, 400)?;
+    let (w, h) = (s.info().width, s.info().height);
+    s.shared.lock().canvas.as_mut().unwrap().set_resident_budget(2 * u64::from(w) * u64::from(h) * 4);
+    s.set_brush_size(0.6);
+    let mut layers = vec![s.layers()[0].id];
+    for (i, x) in [40.0f32, 80.0, 120.0, 160.0, 200.0, 240.0].into_iter().enumerate() {
+        if i > 0 {
+            layers.push(s.add_layer());
+        }
+        s.set_color(i as f32 * 0.15, 0.2, 1.0 - i as f32 * 0.15);
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 100.0, 0.0)]);
+        s.stroke_add((1..20).map(|k| sample(x, 100.0 + k as f32 * 12.0, k as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    s.add_mask(layers[1]);
+    s.add_mask(layers[2]);
+    assert!(s.set_layer_visible(layers[0], false));
+    Some(s)
+}
+
+fn painted_per_layer(s: &CanvasSession) -> Vec<usize> {
+    s.layers()
+        .iter()
+        .filter(|l| l.kind == crate::layers::LayerType::Paint)
+        .map(|l| s.copy_layer_contents(l.id).map_or(0, |p| p.rgba.chunks(4).filter(|px| px[3] > 0).count()))
+        .collect()
+}
+
+fn reopened_at(dir: &std::path::Path, gpu: &Gpu) -> std::sync::Arc<CanvasSession> {
+    let o = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    o.use_gpu(gpu.clone());
+    {
+        let mut st = o.shared.lock();
+        let (w, h) = (st.doc.width(), st.doc.height());
+        st.window_size = (300, 400);
+        st.view = Some(View::fit((w, h), (300, 400)));
+        st.ensure_canvas();
+    }
+    o
+}
+
+#[test]
+fn a_crop_with_layers_off_the_gpu_saves_and_reopens_whole() {
+    let Some(s) = six_layers_two_on_the_gpu() else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    // saved once before the crop (an autosave), into the folder the crop is saved to after
+    let dir = std::env::temp_dir().join(format!("procraft-crop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert!(s.crop_canvas(40.0, 80.0, 230.0, 290.0, 0.0, false, 0, 0));
+    let cropped = painted_per_layer(&s);
+    assert!(cropped.iter().all(|&n| n > 0), "{cropped:?}");
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    // every layer back as cropped, and still after the reopened one is saved and opened again
+    let o = reopened_at(&dir, &gpu);
+    assert_eq!((o.info().width, o.info().height), (230, 290));
+    assert_eq!(painted_per_layer(&o), cropped);
+    o.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(painted_per_layer(&reopened_at(&dir, &gpu)), cropped);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_crop_undone_and_redone_after_a_save_saves_every_layer_at_its_size() {
+    let Some(s) = six_layers_two_on_the_gpu() else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let dir = std::env::temp_dir().join(format!("procraft-crop-undo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let whole = painted_per_layer(&s);
+    let size = (s.info().width, s.info().height);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert!(s.crop_canvas(40.0, 80.0, 230.0, 290.0, 0.0, false, 0, 0));
+    let cropped = painted_per_layer(&s);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    // undone: the canvas from before, saved over the cropped files
+    assert_eq!(s.undo().as_deref(), Some("Crop canvas"));
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let o = reopened_at(&dir, &gpu);
+    assert_eq!((o.info().width, o.info().height), size);
+    assert_eq!(painted_per_layer(&o), whole);
+    // redone: cropped again, saved over the whole ones
+    assert_eq!(s.redo().as_deref(), Some("Crop canvas"));
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(painted_per_layer(&reopened_at(&dir, &gpu)), cropped);
+    let _ = std::fs::remove_dir_all(&dir);
+}

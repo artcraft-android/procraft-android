@@ -6611,6 +6611,8 @@ impl Canvas {
         self.layers.remove(&id);
         self.parked.insert(id, ready.parked);
         self.pictures.insert(id, ready.pictures);
+        // new pixels, as an upload's: saved next (a canvas made from its files forgets this)
+        self.touched(id);
         self.invalidate();
     }
 
