@@ -22,6 +22,24 @@
 //!   out (not 0: something comes out), and `procraft_fill_out(y: i32)` puts each row of what comes
 //!   out there. All it can do is take away: what isn't in the fill stays out of it, and the seed
 //!   stays in.
+//! - `procraft_fill_all_layers() -> i32`: for the hook `fill_all_layers`, whether ColorDrop fills
+//!   by every layer seen (not 0) rather than by the current layer alone.
+//! - `procraft_radial_segments() -> i32`: for the hook `radial_segments`, how many parts radial
+//!   symmetry makes, 2 to 64.
+//! - `procraft_hide_undo_notice() -> i32`: for the hook `hide_undo_notice`, whether undo and redo go
+//!   by without their notice (not 0).
+//! - `procraft_interface_colour(role: i32) -> i32`: for the hook `interface_colour`, the colour
+//!   (0xRRGGBB) the interface draws `role` in (0: the accent, the blue of what is chosen and
+//!   switched on), or -1 to leave it as it is.
+//! - `procraft_pin_panels() -> i32`: for the hook `pin_panels`, whether a touch on the canvas with
+//!   a panel open paints at once and leaves the panel up (not 0).
+//! - `procraft_opacity_together() -> i32`: for the hook `opacity_together`, whether a layer's
+//!   opacity changed while it is one of several picked sets every picked layer's (not 0).
+//! - `procraft_randomise(setting: i32, seed: i32) -> f32`: for the hook `randomise_brush`, where
+//!   a brush setting (by its place in [`crate::studio::RANDOMISED`]) goes, as a share of its range
+//!   (0 to 1), or below 0 to leave it; `seed` is the same for every setting of one press.
+//! - `procraft_colour_triangle() -> i32`: for the hook `colour_triangle`, whether the colour
+//!   panel's Classic shows a triangle in place of its square (not 0).
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
 
@@ -78,6 +96,16 @@ const FILL_BEGIN: &str = "procraft_fill_begin";
 const FILL_ROW: &str = "procraft_fill_row";
 const FILL_RUN: &str = "procraft_fill_run";
 const FILL_OUT: &str = "procraft_fill_out";
+const FILL_ALL_LAYERS: &str = "procraft_fill_all_layers";
+const RADIAL_SEGMENTS: &str = "procraft_radial_segments";
+const HIDE_UNDO_NOTICE: &str = "procraft_hide_undo_notice";
+const INTERFACE_COLOUR: &str = "procraft_interface_colour";
+const PIN_PANELS: &str = "procraft_pin_panels";
+const OPACITY_TOGETHER: &str = "procraft_opacity_together";
+const RANDOMISE: &str = "procraft_randomise";
+const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
+/// How many parts radial symmetry may be asked to make.
+const RADIAL_PARTS: std::ops::RangeInclusive<i32> = 2..=64;
 const MEMORY: &str = "memory";
 const CONTROL: &str = "procraft_control";
 
@@ -89,6 +117,14 @@ pub(crate) enum Hook {
     InterfaceScale,
     PasteMask,
     FillMask,
+    FillAllLayers,
+    RadialSegments,
+    HideUndoNotice,
+    InterfaceColour,
+    PinPanels,
+    OpacityTogether,
+    RandomiseBrush,
+    ColourTriangle,
 }
 
 impl Hook {
@@ -99,6 +135,14 @@ impl Hook {
             "interface_scale" => Some(Hook::InterfaceScale),
             "paste_mask" => Some(Hook::PasteMask),
             "fill_mask" => Some(Hook::FillMask),
+            "fill_all_layers" => Some(Hook::FillAllLayers),
+            "radial_segments" => Some(Hook::RadialSegments),
+            "hide_undo_notice" => Some(Hook::HideUndoNotice),
+            "interface_colour" => Some(Hook::InterfaceColour),
+            "pin_panels" => Some(Hook::PinPanels),
+            "opacity_together" => Some(Hook::OpacityTogether),
+            "randomise_brush" => Some(Hook::RandomiseBrush),
+            "colour_triangle" => Some(Hook::ColourTriangle),
             _ => None,
         }
     }
@@ -111,6 +155,14 @@ impl Hook {
             Hook::InterfaceScale => "This plugin can make the interface bigger or smaller.",
             Hook::PasteMask => "This plugin can put what you paste into the current mask.",
             Hook::FillMask => "This plugin can take parts out of a ColorDrop fill.",
+            Hook::FillAllLayers => "This plugin can make ColorDrop fill by every layer you see.",
+            Hook::RadialSegments => "This plugin can change how many parts radial symmetry makes.",
+            Hook::HideUndoNotice => "This plugin can hide the notice undo and redo show.",
+            Hook::InterfaceColour => "This plugin can change the interface's colours.",
+            Hook::PinPanels => "This plugin can keep panels open while you paint.",
+            Hook::OpacityTogether => "This plugin can change the opacity of all the layers you've picked at once.",
+            Hook::RandomiseBrush => "This plugin can set a brush's settings at random in the brush studio.",
+            Hook::ColourTriangle => "This plugin can change how the colour panel's Classic picker looks.",
         }
     }
 
@@ -124,6 +176,14 @@ impl Hook {
         match self {
             Hook::Position => exports(module, POSITION, &[ValType::F32, ValType::F32], &[ValType::I64]),
             Hook::PickLayer => exports(module, PICK_LAYER, &[], &[ValType::I32]),
+            Hook::FillAllLayers => exports(module, FILL_ALL_LAYERS, &[], &[ValType::I32]),
+            Hook::RadialSegments => exports(module, RADIAL_SEGMENTS, &[], &[ValType::I32]),
+            Hook::HideUndoNotice => exports(module, HIDE_UNDO_NOTICE, &[], &[ValType::I32]),
+            Hook::InterfaceColour => exports(module, INTERFACE_COLOUR, &[ValType::I32], &[ValType::I32]),
+            Hook::PinPanels => exports(module, PIN_PANELS, &[], &[ValType::I32]),
+            Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
+            Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
+            Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
             Hook::InterfaceScale => exports(module, INTERFACE_SCALE, &[ValType::F32, ValType::F32], &[ValType::F32]),
             Hook::PasteMask => {
                 exports(module, PASTE_MASK, &[], &[ValType::I32])
@@ -296,6 +356,14 @@ pub(crate) struct Running {
     row_buffer: Option<TypedFunc<i32, i32>>,
     paste_row: Option<TypedFunc<(i32, i32), ()>>,
     fill: Option<FillCalls>,
+    fill_all_layers: Option<TypedFunc<(), i32>>,
+    radial_segments: Option<TypedFunc<(), i32>>,
+    hide_undo_notice: Option<TypedFunc<(), i32>>,
+    interface_colour: Option<TypedFunc<i32, i32>>,
+    pin_panels: Option<TypedFunc<(), i32>>,
+    opacity_together: Option<TypedFunc<(), i32>>,
+    randomise: Option<TypedFunc<(i32, i32), f32>>,
+    colour_triangle: Option<TypedFunc<(), i32>>,
     memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
 }
@@ -351,6 +419,14 @@ impl Running {
                     out: instance.get_typed_func(&store, FILL_OUT).ok()?,
                 })
             })();
+            let fill_all_layers = instance.get_typed_func(&store, FILL_ALL_LAYERS).ok();
+            let radial_segments = instance.get_typed_func(&store, RADIAL_SEGMENTS).ok();
+            let hide_undo_notice = instance.get_typed_func(&store, HIDE_UNDO_NOTICE).ok();
+            let interface_colour = instance.get_typed_func(&store, INTERFACE_COLOUR).ok();
+            let pin_panels = instance.get_typed_func(&store, PIN_PANELS).ok();
+            let opacity_together = instance.get_typed_func(&store, OPACITY_TOGETHER).ok();
+            let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
+            let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
             let memory = instance.get_memory(&store, MEMORY);
             let control = instance.get_typed_func(&store, CONTROL).ok();
             Ok(Running {
@@ -362,6 +438,14 @@ impl Running {
                 row_buffer,
                 paste_row,
                 fill,
+                fill_all_layers,
+                radial_segments,
+                hide_undo_notice,
+                interface_colour,
+                pin_panels,
+                opacity_together,
+                randomise,
+                colour_triangle,
                 memory,
                 control,
             })
@@ -391,6 +475,104 @@ impl Running {
             pick_layer.call(&mut *store, ()).map_err(|e| stop_of(&e))
         })?;
         Ok(said != 0)
+    }
+
+    /// Whether it says ColorDrop fills by every visible layer.
+    pub(crate) fn fill_all_layers(&mut self) -> Result<bool, Stop> {
+        let Running { store, fill_all_layers, .. } = self;
+        let Some(fill_all_layers) = fill_all_layers else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            fill_all_layers.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// The colour (0xRRGGBB) it says the interface draws `role` in; none if it leaves it be (-1).
+    pub(crate) fn interface_colour(&mut self, role: i32) -> Result<Option<u32>, Stop> {
+        let Running { store, interface_colour, .. } = self;
+        let Some(interface_colour) = interface_colour else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            interface_colour.call(&mut *store, role).map_err(|e| stop_of(&e))
+        })?;
+        match said {
+            -1 => Ok(None),
+            0..=0xFF_FFFF => Ok(u32::try_from(said).ok()),
+            _ => Err(Stop::Nonsense),
+        }
+    }
+
+    /// Whether it says Classic shows a triangle.
+    pub(crate) fn colour_triangle(&mut self) -> Result<bool, Stop> {
+        let Running { store, colour_triangle, .. } = self;
+        let Some(colour_triangle) = colour_triangle else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            colour_triangle.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Where it says brush setting `setting` goes, as a share of its range (none: left as it is).
+    pub(crate) fn randomise(&mut self, setting: i32, seed: i32) -> Result<Option<f32>, Stop> {
+        let Running { store, randomise, .. } = self;
+        let Some(randomise) = randomise else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            randomise.call(&mut *store, (setting, seed)).map_err(|e| stop_of(&e))
+        })?;
+        if said.is_nan() || said > 1.0 {
+            Err(Stop::Nonsense)
+        } else if said < 0.0 {
+            Ok(None)
+        } else {
+            Ok(Some(said))
+        }
+    }
+
+    /// Whether it says picked layers' opacity changes together.
+    pub(crate) fn opacity_together(&mut self) -> Result<bool, Stop> {
+        let Running { store, opacity_together, .. } = self;
+        let Some(opacity_together) = opacity_together else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            opacity_together.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says panels stay open while the canvas is painted.
+    pub(crate) fn pin_panels(&mut self) -> Result<bool, Stop> {
+        let Running { store, pin_panels, .. } = self;
+        let Some(pin_panels) = pin_panels else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            pin_panels.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says undo and redo go by without their notice.
+    pub(crate) fn hide_undo_notice(&mut self) -> Result<bool, Stop> {
+        let Running { store, hide_undo_notice, .. } = self;
+        let Some(hide_undo_notice) = hide_undo_notice else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            hide_undo_notice.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// How many parts it says radial symmetry makes (none if it has no say).
+    pub(crate) fn radial_segments(&mut self) -> Result<Option<u32>, Stop> {
+        let Running { store, radial_segments, .. } = self;
+        let Some(radial_segments) = radial_segments else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            radial_segments.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        if RADIAL_PARTS.contains(&said) { Ok(u32::try_from(said).ok()) } else { Err(Stop::Nonsense) }
     }
 
     /// How big it says the interface shows in a window `width` × `height` points at 1.

@@ -681,6 +681,11 @@ private fun DrawScope.knob(c: Offset, r: Float, fill: Color) {
 
 @Composable
 private fun SaturationBrightness(c: ColorPick, compact: Boolean, height: Dp = 344.dp) {
+    // a plugin's: a triangle in its place
+    if (Pc.colourTriangle) {
+        ColourTriangle(c, compact, height)
+        return
+    }
     val hue by rememberUpdatedState(c.hue)
     val pure = hsvColor(c.hue, 1f, 1f)
     val current = rgbColor(c.rgb())
@@ -697,6 +702,38 @@ private fun SaturationBrightness(c: ColorPick, compact: Boolean, height: Dp = 34
                 .drawBehind {
                     drawRect(Brush.horizontalGradient(oneSpace(listOf(Color.White, pure))))
                     drawRect(Brush.verticalGradient(listOf(Color.Transparent, Color.Black)))
+                },
+        )
+    }
+}
+
+/**
+ * A plugin's triangle in Classic's square: saturation and brightness between the pure hue (right),
+ * white (top left) and black (bottom left), drawn by the core, as big as fits.
+ */
+@Composable
+private fun ColourTriangle(c: ColorPick, compact: Boolean, height: Dp) {
+    val hue by rememberUpdatedState(c.hue)
+    val current = rgbColor(c.rgb())
+    val box = if (compact) 248.dp else 344.dp
+    val side = if (compact) 248.dp else minOf(344.dp, height)
+    val px = with(LocalDensity.current) { side.roundToPx() }
+    val picture = rememberPickerPicture(c.hue, px, false) { n -> io.github.artcraftandroid.procraft.core.trianglePicture(hue, n.toUInt()) }
+    Box(Modifier.padding(horizontal = if (compact) 6.dp else 16.dp).size(box, if (compact) 248.dp else height), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(side)
+                .pointerInput(Unit) {
+                    track { x, y ->
+                        val sv = io.github.artcraftandroid.procraft.core.triangleSv(x, y)
+                        c.setHsv(hue, sv[0], sv[1])
+                    }
+                }
+                .drawWithContent {
+                    // read, so a new picture draws
+                    picture.version
+                    drawImage(picture.image, dstSize = androidx.compose.ui.unit.IntSize(size.width.roundToInt(), size.height.roundToInt()))
+                    val at = io.github.artcraftandroid.procraft.core.trianglePoint(c.saturation, c.brightness)
+                    knob(Offset(at[0] * size.width, at[1] * size.height), 10.75.dp.toPx(), current)
                 },
         )
     }

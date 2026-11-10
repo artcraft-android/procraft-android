@@ -183,7 +183,7 @@ fun DropBandUi(vm: CanvasViewModel) {
     if (band == DropBand.NONE && shown.value <= 0f) return
     val what = kept[0]
     val ink = if (Pc.light) Color(0xFF222222) else Color(0xFFC5C5C5)
-    val blue = if (Pc.light) Color(0xFF0A8CFD) else Color(0xFF0076FD)
+    val blue = Pc.tinted(if (Pc.light) Color(0xFF0A8CFD) else Color(0xFF0076FD))
     BoxWithConstraints(Modifier.offset(y = Pc.BarHeight).fillMaxWidth().clipToBounds()) {
         val width = maxWidth
         Column(Modifier.graphicsLayer { translationY = -(1f - shown.value) * size.height }) {

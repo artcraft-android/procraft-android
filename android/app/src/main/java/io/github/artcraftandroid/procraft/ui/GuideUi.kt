@@ -54,11 +54,11 @@ private val GuideTop get() = if (Pc.light) Color(0xFFE1E1E3) else Color(0xFF1F1F
 private val GuideButton get() = if (Pc.light) Color(0xFFF5F8F9) else Color(0xFF1C1C1C)
 private val GuideButtonEdge get() = if (Pc.light) Color(0xFFDCDEDF) else Color(0xFF383838)
 private val GuideTitle get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFD8D8D8)
-private val GuideDone = Color(0xFF0190FF)
+private val GuideDone get() = Pc.tinted(Color(0xFF0190FF))
 private val GuideNote get() = if (Pc.light) Color(0xFFB5B5B5) else Color(0xFF4A4A4A)
 /** The toolbar's words: light, or dark grey with the light interface. */
 private val GuideLabel get() = if (Pc.light) Color(0xFF414141) else Color(0xFFD0D0D0)
-private val GuideNodeCentre = Color(0xFF0A84FF)
+private val GuideNodeCentre get() = Pc.tinted(Color(0xFF0A84FF))
 private val GuideNodeTurn = Color(0xFF30D158)
 
 /**

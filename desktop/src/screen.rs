@@ -264,6 +264,8 @@ impl Screen {
         if let Some(session) = session {
             session.set_interface_size(shown);
         }
+        // and in the accent they give, if any
+        crate::look::set_accent(plugins.accent_colour());
     }
 
     /// Whether `p` (window pixels) is on the interface rather than the canvas, which shows in

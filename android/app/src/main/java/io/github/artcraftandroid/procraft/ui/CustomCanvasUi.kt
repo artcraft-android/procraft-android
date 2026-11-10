@@ -63,7 +63,7 @@ private val SwitchTrack get() = if (Pc.light) Color(0xFFD5D5D5) else Color(0xFF3
 private val SwitchIdle get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFC1C1C1)
 private val CapsuleFill get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1A1A1A)
 private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF373737)
-private val DoneBlue = Color(0xFF0190FF)
+private val DoneBlue get() = Pc.tinted(Color(0xFF0190FF))
 
 /** Where the last row the keypad types into (DPI) ends, down from the top: the page's 120, two
  * rows and their line, 24 between the groups, one row. */

@@ -90,8 +90,8 @@ private val SegmentTrack get() = if (Pc.light) Color(0xFFE3E3E3) else Color(0xFF
 private val CapsuleInk get() = if (Pc.light) Color(0xFF565656) else Color(0xFFC5C5C5)
 private val KeyboardDisc get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF393939)
 private val KeyboardBar get() = if (Pc.light) Color(0xFFE9ECED) else Color(0xFF2B2B2B)
-private val DoneBlue = Color(0xFF0190FF)
-private val BoxLine = Color(0xFF0076FD)
+private val DoneBlue get() = Pc.tinted(Color(0xFF0190FF))
+private val BoxLine get() = Pc.tinted(Color(0xFF0076FD))
 /** The box's outline and the dots on its sides (as measured, a lighter blue than the caret's). */
 private val BoxOutline = Color(0xFF0184FF)
 /** A side's dot: how wide it is, and how near a finger takes it. */

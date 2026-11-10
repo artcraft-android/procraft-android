@@ -88,6 +88,10 @@ pub struct Guide {
     /// on or off.
     #[serde(default)]
     pub set_up: bool,
+    /// How many parts radial symmetry makes, where other than the usual eight is asked for (by a
+    /// plugin): held only while the app runs, never written to the artwork.
+    #[serde(skip)]
+    pub radial: Option<u32>,
 }
 
 /// The kinds' looks as a new guide starts.
@@ -226,6 +230,19 @@ impl Guide {
             assisted: false,
             vanishing: Vec::new(),
             set_up: false,
+            radial: None,
+        }
+    }
+
+    /// How many parts radial symmetry makes: eight, or as asked for (2 to 64; even, when copies
+    /// are mirrored in between).
+    pub fn radial_parts(&self) -> u32 {
+        match self.radial {
+            None => 8,
+            Some(n) => {
+                let n = n.clamp(2, 64);
+                if self.rotational { n } else { n + n % 2 }
+            }
         }
     }
 
@@ -306,7 +323,11 @@ impl Guide {
                     SymmetryKind::Vertical => vec![self.angle + PI / 2.0],
                     SymmetryKind::Horizontal => vec![self.angle],
                     SymmetryKind::Quadrant => vec![self.angle, self.angle + PI / 2.0],
-                    SymmetryKind::Radial => (0..4).map(|k| self.angle + k as f32 * PI / 4.0).collect(),
+                    SymmetryKind::Radial => {
+                        // a line through the centre for each two parts
+                        let lines = self.radial_parts().div_ceil(2);
+                        (0..lines).map(|k| self.angle + k as f32 * PI / lines as f32).collect()
+                    }
                 };
                 axes.into_iter()
                     .map(|a| {
@@ -340,7 +361,7 @@ impl Guide {
             SymmetryKind::Vertical => (2, base + PI / 2.0),
             SymmetryKind::Horizontal => (2, base),
             SymmetryKind::Quadrant => (4, base),
-            SymmetryKind::Radial => (8, base),
+            SymmetryKind::Radial => (self.radial_parts() as usize, base),
         };
         if self.rotational || count > 2 {
             // turned copies; mirrored ones in between for a kaleidoscope unless only turning
@@ -426,6 +447,29 @@ mod tests {
 
     fn on(kind: GuideKind) -> Guide {
         Guide { on: true, kind, assisted: true, ..Guide::new(200, 100) }
+    }
+
+    #[test]
+    fn radial_symmetry_makes_as_many_parts_as_asked_for() {
+        let radial = Guide { symmetry: SymmetryKind::Radial, ..on(GuideKind::Symmetry) };
+        let p = Vec2::new(150.0, 50.0);
+        // the usual eight: seven copies, four lines
+        assert_eq!((radial.copies(p).len(), radial.lines(200, 100).len()), (7, 4));
+        // six asked for: five copies (mirrored every other), three lines
+        let six = Guide { radial: Some(6), ..radial.clone() };
+        assert_eq!((six.copies(p).len(), six.lines(200, 100).len()), (5, 3));
+        assert_eq!(six.copies(p).iter().filter(|c| c.2).count(), 3);
+        // odd, mirrored: made even; turned only, as asked
+        assert_eq!(Guide { radial: Some(5), ..radial.clone() }.radial_parts(), 6);
+        assert_eq!(Guide { radial: Some(5), rotational: true, ..radial.clone() }.copies(p).len(), 4);
+        // kept within 2 and 64
+        assert_eq!(Guide { radial: Some(500), ..radial.clone() }.radial_parts(), 64);
+        assert_eq!(Guide { radial: Some(0), ..radial.clone() }.radial_parts(), 2);
+        // never written with the artwork
+        let text = serde_json::to_string(&six).unwrap();
+        assert!(!text.contains("radial\""), "{text}");
+        let back: Guide = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.radial, None);
     }
 
     #[test]

@@ -450,6 +450,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var pluginList by mutableStateOf(plugins.plugins())
         private set
 
+    // the interface's accent as the plugins give it
+    init { followPluginLooks() }
+
+    /** What the plugins change in how the interface looks: its accent, Classic's triangle. */
+    private fun followPluginLooks() {
+        io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
+        io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
+    }
+
     /** How big the interface shows now, as a plugin says (1: as measured). */
     var interfaceShown = 1f
         private set
@@ -573,6 +582,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The list as it stands: a plugin may have stopped on a stroke since it was read. */
     fun readPlugins() {
         pluginList = plugins.plugins()
+        followPluginLooks()
     }
 
     /** What the plugins do now; one nothing answers to does nothing. */
@@ -4221,7 +4231,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val name = (if (undo) s.textBoxUndo() else s.textBoxRedo()) ?: return false
         s.editingText()?.let(s::layerText)?.let { textInfo = it }
         renderText()
-        showNotice((if (undo) "Undo " else "Redo ") + name)
+        s.stepNotice(undo, name)?.let { showNotice(it) }
         refresh()
         return true
     }
@@ -5089,6 +5099,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         syncPad()
     }
 
+    /** Whether a plugin sets brushes at random: the studio shows Randomise. */
+    val randomisesBrushes: Boolean
+        get() {
+            // read again as the plugins change
+            pluginList
+            return plugins.randomisesBrushes()
+        }
+
+    /** The studio's brush set at random, as a plugin says. */
+    fun randomiseStudio() {
+        if (session?.studioRandomise() != true) return
+        readStudio()
+        syncPad()
+    }
+
     /** Every control back to how the brush ships. */
     fun resetStudio() {
         session?.studioReset()
@@ -5870,7 +5895,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // recoloring, the core takes the fill under the reticle back first (after the fills queued)
         val could = canUndo
         val name = session?.let { s -> if (recoloring) pourNow { s.undo() } else s.undo() }
-        if (could || name != null) showNotice("Undo" + name?.let { " $it" }.orEmpty())
+        if (could || name != null) session?.stepNotice(true, name)?.let { showNotice(it) }
         followQuickShape()
         // a model's tile chosen before comes back, with its channel's colour
         if (modelOpen) {
@@ -5919,7 +5944,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val text = if (!editing) session?.textRedoLayer() else null
         // recoloring, the core steps the open fill aside and makes it again over what comes back
         val name = session?.let { s -> if (recoloring) pourNow { s.redo() } else s.redo() }
-        if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
+        if (could) session?.stepNotice(false, name)?.let { showNotice(it) }
         followQuickShape()
         if (modelOpen) followModelChannel()
         refresh()

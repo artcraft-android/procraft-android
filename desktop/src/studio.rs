@@ -707,6 +707,8 @@ pub struct Studio {
     /// The pen painting on the pad, if one is: its pointer and pressure as last given.
     pad_pen: Option<(u64, f32)>,
     pad_menu: bool,
+    /// A plugin's Randomise was tapped: the brush is set at random once the frame is drawn.
+    randomise_tapped: bool,
     /// The frame the pad menu opened in (the press that opened it doesn't close it).
     pad_menu_frame: u64,
     /// The brush's sample stroke, and when it is drawn again.
@@ -1014,11 +1016,16 @@ impl Studio {
                 self.rail(ui, look, pages);
             }
             self.settings(ui, look, session, settings);
-            if let Some(done) = self.pad_view(ui, look, pad) {
+            let randomises = prefs.plugins.randomises_brushes();
+            if let Some(done) = self.pad_view(ui, look, pad, randomises) {
                 self.close(session, done);
                 asked = Some(Asked::Closed);
             }
         });
+        if std::mem::take(&mut self.randomise_tapped) && session.studio_randomise() {
+            self.read(ctx, session);
+            self.sync_pad(session);
+        }
         if self.pad_menu {
             self.pad_menu(ctx, session, prefs);
         }
@@ -1496,9 +1503,9 @@ impl Studio {
         }
     }
 
-    /// The drawing pad with its buttons: Drawing Pad (its menu), Cancel and Done. Returns whether
-    /// Done (true) or Cancel (false) was tapped.
-    fn pad_view(&mut self, ui: &mut Ui, look: &mut Look, area: Rect) -> Option<bool> {
+    /// The drawing pad with its buttons: Drawing Pad (its menu), Cancel and Done, and a plugin's
+    /// Randomise where `randomises`. Returns whether Done (true) or Cancel (false) was tapped.
+    fn pad_view(&mut self, ui: &mut Ui, look: &mut Look, area: Rect, randomises: bool) -> Option<bool> {
         self.pad_rect = Some(area);
         ui.painter().rect_filled(area, 0, argb(BACK));
         if let Some(id) = self.pad_texture {
@@ -1541,6 +1548,19 @@ impl Studio {
         ui.painter().rect_filled(cancel, 21.5, argb(BUTTON));
         ui.painter().rect_stroke(cancel, 21.5, Stroke::new(1.0, argb(BUTTON_EDGE)), egui::StrokeKind::Inside);
         text(ui.painter(), cancel.center(), Align2::CENTER_CENTER, "Cancel", 17.0, Weight::Regular, argb(BUTTON_INK));
+        // a plugin's: the brush set at random
+        if randomises {
+            let galley =
+                ui.painter().layout_no_wrap("Randomise".to_owned(), Weight::Regular.font(17.0), argb(BUTTON_INK));
+            let width = galley.size().x + 32.0;
+            let button = Rect::from_min_size(pos2(cancel.left() - 13.0 - width, cancel.top()), vec2(width, 43.0));
+            ui.painter().rect_filled(button, 21.5, argb(BUTTON));
+            ui.painter().rect_stroke(button, 21.5, Stroke::new(1.0, argb(BUTTON_EDGE)), egui::StrokeKind::Inside);
+            ui.painter().galley(button.center() - galley.size() / 2.0, galley, argb(BUTTON_INK));
+            if ui.interact(button, ui.scope_id().with("randomise"), Sense::click()).clicked() {
+                self.randomise_tapped = true;
+            }
+        }
         ui.painter().circle_filled(done.center(), 22.0, argb(DONE));
         look.icon(ui, &icons::DONE_TICK, done.center(), 40.0, Color32::WHITE);
         if ui.interact(cancel, ui.scope_id().with("cancel"), Sense::click()).clicked() {

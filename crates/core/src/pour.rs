@@ -423,8 +423,13 @@ impl CanvasSession {
         }
         let Some(before) = st.current_pixels() else { return false };
         let within = st.reach_selection();
-        // measured on the reference layer when another layer is it
-        let elsewhere = st.doc.reference().filter(|&r| r != current).and_then(|r| st.layer_pixels(r));
+        // measured on every layer seen while a plugin says so, else on the reference layer when
+        // another layer is it
+        let elsewhere = if st.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
+            st.composite_pixels()
+        } else {
+            st.doc.reference().filter(|&r| r != current).and_then(|r| st.layer_pixels(r))
+        };
         let mut pour = Pour {
             layer: current,
             before,

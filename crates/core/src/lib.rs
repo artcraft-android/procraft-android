@@ -136,7 +136,7 @@ pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
 pub use pickers::{
     disc_picture, disc_to_square, disc_to_square_point, harmony_wheel, p3_hsv_of, p3_hsv_to_rgb, rgb_to_p3_hsv,
-    square_to_disc, square_to_disc_point,
+    square_to_disc, square_to_disc_point, triangle_picture, triangle_point, triangle_sv,
 };
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
@@ -1471,6 +1471,8 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // radial symmetry in as many parts as a plugin says, for this stroke
+        st.doc.guide.radial = st.hooks.as_ref().and_then(|hooks| hooks.radial_segments());
         // a fill still spreading in shows all of itself before anything is drawn over it
         st.end_reveal();
         // the graphics stopped (perhaps while the app was away, its notice long gone): nothing

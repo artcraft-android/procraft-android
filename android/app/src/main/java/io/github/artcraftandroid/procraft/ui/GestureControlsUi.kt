@@ -64,7 +64,7 @@ private val Track get() = if (Pc.light) Color(0xFFE5E5E5) else Color(0xFF414141)
 // a delay whose way of touching is off: a dark line and a dim knob, no blue
 private val TrackOff get() = if (Pc.light) Color(0xFFE9E9EB) else Color(0xFF1D1D1D)
 private val KnobOff get() = if (Pc.light) Color(0xFFD0D0D0) else Color(0xFF333333)
-private val DoneBlue = Color(0xFF0190FF)
+private val DoneBlue get() = Pc.tinted(Color(0xFF0190FF))
 
 /** Where a wide screen's page starts and ends, beside the card of what gestures can do. */
 private val WideContentStart = 358.dp

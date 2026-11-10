@@ -781,7 +781,18 @@ impl CanvasSession {
 
     /// Opacity 0..1; `done` ends the drag (one undo step for the whole drag).
     pub fn set_layer_opacity(&self, id: u64, opacity: f32, done: bool) -> bool {
-        self.change_live("layer opacity", done, |d| d.set_opacity(LayerId(id), opacity))
+        // a plugin moving picked layers together: each of them, if this is one
+        let hooks = self.shared.lock().hooks.clone();
+        let together = hooks.is_some_and(|hooks| hooks.opacity_together());
+        self.change_live("layer opacity", done, |d| {
+            let chosen = d.chosen();
+            if !(together && chosen.len() > 1 && chosen.contains(&LayerId(id))) {
+                return d.set_opacity(LayerId(id), opacity);
+            }
+            let layers: Vec<LayerId> =
+                chosen.into_iter().filter(|&c| d.layer(c).is_some_and(|l| l.kind != LayerKind::Mask)).collect();
+            layers.into_iter().fold(false, |any, c| d.set_opacity(c, opacity) | any)
+        })
     }
 
     /// `blend` is a blend mode id (see [`blend_modes`]).

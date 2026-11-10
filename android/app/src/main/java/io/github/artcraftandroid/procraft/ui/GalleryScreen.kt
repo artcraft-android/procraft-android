@@ -828,7 +828,7 @@ private fun SelectHeader(
                     }
                 }
             }
-            Box(Modifier.padding(start = 13.dp).size(44.dp, 45.dp).clip(CircleShape).background(Color(0xFF0190FF)).clickable(onClick = onDone), contentAlignment = Alignment.Center) {
+            Box(Modifier.padding(start = 13.dp).size(44.dp, 45.dp).clip(CircleShape).background(Pc.tinted(Color(0xFF0190FF))).clickable(onClick = onDone), contentAlignment = Alignment.Center) {
                 Icon(PcIcons.DoneTick, contentDescription = "Done", tint = Color.White, modifier = Modifier.requiredSize(40.dp))
             }
         }

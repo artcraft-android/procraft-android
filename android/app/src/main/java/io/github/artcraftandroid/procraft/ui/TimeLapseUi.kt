@@ -117,7 +117,7 @@ fun TimeLapseReplay(vm: CanvasViewModel) {
         // how far it has played
         Box(Modifier.padding(top = ToolHeaderHeight).fillMaxWidth().height(4.dp)) {
             val f = if (count > 1) index / (count - 1).toFloat() else 1f
-            Box(Modifier.fillMaxWidth(f.coerceIn(0f, 1f)).height(4.dp).background(Color(0xFF0076FD)))
+            Box(Modifier.fillMaxWidth(f.coerceIn(0f, 1f)).height(4.dp).background(Pc.tinted(Color(0xFF0076FD))))
         }
     }
 }

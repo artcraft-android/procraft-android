@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, TextureHandle, TextureOptions, Ui, pos2, vec2};
@@ -22,6 +22,29 @@ pub fn light() -> bool {
 
 pub fn set_light(on: bool) {
     LIGHT.store(on, Ordering::Relaxed);
+}
+
+/// The accent a plugin gives the interface (0xRRGGBB with the top byte set), or 0: as measured.
+static ACCENT_GIVEN: AtomicU32 = AtomicU32::new(0);
+
+/// The interface's blues: the accent, the Done buttons' and the menus' (0xRRGGBB). Each is drawn in
+/// a plugin's accent while one gives it.
+const BLUES: [u32; 4] = [0x0076FD, 0x0190FF, 0x0A84FF, 0x007AFF];
+
+/// The accent (0xRRGGBB) as a plugin gives it, or none: the interface's own blues.
+pub fn set_accent(rgb: Option<u32>) {
+    ACCENT_GIVEN.store(rgb.map_or(0, |rgb| 0xFF00_0000 | (rgb & 0xFF_FFFF)), Ordering::Relaxed);
+}
+
+/// `v` (0xAARRGGBB), or the accent a plugin gives where `v` is one of the interface's blues (its
+/// alpha kept).
+fn recoloured(v: u32) -> u32 {
+    recolour(v, ACCENT_GIVEN.load(Ordering::Relaxed))
+}
+
+/// `v` (0xAARRGGBB) with `given` (as [`ACCENT_GIVEN`] holds it) in place of the interface's blues.
+fn recolour(v: u32, given: u32) -> u32 {
+    if given != 0 && BLUES.contains(&(v & 0xFF_FFFF)) { (v & 0xFF00_0000) | (given & 0xFF_FFFF) } else { v }
 }
 
 /// A colour the interface shows as the first (0xAARRGGBB) while dark, the second while light.
@@ -56,7 +79,7 @@ impl From<u32> for Themed {
 /// A colour written 0xAARRGGBB, as the Android app writes them (as it is now, for one with a
 /// light look).
 pub fn argb(v: impl Shade) -> Color32 {
-    let [a, r, g, b] = v.value().to_be_bytes();
+    let [a, r, g, b] = recoloured(v.value()).to_be_bytes();
     Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
@@ -698,7 +721,20 @@ pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{pc, spring};
+    use super::{pc, recolour, spring};
+
+    #[test]
+    fn a_plugin_s_accent_takes_the_place_of_the_blues_only() {
+        let red = 0xFF00_0000 | 0xFD0000;
+        // none given: as measured
+        assert_eq!(recolour(pc::ACCENT, 0), pc::ACCENT);
+        // the accent, a Done button's blue, a see-through accent; not a grey or a near blue
+        assert_eq!(recolour(pc::ACCENT, red), 0xFFFD0000);
+        assert_eq!(recolour(0xFF0190FF, red), 0xFFFD0000);
+        assert_eq!(recolour(0x800076FD, red), 0x80FD0000);
+        assert_eq!(recolour(0xFF262626, red), 0xFF262626);
+        assert_eq!(recolour(0xFF0076FE, red), 0xFF0076FE);
+    }
 
     #[test]
     fn the_top_bars_ends_never_meet_and_a_wide_enough_window_keeps_its_measured_step() {

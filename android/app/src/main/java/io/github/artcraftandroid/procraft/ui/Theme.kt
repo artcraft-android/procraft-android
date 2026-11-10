@@ -17,8 +17,22 @@ object Pc {
 
     val Panel: Color get() = pick(0xF7262626, 0xF7E6E6E6)
     val Row: Color get() = pick(0xFF303030, 0xFFD8D8D8)
-    val RowSelected = Color(0xFF0076FD)
-    val Accent = Color(0xFF0076FD)
+
+    /** A plugin has the colour panel's Classic show a triangle in place of its square. */
+    var colourTriangle by mutableStateOf(false)
+
+    /** The accent a plugin gives the interface, if one does: drawn in place of the interface's blues. */
+    var accentGiven by mutableStateOf<Color?>(null)
+
+    /** [blue], one of the interface's own blues, or the accent a plugin gives in its place (its alpha kept). */
+    fun tinted(blue: Color): Color = accentGiven?.copy(alpha = blue.alpha) ?: blue
+
+    /** The accent [plugins] give, if any. */
+    fun accentOf(plugins: io.github.artcraftandroid.procraft.core.Plugins): Color? =
+        plugins.accentColour()?.let { Color(0xFF000000L or it.toLong()) }
+
+    val RowSelected: Color get() = tinted(Color(0xFF0076FD))
+    val Accent: Color get() = tinted(Color(0xFF0076FD))
     val Text: Color get() = pick(0xFFFFFFFF, 0xFF222222)
     val TextDim: Color get() = pick(0x99FFFFFF, 0x99000000)
     val Disabled: Color get() = pick(0x4DFFFFFF, 0x4D000000)
@@ -31,7 +45,7 @@ object Pc {
     val Bar: Color get() = pick(0xE61C1C1C, 0xCFE6E6E6)
     val BarText: Color get() = pick(0xFFAAAAAA, 0xFF3B3B3B)
     val BarGlyph: Color get() = pick(0xFFC7C7C7, 0xFF373737)
-    val BarGlyphSelected = Color(0xFF0076FD)
+    val BarGlyphSelected: Color get() = tinted(Color(0xFF0076FD))
     val ActionDisc: Color get() = pick(0xFF141414, 0xFFEDEDED)
     val ActionGlyph: Color get() = pick(0xFF969696, 0xFF646464)
     val ColorRing: Color get() = pick(0xFF969696, 0xFF696969)

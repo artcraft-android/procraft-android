@@ -1288,7 +1288,7 @@ impl Interface {
             && let Some(name) = session.text_box_undo()
         {
             self.text.reread(session);
-            self.overlays.notice(format!("Undo {name}"), false);
+            self.step_notice(session, true, Some(name));
             return;
         }
         // undoing while editing text otherwise undoes the whole edit
@@ -1296,11 +1296,18 @@ impl Interface {
         let could = session.info().can_undo;
         let name = session.undo();
         if could || name.is_some() {
-            self.overlays.notice(name.map_or("Undo".into(), |n| format!("Undo {n}")), false);
+            self.step_notice(session, true, name);
         }
         self.follow_shape(session);
         // a model's tile chosen before comes back, with its channel's colour
         self.layers.follow_channel(session, &mut self.colours);
+    }
+
+    /// The notice an undo (`undo`) or a redo of the step `name` shows, unless a plugin hides it.
+    fn step_notice(&mut self, session: &CanvasSession, undo: bool, name: Option<String>) {
+        if let Some(text) = session.step_notice(undo, name) {
+            self.overlays.notice(text, false);
+        }
     }
 
     fn redo(&mut self, session: &CanvasSession) {
@@ -1313,7 +1320,7 @@ impl Interface {
             && let Some(name) = session.text_box_redo()
         {
             self.text.reread(session);
-            self.overlays.notice(format!("Redo {name}"), false);
+            self.step_notice(session, false, Some(name));
             return;
         }
         // text being edited is kept first
@@ -1324,7 +1331,7 @@ impl Interface {
         let text = if editing { None } else { session.text_redo_layer() };
         let name = session.redo();
         if could {
-            self.overlays.notice(name.map_or("Redo".into(), |n| format!("Redo {n}")), false);
+            self.step_notice(session, false, name);
         }
         self.follow_shape(session);
         self.layers.follow_channel(session, &mut self.colours);
@@ -2171,6 +2178,7 @@ impl Interface {
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let Some(pick) = self.background_pick.as_mut() else { return Rect::NOTHING };
+        self.colours.set_triangle(self.prefs.plugins.colour_triangle());
         let brush = std::mem::replace(&mut self.colours.hsv, pick.hsv);
         self.colours.background = true;
         let history = self.prefs.colour_history_shown;
@@ -2258,6 +2266,7 @@ impl Interface {
                 shown
             }
             Popover::Colour => {
+                self.colours.set_triangle(self.prefs.plugins.colour_triangle());
                 let shown = self.prefs.colour_history_shown;
                 let history = &mut self.prefs.colour_history_shown;
                 let rect = self.colours.show(ctx, &mut self.look, session, &mut self.drop, button, history, backdrops);

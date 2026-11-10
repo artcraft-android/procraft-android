@@ -737,7 +737,7 @@ private fun GradientEditor(vm: CanvasViewModel, index: Int) {
 }
 
 private val GradientBand get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF535353)
-private val GradientDone = Color(0xFF0190FF)
+private val GradientDone get() = Pc.tinted(Color(0xFF0190FF))
 private val PlusDisc get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1B1B1B)
 private val PlusRim get() = if (Pc.light) Color(0xFFE1E1E1) else Color(0xFF373737)
 private val PlusGlyph get() = if (Pc.light) Color(0xFF595959) else Color(0xFFAAAAAA)

@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.keptPlugins
+import io.github.artcraftandroid.procraft.ui.Pc
 import io.github.artcraftandroid.procraft.ui.Switch
 import io.github.artcraftandroid.procraft.ui.fittedInterfaceSize
 
@@ -58,6 +59,7 @@ class SettingsActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("interface", Context.MODE_PRIVATE)
         val plugins = keptPlugins(this, prefs)
+        Pc.accentGiven = Pc.accentOf(plugins)
         setContent {
             val size = fittedInterfaceSize(plugins)
             val density = LocalDensity.current
@@ -77,7 +79,7 @@ private val Group = Color(0xFF1C1C1E)
 private val Ink = Color(0xFFFFFFFF)
 private val Dim = Color(0xFF8E8E93)
 private val Line = Color(0xFF38383A)
-private val Blue = Color(0xFF0A84FF)
+private val Blue get() = Pc.tinted(Color(0xFF0A84FF))
 
 /** A row of the page. */
 private sealed class Setting

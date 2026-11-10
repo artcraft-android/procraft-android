@@ -812,6 +812,23 @@ impl Plugins {
     pub fn interface_scale(&self, width: f32, height: f32) -> f32 {
         self.hooks().interface_scale(width, height)
     }
+
+    /// Whether a plugin has the colour panel's Classic show a triangle (saturation and brightness
+    /// between the pure hue, white and black) in place of its square.
+    pub fn colour_triangle(&self) -> bool {
+        self.hooks().colour_triangle()
+    }
+
+    /// Whether a plugin sets brushes' settings at random: the brush studio shows Randomise.
+    pub fn randomises_brushes(&self) -> bool {
+        self.hooks().randomises_brushes()
+    }
+
+    /// The accent (0xRRGGBB), the blue of what is chosen and switched on, if a plugin gives the
+    /// interface another; none: as measured.
+    pub fn accent_colour(&self) -> Option<u32> {
+        self.hooks().interface_colour(0)
+    }
 }
 
 #[cfg(test)]
@@ -1458,6 +1475,7 @@ mod tests {
     const EYEDROPPER: &str = "io.github.artcraftandroid.eyedropper-layer";
     const PASTE: &str = "io.github.artcraftandroid.paste-into-masks";
     const TOUCH: &str = "io.github.artcraftandroid.touch-offset";
+    const COLOUR: &str = "io.github.artcraftandroid.interface-colour";
 
     /// The app's plugins kept in `dir`, what it comes with added.
     fn app_at(dir: &str) -> Arc<Plugins> {
@@ -1565,6 +1583,13 @@ mod tests {
         assert!(plugins.hooks().paste_mask());
         assert_eq!(plugins.set_slider("fill_gap".to_owned(), 4.0), Some(4.0));
         assert!(plugins.hooks().fill_mask());
+        // the accent as it was at the slider's start, then red
+        assert_eq!(plugins.accent_colour(), Some(0x0076FD));
+        assert!(plugins.set_slider(format!("{COLOUR}.hue"), 0.0).is_some());
+        assert_eq!(plugins.accent_colour(), Some(0xFD0000));
+        assert!(plugins.set_slider(format!("{COLOUR}.saturation"), 0.0).is_some());
+        assert_eq!(plugins.accent_colour(), Some(0xFDFDFD));
+        assert!(plugins.colour_triangle());
         // kept, so through a restart
         let next = app_at(&dir);
         read_lines(&next, &plugins.kept_lines());
@@ -1578,6 +1603,8 @@ mod tests {
         assert!(plugins.filters().is_empty());
         assert_eq!(landing(&plugins), UNTOUCHED);
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
+        assert_eq!(plugins.accent_colour(), None);
+        assert!(!plugins.colour_triangle());
         assert!(!plugins.hooks().pick_layer() && !plugins.hooks().paste_mask() && !plugins.hooks().fill_mask());
         let _ = std::fs::remove_dir_all(&dir);
     }

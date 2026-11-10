@@ -199,6 +199,137 @@ written there, `procraft_fill_run` works it out and says whether anything comes 
 A plugin can only take away: a bit it sets comes out of the fill, and it can't add any. The seed has to
 stay in the fill, or the plugin stops.
 
+### `fill_all_layers`
+
+Whether ColorDrop fills by every layer you see (not 0), as if they were one picture, rather than by the
+current layer alone (or the reference layer, if one is set).
+
+```
+procraft_fill_all_layers() -> i32
+```
+
+It only says which to go by: the fill is still the app's, and still goes on the current layer.
+
+### `radial_segments`
+
+How many parts the Drawing Guide's radial symmetry makes, in place of its usual eight.
+
+```
+procraft_radial_segments() -> i32
+```
+
+An answer outside 2 to 64 stops the plugin. An odd count is made even unless the symmetry only turns
+its copies (Rotational Symmetry), since the mirrored copies come in pairs. The count is never written
+to the artwork: turn the plugin off, or open the artwork without it, and radial symmetry makes eight
+again. With several plugins on this hook, the first by id that answers is used.
+
+### `hide_undo_notice`
+
+Whether undo and redo go by without the notice at the top that names what they took back or brought
+back (not 0).
+
+```
+procraft_hide_undo_notice() -> i32
+```
+
+It only hides the notice: undo and redo work as before.
+
+### `interface_colour`
+
+The colour the interface draws a part of itself in, as 0xRRGGBB, or -1 to leave it as it is.
+
+```
+procraft_interface_colour(role: i32) -> i32
+```
+
+`role` 0 is the accent: the blue of what is chosen or switched on (a selected tab, a switch, a
+slider's filled part, a picked layer). Other roles may come later; answer -1 for any you don't know.
+An answer past 0xFFFFFF stops the plugin. With several plugins on this hook, the first by id that
+answers is used.
+
+### `pin_panels`
+
+Whether a touch on the canvas with a panel open paints at once and leaves the panel up (not 0), rather
+than closing it (a tap) or fading it away (a drag). The panel's own button still closes it.
+
+```
+procraft_pin_panels() -> i32
+```
+
+### `opacity_together`
+
+Whether a layer's opacity changed while it is one of several picked layers sets every picked layer's
+to the same (not 0), as one undo step. A layer that isn't picked still goes alone.
+
+```
+procraft_opacity_together() -> i32
+```
+
+### `randomise_brush`
+
+While a plugin on this hook is on, the brush studio shows Randomise. Tapping it asks the plugin about
+each setting below, by its number, with one `seed` for the whole tap:
+
+```
+procraft_randomise(setting: i32, seed: i32) -> f32
+```
+
+Answer where the setting goes as a share of its range, 0 to 1 (0 its least, 1 its most), or anything
+below 0 to leave it as it is. An answer above 1, or not a number, stops the plugin. A whole-number
+setting (a choice or a switch) is rounded. The plugin gets no randomness of its own: mix the seed and
+the setting's number to get one.
+
+| Number | Setting | Range |
+|---|---|---|
+| 0 | `spacing` | 0 to 1 |
+| 1 | `streamline` | 0 to 1 |
+| 2 | `streamline_pressure` | 0 to 1 |
+| 3 | `pen_taper_start` | 0 to 1 |
+| 4 | `pen_taper_end` | 0 to 1 |
+| 5 | `pen_taper_size` | 0 to 1 |
+| 6 | `pen_taper_opacity` | 0 to 1 |
+| 7 | `touch_taper_start` | 0 to 1 |
+| 8 | `touch_taper_end` | 0 to 1 |
+| 9 | `touch_taper_size` | 0 to 1 |
+| 10 | `touch_taper_opacity` | 0 to 1 |
+| 11 | `input_style` | 0 to 2 (whole) |
+| 12 | `shape_rotation` | -1 to 1 |
+| 13 | `scatter` | 0 to 1 |
+| 14 | `count` | 0 to 1 |
+| 15 | `randomized` | 0 to 1 (whole) |
+| 16 | `roundness` | 0 to 1 |
+| 17 | `shape_angle` | 0 to 1 |
+| 18 | `grain_behavior` | 0 to 1 (whole) |
+| 19 | `grain_scale` | 0 to 1 |
+| 20 | `grain_depth` | 0 to 1 |
+| 21 | `rendering_mode` | 0 to 5 (whole) |
+| 22 | `flow` | 0 to 1 |
+| 23 | `jitter_size` | 0 to 1 |
+| 24 | `jitter_opacity` | 0 to 1 |
+| 25 | `pressure_size` | -1 to 1 |
+| 26 | `pressure_opacity` | -1 to 1 |
+| 27 | `tilt_angle` | 0 to 1 |
+| 28 | `tilt_opacity` | 0 to 1 |
+| 29 | `tilt_size` | 0 to 1 |
+| 30 | `max_size` | 0 to 1 |
+| 31 | `min_size` | 0 to 1 |
+| 32 | `max_opacity` | 0 to 1 |
+| 33 | `min_opacity` | 0 to 1 |
+| 34 | `smudge_pull` | 0 to 1 |
+| 35 | `wet_pull` | 0 to 1 |
+
+Randomise is one change to the brush: Cancel or Reset brush takes it back.
+
+### `colour_triangle`
+
+Whether the colour panel's Classic tab shows a triangle in place of its square (not 0): saturation and
+brightness between the pure hue (its right corner), white (top left) and black (bottom left). The hue
+slider and the others under it stay as they are.
+
+```
+procraft_colour_triangle() -> i32
+```
+
 ### Limits
 
 | | |

@@ -7,13 +7,21 @@
 
 /// Each by its folder's name under `plugins/`, and the file packed from it.
 pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
+    ("colour-triangle", include_bytes!("../bundled-plugins/colour-triangle.procraft-plugin")),
     ("extract-lines", include_bytes!("../bundled-plugins/extract-lines.procraft-plugin")),
     ("eyedropper-layer", include_bytes!("../bundled-plugins/eyedropper-layer.procraft-plugin")),
+    ("fill-all-layers", include_bytes!("../bundled-plugins/fill-all-layers.procraft-plugin")),
     ("gap-closing", include_bytes!("../bundled-plugins/gap-closing.procraft-plugin")),
+    ("hide-undo-notice", include_bytes!("../bundled-plugins/hide-undo-notice.procraft-plugin")),
+    ("interface-colour", include_bytes!("../bundled-plugins/interface-colour.procraft-plugin")),
     ("interface-size", include_bytes!("../bundled-plugins/interface-size.procraft-plugin")),
+    ("opacity-together", include_bytes!("../bundled-plugins/opacity-together.procraft-plugin")),
     ("outline", include_bytes!("../bundled-plugins/outline.procraft-plugin")),
     ("paste-into-masks", include_bytes!("../bundled-plugins/paste-into-masks.procraft-plugin")),
+    ("pin-panels", include_bytes!("../bundled-plugins/pin-panels.procraft-plugin")),
     ("posterise", include_bytes!("../bundled-plugins/posterise.procraft-plugin")),
+    ("radial-segments", include_bytes!("../bundled-plugins/radial-segments.procraft-plugin")),
+    ("randomise-brush", include_bytes!("../bundled-plugins/randomise-brush.procraft-plugin")),
     ("touch-offset", include_bytes!("../bundled-plugins/touch-offset.procraft-plugin")),
 ];
 

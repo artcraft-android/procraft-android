@@ -801,13 +801,16 @@ impl CanvasSession {
         let Some(first) = last_of(&samples).copied() else { return Vec::new() };
         let mut out = Vec::new();
         let mut t = self.touches();
-        (t.scale, t.handle_scale) = {
+        let hooks;
+        (t.scale, t.handle_scale, hooks) = {
             let st = self.shared.lock();
-            (st.display_scale, st.interface_scale())
+            (st.display_scale, st.interface_scale(), st.hooks.clone())
         };
         let at = (first.x, first.y);
         t.down.retain(|d| d.id != id);
         t.down.push(Down { id, at, from: at });
+        // a plugin pinning panels open: the canvas takes the touch as if none were
+        let pinned = t.panel_open && hooks.is_some_and(|hooks| hooks.pin_panels());
         // the companion's Zoom or Move takes a lone press, and others while it is held do nothing
         if t.mode == Mode::Companion {
             return out;
@@ -869,7 +872,7 @@ impl CanvasSession {
             }
             out.push(TouchCommand::CursorGone);
         }
-        if t.down.len() == 1 && t.panel_open {
+        if t.down.len() == 1 && t.panel_open && !pinned {
             Self::wait_for_panel(&mut t, kind, first, samples);
         } else if t.down.len() == 1 {
             self.first_down(&mut t, kind, first, &samples, &mut out);

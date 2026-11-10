@@ -389,6 +389,11 @@ impl Colours {
         changed
     }
 
+    /// Whether Classic shows a plugin's triangle in place of its square.
+    pub fn set_triangle(&mut self, on: bool) {
+        self.pickers.triangle = on;
+    }
+
     /// Classic's square in `rect`, in the colour model; whether it changed the colour.
     pub(crate) fn model_square(&mut self, ui: &Ui, rect: Rect) -> bool {
         let mut coords = self.model_coords();
@@ -985,6 +990,10 @@ pub struct Pickers {
     /// brightness.
     square: Option<(u32, usize, ColourModel, TextureHandle)>,
     wheel: Option<(u32, usize, TextureHandle)>,
+    /// A plugin has Classic show a triangle in place of its square (HSB), and its picture for its
+    /// hue and size.
+    pub triangle: bool,
+    triangle_picture: Option<(u32, usize, TextureHandle)>,
     /// Harmony's hue, saturation and brightness (Display P3) as dragged to, with the colour they
     /// made: kept while that is the colour, not worked out again from it (a dark or greyish
     /// colour's would wander, and black's be lost).
@@ -1090,6 +1099,10 @@ impl Pickers {
     /// brightness up; returns whether it changed `hsv`.
     pub fn square(&mut self, ui: &Ui, hsv: &mut [f32; 3], square: Rect) -> bool {
         let model = self.model;
+        // a plugin's: a triangle in its place
+        if self.triangle && model == ColourModel::Hsb {
+            return self.triangle(ui, hsv, square);
+        }
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let before = *hsv;
@@ -1117,6 +1130,40 @@ impl Pickers {
         // the knob may hang over the square's edge
         let at = pos2(square.left() + hsv[1] * square.width(), square.top() + (1.0 - hsv[2]) * square.height());
         knob(ui, at, 10.75, srgb(model.to_rgb(*hsv)));
+        *hsv != before
+    }
+
+    /// A plugin's triangle in Classic's square `area`, as big as fits: saturation and brightness
+    /// between the pure hue (right), white (top left) and black (bottom left); returns whether it
+    /// changed `hsv`.
+    fn triangle(&mut self, ui: &Ui, hsv: &mut [f32; 3], area: Rect) -> bool {
+        let side = area.width().min(area.height());
+        let rect = Rect::from_center_size(area.center(), vec2(side, side));
+        let ctx = ui.ctx().clone();
+        let before = *hsv;
+        let response = ui.interact(rect, ui.scope_id().with("classic triangle"), Sense::click_and_drag());
+        if let Some(p) = response.interact_pointer_pos() {
+            let sv = procraft_core::triangle_sv((p.x - rect.left()) / side, (p.y - rect.top()) / side);
+            if let [s, v] = sv[..] {
+                hsv[1] = s;
+                hsv[2] = v;
+            }
+        }
+        let hue_key = (hsv[0] * 10_000.0).round() as u32;
+        let px = (side * ctx.pixels_per_point()).round() as usize;
+        if self.triangle_picture.as_ref().is_none_or(|(h, at, _)| *h != hue_key || *at != px) {
+            let rgba = procraft_core::triangle_picture(hsv[0], px as u32);
+            let image = egui::ColorImage::from_rgba_premultiplied([px, px], &rgba);
+            let texture = ctx.load_texture("classic triangle", image, TextureOptions::LINEAR);
+            self.triangle_picture = Some((hue_key, px, texture));
+        }
+        if let Some((_, _, t)) = &self.triangle_picture {
+            ui.painter().image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        let at = procraft_core::triangle_point(hsv[1], hsv[2]);
+        if let [x, y] = at[..] {
+            knob(ui, pos2(rect.left() + x * side, rect.top() + y * side), 10.75, srgb(ColourModel::Hsb.to_rgb(*hsv)));
+        }
         *hsv != before
     }
 
