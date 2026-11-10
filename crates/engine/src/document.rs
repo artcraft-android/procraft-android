@@ -374,11 +374,21 @@ pub const LAYER_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
 /// holds.
 static BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(LAYER_BUDGET);
 
-/// How many layers with pixels a canvas `width` × `height` holds on this device.
+/// The most layers with pixels any canvas holds, however much memory there is: past that the
+/// layers list and each save grow slow for little use.
+pub const MOST_LAYERS: usize = 1000;
+
+/// Layers' worth of the budget kept back for the canvas's own work (the composite, a stroke, a
+/// layer being changed), as the original keeps four.
+const LAYERS_KEPT_BACK: u64 = 4;
+
+/// How many layers with pixels a canvas `width` × `height` holds on this device: what the budget
+/// holds once four layers' worth are kept back, at most [`MOST_LAYERS`], one at least.
 pub fn layer_cap_for(width: u32, height: u32) -> usize {
-    let bytes = u64::from(width) * u64::from(height) * 4;
+    let bytes = (u64::from(width) * u64::from(height) * 4).max(1);
     let budget = BUDGET.load(std::sync::atomic::Ordering::Relaxed);
-    usize::try_from(budget / bytes.max(1)).unwrap_or(usize::MAX).max(1)
+    let room = budget.saturating_sub(bytes.saturating_mul(LAYERS_KEPT_BACK));
+    usize::try_from(room / bytes).unwrap_or(usize::MAX).clamp(1, MOST_LAYERS)
 }
 
 /// The memory layers may take on this device, bytes.
@@ -1794,10 +1804,14 @@ mod tests {
 
     #[test]
     fn the_layer_cap_follows_the_canvas_size() {
-        assert_eq!(Document::new(2048, 2048).layer_cap(), 128);
-        assert_eq!(Document::new(16384, 16384).layer_cap(), 2);
+        // the default 2 GiB, four layers' worth kept back: (2048 - 4 x 16) MiB / 16 MiB
+        assert_eq!(Document::new(2048, 2048).layer_cap(), 124);
+        // more than the budget kept back: one layer still
+        assert_eq!(Document::new(16384, 16384).layer_cap(), 1);
         let d = Document::new(16384, 16384);
-        assert!(d.has_room(1) && !d.has_room(2));
+        assert!(!d.has_room(1), "its one layer is all it holds");
+        // a small canvas: at most a thousand
+        assert_eq!(Document::new(100, 100).layer_cap(), MOST_LAYERS);
     }
 
     #[test]
