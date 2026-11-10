@@ -611,7 +611,7 @@ impl App {
         self.opening = Some((Instant::now(), std::thread::spawn(move || opened.use_gpu(gpu))));
         // the brushes as the last artwork left them
         if let Some(last) = &self.session {
-            last.keep_brushes(files::brushes_dir());
+            files::keep_brushes(last);
         }
         session.open_brushes(files::brushes_dir());
         self.ui.opened(&session, scale * screen.egui.egui_ctx().zoom_factor());
@@ -758,9 +758,9 @@ impl App {
             // when something in it changed (a brush chosen only writes the choices)
             let kept = Arc::clone(&session);
             let thread = std::thread::Builder::new().name("procraft-keep-brushes".to_owned());
-            if let Err(e) = thread.spawn(move || kept.keep_brushes(files::brushes_dir())) {
+            if let Err(e) = thread.spawn(move || files::keep_brushes(&kept)) {
                 log::warn!("keeping the brushes on a thread of their own: {e}");
-                session.keep_brushes(files::brushes_dir());
+                files::keep_brushes(&session);
             }
         }
         for action in std::mem::take(&mut self.ui.actions) {
@@ -1269,7 +1269,7 @@ impl App {
         if let Some((_, made)) = self.opening.take() {
             let _ = made.join();
         }
-        session.keep_brushes(files::brushes_dir());
+        files::keep_brushes(&session);
         let (brush, mask) = self.ui.colours.brush_and_mask();
         files::keep_colours(brush, mask);
         let edits = session.edits();

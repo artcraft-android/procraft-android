@@ -234,6 +234,21 @@ pub fn tell_later(title: &str, text: &str) {
     TOLD.lock().unwrap_or_else(|e| e.into_inner()).push((title.to_owned(), text.to_owned()));
 }
 
+/// Keeps `session`'s brushes in their folder. One that can't (the disk full, say) is told once,
+/// from the window's thread, and not again until they are kept once more.
+pub fn keep_brushes(session: &procraft_core::CanvasSession) {
+    static FAILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if session.keep_brushes(brushes_dir()) {
+        FAILING.store(false, std::sync::atomic::Ordering::Relaxed);
+    } else if !FAILING.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tell_later(
+            "Can't keep the brushes",
+            "The brush library couldn't be kept. The disk may be full: brushes brought in or changed \
+             since are lost when ProCraft closes, unless some room is made.",
+        );
+    }
+}
+
 /// Shows the messages the writing threads left.
 pub fn tell_what_was_told() {
     let told = std::mem::take(&mut *TOLD.lock().unwrap_or_else(|e| e.into_inner()));

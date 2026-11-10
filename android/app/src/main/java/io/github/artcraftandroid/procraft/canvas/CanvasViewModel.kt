@@ -3518,6 +3518,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     val shot = s.timeLapseFrame(t.settings.side.toUInt()) ?: return@withContext
                     t.record(shot.rgba, shot.width.toInt(), shot.height.toInt())
                 }
+                // one that couldn't be kept (the storage full) is told once
+                t.takeProblem()?.let { message = it }
             } while (frameStale)
             timeLapseRecorded = t.count > 0
         }
@@ -4730,7 +4732,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             libraryFailing = false
         } else if (!libraryFailing) {
             libraryFailing = true
-            message = "The brush library couldn't be kept."
+            message = "The brush library couldn't be kept. The storage may be full."
         }
     }
 

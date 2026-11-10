@@ -135,6 +135,10 @@ It can't be brought back."
             if let Some(shot) = session.time_lapse_frame(side) {
                 lapse.record(shot.rgba, shot.width, shot.height);
             }
+            // one that couldn't be kept is told once, from the window's thread
+            if let Some(text) = lapse.take_problem() {
+                crate::files::tell_later("Can't keep the time-lapse", &text);
+            }
             let _ = tx.send(());
         });
         self.recording = Some(rx);

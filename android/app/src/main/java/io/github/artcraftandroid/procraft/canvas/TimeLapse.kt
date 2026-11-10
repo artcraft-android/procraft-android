@@ -60,6 +60,9 @@ class TimeLapse(artwork: File) {
         core.record(rgba, width.toUInt(), height.toUInt())
     }
 
+    /** What to tell, once, when the time-lapse couldn't be written (the storage full, say); null otherwise. */
+    fun takeProblem(): String? = core.takeProblem()
+
     /** Deletes what has been recorded; the settings, and whether it records, stay. */
     fun purge() {
         core.purge()
