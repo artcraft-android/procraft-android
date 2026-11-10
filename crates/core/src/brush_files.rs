@@ -330,7 +330,11 @@ fn folder_id(seed: u64, i: usize) -> String {
 /// A Photoshop tip fitted into a shape's square, centred on black: each pixel the average of the
 /// tip's pixels it covers (or the nearest one, drawn up).
 fn fitted(t: &procraft_engine::abr::AbrTip) -> Vec<u8> {
-    let n = TEXTURE_SIZE;
+    fitted_at(t, TEXTURE_SIZE)
+}
+
+/// `t` fitted into a square `n` pixels a side, as [`fitted`] fits it.
+fn fitted_at(t: &procraft_engine::abr::AbrTip, n: usize) -> Vec<u8> {
     let (w, h) = (t.width as usize, t.height as usize);
     let mut out = vec![0u8; n * n];
     if w == 0 || h == 0 {
@@ -928,11 +932,27 @@ fn generated_brush(g: &procraft_engine::gbr::Generated) -> Brush {
     b
 }
 
+/// A tip larger than a `Source` holds, fitted into a square as [`fitted`] fits it, as large as the
+/// tip goes (a power of two no larger than its longer side, up to [`FULL_GRAIN_MOST`]): drawn large,
+/// a stamp then shows the tip's own detail rather than the small square's blown up. None for a
+/// tip no larger than a `Source`.
+fn full_tip(t: &procraft_engine::abr::AbrTip) -> Option<FullGrain> {
+    let longest = t.width.max(t.height) as usize;
+    let side = (1usize << longest.max(1).ilog2()).min(FULL_GRAIN_MOST);
+    (side > TEXTURE_SIZE).then(|| FullGrain::new(side as u32, fitted_at(t, side))).flatten()
+}
+
+/// `b`'s shape as the sampled tip `t`: the small square, and the tip at its own size beside it.
+fn give_tip(b: &mut Brush, t: &procraft_engine::abr::AbrTip) {
+    b.shape.image = None;
+    b.shape.source = Source::new(fitted(t));
+    b.shape_file = b.shape.source.as_ref().zip(full_tip(t)).map(|(source, full)| ShapeFile { source: source.id, full });
+}
+
 /// A brush of a sampled tip: its shape, with its spacing.
 fn tip_brush(t: &procraft_engine::abr::AbrTip) -> Brush {
     let mut b = Brush { name: t.name.clone(), ..Brush::round_pen() };
-    b.shape.image = None;
-    b.shape.source = Source::new(fitted(t));
+    give_tip(&mut b, t);
     if let Some(spacing) = t.spacing {
         b.spacing = Brush::spacing_within_reach(spacing);
     }
@@ -943,20 +963,15 @@ fn tip_brush(t: &procraft_engine::abr::AbrTip) -> Brush {
 /// changes.
 fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     use procraft_engine::krita::KritaTip;
-    let image = match &k.tip {
+    let tip = match &k.tip {
         KritaTip::Round { .. } => None,
-        KritaTip::Image(t) => Some(fitted(t)),
-        KritaTip::Png(png) => png_tip(png, false).map(|t| fitted(&t)),
+        KritaTip::Image(t) => Some(t.clone()),
+        KritaTip::Png(png) => png_tip(png, false),
     };
-    let mut b = match image {
-        Some(pixels) => {
-            let mut b = Brush { name: k.name.clone(), ..Brush::round_pen() };
-            b.shape.image = None;
-            b.shape.source = Source::new(pixels);
-            b
-        }
-        None => Brush { name: k.name.clone(), ..Brush::round_pen() },
-    };
+    let mut b = Brush { name: k.name.clone(), ..Brush::round_pen() };
+    if let Some(t) = &tip {
+        give_tip(&mut b, t);
+    }
     if let KritaTip::Round { hardness, roundness } = k.tip {
         b.hardness = hardness.clamp(0.0, 1.0);
         b.shape.roundness = roundness.clamp(0.05, 1.0);
@@ -2111,6 +2126,34 @@ mod tests {
         let pattern = CspTexture { pngs: vec![crate::project::rgba_png(5, 5, &dither)], width: None, scale: None, ..t };
         let b = csp_brush(&CspBrush { texture: Some(pattern), ..c });
         assert_eq!((b.grain.scale, shown(&b, "grain_filtering")), (5.0, 0.0));
+    }
+
+    #[test]
+    fn a_large_sampled_tip_keeps_its_own_detail_beside_the_small_square() {
+        use procraft_engine::abr::AbrTip;
+        // a tip twice as wide as tall, solid across its top half and shading off left to right below
+        let tip = |w: u32, h: u32| AbrTip {
+            name: "Tip".into(),
+            spacing: None,
+            width: w,
+            height: h,
+            pixels: (0..w * h).map(|i| if i / w < h / 2 { 255 } else { (255 - (i % w) * 255 / w) as u8 }).collect(),
+        };
+        let b = tip_brush(&tip(600, 300));
+        let full = &b.shape_file.as_ref().expect("a full shape").full;
+        assert_eq!(full.side, 512);
+        assert_eq!(b.shape_file.as_ref().unwrap().source, b.shape.source.as_ref().unwrap().id);
+        // framed as the small square is: the tip across the middle, as wide as the square
+        let small = &b.shape.source.as_ref().unwrap().pixels;
+        let pixels = full.pixels.as_deref().unwrap();
+        let (n, m) = (TEXTURE_SIZE, 512usize);
+        for (x, y) in [(10, 70), (128, 100), (250, 120), (128, 20), (128, 200), (60, 160)] {
+            let big = (0..4).map(|k| u32::from(pixels[(y * 2 + k / 2) * m + x * 2 + k % 2])).sum::<u32>() / 4;
+            assert!((big as i32 - i32::from(small[y * n + x])).abs() <= 2, "({x}, {y}): {big} {}", small[y * n + x]);
+        }
+        // no larger than a `Source` holds: none; very large: as large as is kept
+        assert!(tip_brush(&tip(200, 100)).shape_file.is_none());
+        assert_eq!(tip_brush(&tip(3000, 1500)).shape_file.unwrap().full.side, 1024);
     }
 
     #[test]
