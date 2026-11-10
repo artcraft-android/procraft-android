@@ -178,6 +178,27 @@ impl Hooks {
         Some((settings, recordings))
     }
 
+    /// The tweening hook: how Animation Assist's In-between draws a frame, if a plugin draws them
+    /// (the first on the hook): whether the drawings slide between their places, and how near the
+    /// next frame it falls; each the plugin's or the app's own.
+    pub(crate) fn tween(&self) -> Option<crate::tween::TweenSettings> {
+        if !self.has(Hook::Tween) {
+            return None;
+        }
+        self.through(Hook::Tween, None, |running, said| match said {
+            Some(settings) => Ok(Some(settings)),
+            None => Ok(Some(crate::tween::TweenSettings {
+                slides: running.tween(0)?.is_none_or(|on| on >= 0.5),
+                at: running.tween(1)?.unwrap_or(0.5).clamp(0.05, 0.95),
+            })),
+        })
+    }
+
+    /// Whether a plugin draws in-betweens: the frame options then offer In-between.
+    pub(crate) fn tweens(&self) -> bool {
+        self.has(Hook::Tween)
+    }
+
     /// Whether a plugin makes the stroke's sound: the apps play it while one does.
     pub(crate) fn makes_stroke_sound(&self) -> bool {
         self.has(Hook::StrokeSound)

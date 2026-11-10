@@ -336,6 +336,22 @@ slider and the others under it stay as they are.
 procraft_colour_triangle() -> i32
 ```
 
+### `tween`
+
+Animation Assist's frame options get In-between while a plugin is on this hook: a frame drawn between
+the current frame and the next (each a single layer), put just after it and made current, as one
+undo step. The app draws it: each drawing moved and sized from its own place toward the other's, as
+far as the in-between falls, and the two faded from one to the other. Tapped again, it goes between
+the new frame and the next, and so on.
+
+```
+procraft_tween(setting: i32) -> f32
+```
+
+`setting` 0 is whether the drawings slide between their places (1) or only fade where they are (0); 1
+is how near the next frame the in-between falls (0.05 to 0.95; 0.5 halfway). Answer below 0 to leave
+one as the app has it (they slide, halfway). An answer above 1, or not a number, stops the plugin.
+
 ### `quickshape_curves`
 
 Whether a stroke that bends more than once snaps to a curve (not 0): a chain of curves through its

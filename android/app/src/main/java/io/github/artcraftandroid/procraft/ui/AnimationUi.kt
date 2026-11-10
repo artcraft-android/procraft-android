@@ -412,6 +412,13 @@ private fun ColumnScope.FrameOptionsPage(vm: CanvasViewModel) {
         Row(Modifier.fillMaxWidth().height(44.dp).clickable { vm.deleteFrame() }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Delete", color = Pc.PanelTitle, fontSize = 17.sp)
         }
+        // a plugin's in-betweens: a frame drawn between this one and the next
+        if (vm.tweensOn && !a.pages && vm.heldPlace == 0 && index < last) {
+            RowLine()
+            Row(Modifier.fillMaxWidth().height(44.dp).clickable { vm.addInbetween() }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("In-between", color = Pc.PanelTitle, fontSize = 17.sp)
+            }
+        }
     }
     // (a held place has neither)
     val foreground = !a.pages && index == last && vm.heldPlace == 0

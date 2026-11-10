@@ -76,6 +76,8 @@ struct Playing {
 
 #[derive(Default)]
 pub struct AnimationBar {
+    /// Whether a plugin draws in-betweens: the frame options offer In-between.
+    pub tweens: bool,
     settings_open: bool,
     options_open: bool,
     /// The onion skins' colours page, editing the colour after the current frame (else before).
@@ -691,7 +693,12 @@ impl AnimationBar {
             _ => 10.0 + 44.0,
         };
         let hold_rows = if a.pages { 0.0 } else { 4.0 + 55.0 + 10.0 };
-        let content = 11.0 + TITLE_LINE + 15.0 + hold_rows + 44.0 * 2.0 + 2.0 + ends;
+        // a plugin's in-betweens: a frame drawn between this one and the next
+        let inbetween = self.tweens && !a.pages && place == 0 && index + 1 < frames.len();
+        let actions: &[&str] =
+            if inbetween { &["Duplicate", "Delete", "In-between"] } else { &["Duplicate", "Delete"] };
+        let rows = actions.len() as f32;
+        let content = 11.0 + TITLE_LINE + 15.0 + hold_rows + 44.0 * rows + 2.0 * (rows - 1.0) + ends;
         let height = 8.0 + content + 8.0 + panel::ARROW_HEIGHT;
         let rect = Rect::from_min_size(pos2(bar.center().x - 130.0, bar.top() - 2.0 - height), vec2(260.0, height));
         let mut changed = a.clone();
@@ -728,9 +735,9 @@ impl AnimationBar {
                 }
                 y += 4.0 + 55.0 + 10.0;
             }
-            let group = Rect::from_min_max(pos2(left, y), pos2(right, y + 44.0 * 2.0 + 2.0));
+            let group = Rect::from_min_max(pos2(left, y), pos2(right, y + 44.0 * rows + 2.0 * (rows - 1.0)));
             ui.painter().rect_filled(group, 18, argb(GROUP));
-            for (i, label) in ["Duplicate", "Delete"].into_iter().enumerate() {
+            for (i, &label) in actions.iter().enumerate() {
                 let row = Rect::from_min_max(pos2(left, y), pos2(right, y + 44.0));
                 let at = pos2(row.left() + 16.0, row.center().y);
                 text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(PANEL_TITLE));
@@ -738,6 +745,13 @@ impl AnimationBar {
                     self.options_open = false;
                     // on a held place it splits there, or is held one frame less
                     match (i, place) {
+                        (2, _) => {
+                            if session.add_inbetween(id).is_none() {
+                                crate::files::say(
+                                    "An in-between goes between two frames of one layer each, with something drawn.",
+                                );
+                            }
+                        }
                         (0, 0) => _ = session.duplicate_layer(id),
                         (0, _) => _ = session.split_held_frame(id, place as u32),
                         (_, 0) => _ = session.delete_layer(id),
@@ -745,7 +759,7 @@ impl AnimationBar {
                     }
                 }
                 y += 44.0;
-                if i == 0 {
+                if i + 1 < actions.len() {
                     ui.painter().rect_filled(
                         Rect::from_min_max(pos2(left, y), pos2(right, y + 2.0)),
                         0,

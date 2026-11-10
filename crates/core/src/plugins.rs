@@ -923,6 +923,12 @@ impl Plugins {
         self.hooks().interface_scale(width, height)
     }
 
+    /// Whether a plugin draws in-betweens: Animation Assist's frame options then offer In-between
+    /// ([`crate::CanvasSession::add_inbetween`]).
+    pub fn tweens(&self) -> bool {
+        self.hooks().tweens()
+    }
+
     /// Whether a plugin makes the sound of the stroke being drawn: the app plays
     /// [`crate::CanvasSession::stroke_sound`] while one does.
     pub fn makes_stroke_sound(&self) -> bool {

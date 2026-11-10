@@ -48,6 +48,10 @@
 //!   for the app's own; and for 4 to 9 (the eraser, pencil, pen, paintbrush, airbrush, spray can),
 //!   the place in the manifest (0 the first) of the file control whose recording that sound plays,
 //!   a whole number, or below 0 for the app's own sound.
+//! - `procraft_tween(setting: i32) -> f32`: for the hook `tween`, how Animation Assist's
+//!   In-between draws a frame between a frame and the next: whether the drawings slide between
+//!   their places (0, 0 or 1) and how near the next frame it falls (1, 0 to 1), or below 0 for the
+//!   app's own (they slide, halfway).
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
 
@@ -114,6 +118,7 @@ const RANDOMISE: &str = "procraft_randomise";
 const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
 const QUICKSHAPE_CURVES: &str = "procraft_quickshape_curves";
 const STROKE_SOUND: &str = "procraft_stroke_sound";
+const TWEEN: &str = "procraft_tween";
 /// How many parts radial symmetry may be asked to make.
 const RADIAL_PARTS: std::ops::RangeInclusive<i32> = 2..=64;
 const MEMORY: &str = "memory";
@@ -137,6 +142,7 @@ pub(crate) enum Hook {
     ColourTriangle,
     QuickshapeCurves,
     StrokeSound,
+    Tween,
 }
 
 impl Hook {
@@ -157,6 +163,7 @@ impl Hook {
             "colour_triangle" => Some(Hook::ColourTriangle),
             "quickshape_curves" => Some(Hook::QuickshapeCurves),
             "stroke_sound" => Some(Hook::StrokeSound),
+            "tween" => Some(Hook::Tween),
             _ => None,
         }
     }
@@ -179,6 +186,7 @@ impl Hook {
             Hook::ColourTriangle => "This plugin can change how the colour panel's Classic picker looks.",
             Hook::QuickshapeCurves => "This plugin can make QuickShape snap strokes to curves.",
             Hook::StrokeSound => "This plugin can play a sound as you draw.",
+            Hook::Tween => "This plugin can draw frames between your animation's frames.",
         }
     }
 
@@ -202,6 +210,7 @@ impl Hook {
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
             Hook::QuickshapeCurves => exports(module, QUICKSHAPE_CURVES, &[], &[ValType::I32]),
             Hook::StrokeSound => exports(module, STROKE_SOUND, &[ValType::I32], &[ValType::F32]),
+            Hook::Tween => exports(module, TWEEN, &[ValType::I32], &[ValType::F32]),
             Hook::InterfaceScale => exports(module, INTERFACE_SCALE, &[ValType::F32, ValType::F32], &[ValType::F32]),
             Hook::PasteMask => {
                 exports(module, PASTE_MASK, &[], &[ValType::I32])
@@ -384,6 +393,7 @@ pub(crate) struct Running {
     colour_triangle: Option<TypedFunc<(), i32>>,
     quickshape_curves: Option<TypedFunc<(), i32>>,
     stroke_sound: Option<TypedFunc<i32, f32>>,
+    tween: Option<TypedFunc<i32, f32>>,
     memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
 }
@@ -449,6 +459,7 @@ impl Running {
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
             let quickshape_curves = instance.get_typed_func(&store, QUICKSHAPE_CURVES).ok();
             let stroke_sound = instance.get_typed_func(&store, STROKE_SOUND).ok();
+            let tween = instance.get_typed_func(&store, TWEEN).ok();
             let memory = instance.get_memory(&store, MEMORY);
             let control = instance.get_typed_func(&store, CONTROL).ok();
             Ok(Running {
@@ -470,6 +481,7 @@ impl Running {
                 colour_triangle,
                 quickshape_curves,
                 stroke_sound,
+                tween,
                 memory,
                 control,
             })
@@ -524,6 +536,24 @@ impl Running {
             -1 => Ok(None),
             0..=0xFF_FFFF => Ok(u32::try_from(said).ok()),
             _ => Err(Stop::Nonsense),
+        }
+    }
+
+    /// What it says the in-betweens' `setting` is (0 whether the drawings slide, 1 how near the next
+    /// frame it falls), 0 to 1; none for the app's own.
+    pub(crate) fn tween(&mut self, setting: i32) -> Result<Option<f32>, Stop> {
+        let Running { store, tween, .. } = self;
+        let Some(tween) = tween else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            tween.call(&mut *store, setting).map_err(|e| stop_of(&e))
+        })?;
+        if said.is_nan() || said > 1.0 {
+            Err(Stop::Nonsense)
+        } else if said < 0.0 {
+            Ok(None)
+        } else {
+            Ok(Some(said))
         }
     }
 

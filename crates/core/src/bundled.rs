@@ -26,6 +26,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("radial-segments", include_bytes!("../bundled-plugins/radial-segments.procraft-plugin")),
     ("randomise-brush", include_bytes!("../bundled-plugins/randomise-brush.procraft-plugin")),
     ("touch-offset", include_bytes!("../bundled-plugins/touch-offset.procraft-plugin")),
+    ("tweening", include_bytes!("../bundled-plugins/tweening.procraft-plugin")),
 ];
 
 #[cfg(test)]

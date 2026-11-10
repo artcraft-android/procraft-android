@@ -817,6 +817,7 @@ impl Interface {
         }
         // a full-screen page covers the timeline, as it covers the canvas
         if self.canvas_info.is_none() && !self.gesture_controls.open {
+            self.animation.tweens = self.prefs.plugins.tweens();
             let said = self.animation.show(&ctx, &mut self.look, session, &self.colours.palettes, self.colours.harmony);
             if let Some(crate::animation::Said::NoRoom) = said {
                 crate::files::no_room(session);

@@ -10536,6 +10536,53 @@ fn merge_down_keeps_a_multiply_layer_s_look() {
 }
 
 #[test]
+fn an_inbetween_frame_goes_between_a_frame_and_the_next_as_a_plugin_draws_it() {
+    use crate::plugin_file::tests::{coded, pack};
+    use crate::plugin_run::MODULE;
+    use procraft_engine::document::LayerId;
+    let Some(s) = session(64, 64) else { return };
+    assert!(s.set_animation_assist(true));
+    let (a, b) = (s.add_frame(), s.add_frame());
+    // a white square on each, at the left and at the right
+    let square = |x: usize| {
+        let mut out = vec![0u8; 64 * 64 * 4];
+        for row in 24..32 {
+            for col in x..x + 8 {
+                out[(row * 64 + col) * 4..(row * 64 + col) * 4 + 4].copy_from_slice(&[255; 4]);
+            }
+        }
+        out
+    };
+    s.shared.lock().canvas.as_mut().unwrap().write_layers(vec![(LayerId(a), square(4)), (LayerId(b), square(44))]);
+    // none without a plugin on the hook
+    assert_eq!(s.add_inbetween(a), None);
+    let dir = std::env::temp_dir().join(format!("procraft-tween-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let module =
+        wat::parse_str(r#"(module (func (export "procraft_tween") (param i32) (result f32) (f32.const -1)))"#).unwrap();
+    let plugins = crate::plugins::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let mut manifest = coded("org.example.tween", &module);
+    manifest["hooks"] = serde_json::json!(["tween"]);
+    assert_eq!(plugins.install(pack(&manifest, &[(MODULE, module.as_slice())])), None);
+    assert!(plugins.set_on("org.example.tween".to_owned(), true));
+    assert!(plugins.tweens());
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    // the last frame has no next
+    assert_eq!(s.add_inbetween(b), None);
+    let made = s.add_inbetween(a).unwrap();
+    let frames = s.animation_frames();
+    let at = frames.iter().position(|f| *f == a).unwrap();
+    assert_eq!(&frames[at..at + 3], &[a, made, b]);
+    let pixels = s.shared.lock().layer_pixels(LayerId(made)).unwrap();
+    let alpha = |x: usize, y: usize| pixels[(y * 64 + x) * 4 + 3];
+    assert_eq!((alpha(28, 28), alpha(8, 28), alpha(48, 28)), (255, 0, 0), "the square halfway");
+    // one undo takes it back
+    s.undo();
+    assert!(!s.animation_frames().contains(&made));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn add_frame_names_its_layer_frame_or_page_by_the_count() {
     let Some(s) = session(64, 64) else { return };
     assert!(s.set_animation_assist(true));

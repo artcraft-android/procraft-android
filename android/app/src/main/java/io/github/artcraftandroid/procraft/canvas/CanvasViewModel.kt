@@ -454,6 +454,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var strokeSoundOn by mutableStateOf(false)
         private set
 
+    /** Whether a plugin draws in-betweens (the frame options then offer In-between). */
+    var tweensOn by mutableStateOf(false)
+        private set
+
     // the interface's accent as the plugins give it
     init { followPluginLooks() }
 
@@ -462,6 +466,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
         strokeSoundOn = plugins.makesStrokeSound()
+        tweensOn = plugins.tweens()
         followStrokeSound()
     }
 
@@ -7266,6 +7271,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val held = heldPlace
         val layer = currentFrameLayer() ?: return
         if (held > 0) layerChange { if (it.splitHeldFrame(layer.id, held.toUInt()) == null) message = noRoom() } else duplicate(layer)
+    }
+
+    /** A plugin's In-between: a frame drawn between this frame and the next, made current. */
+    fun addInbetween() {
+        frameOptionsOpen = false
+        val layer = currentFrameLayer() ?: return
+        layerChange { if (it.addInbetween(layer.id) == null) message = "An in-between goes between two frames of one layer each, with something drawn." }
     }
 
     /** The frame deleted; on a held place it is held one frame less. */
