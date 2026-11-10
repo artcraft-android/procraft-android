@@ -449,6 +449,10 @@ fn window_event(event: PenEvent, scale: f64) -> winit::event::WindowEvent {
 #[cfg(target_os = "linux")]
 mod wayland;
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod wintab;
+
 /// A Mac tablet's tilt (each −1..1, towards the right and up the tablet) as degrees towards the
 /// right and towards the user, spread over ±60 as the X11 tilts in a raw range are.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -654,7 +658,7 @@ mod system {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
-        WM_ENDSESSION, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
+        WM_ACTIVATE, WM_ENDSESSION, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -684,6 +688,8 @@ mod system {
         // kept, is called for every message after ours
         let winit = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ours as usize as isize) };
         WINIT.store(winit, Ordering::Relaxed);
+        // a tablet whose driver has Windows Ink off: its pen read through WinTab
+        super::wintab::open(hwnd);
     }
 
     /// Notes what the other pointers in `id`'s frame are, and any taken back. winit takes a whole
@@ -739,6 +745,14 @@ mod system {
         if msg == WM_ENDSESSION && wparam.0 != 0 {
             crate::startup::gpu_ended();
         }
+        // WinTab's packets: the pen as the mouse, with its pressure (Windows Ink off)
+        if super::wintab::message(hwnd, msg, wparam, lparam) {
+            return LRESULT(0);
+        }
+        // the window active again: its WinTab context goes on top
+        if msg == WM_ACTIVATE && wparam.0 & 0xFFFF != 0 {
+            super::wintab::activated();
+        }
         let mut hovering = false;
         if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE || msg == WM_POINTERUP {
             // the pointer's id is the low word of `wparam`
@@ -748,6 +762,10 @@ mod system {
             // SAFETY: `kind` is a type to fill for this pointer
             if unsafe { GetPointerType(id, &mut kind) }.is_ok() && (kind == PT_PEN || kind == PT_TOUCH) {
                 super::pointer_kind(u64::from(id), kind == PT_PEN);
+                // the system gives the pen itself (Windows Ink on): WinTab's packets wait
+                if kind == PT_PEN {
+                    super::wintab::ink_pen();
+                }
             }
             frame_kinds(id);
             if (wparam.0 >> 16) as u32 & POINTER_FLAG_CANCELED != 0 {
@@ -843,6 +861,13 @@ mod tests {
         assert_eq!(mouse_pen_at((30.0, 20.0)), Some(pen(0.7)));
         set_mouse_pen(None);
         assert_eq!(mouse_pen_at((12.5, 20.0)), None);
+        // the system's pen messages starting: what WinTab said a moment before is let go
+        #[cfg(windows)]
+        {
+            set_mouse_pen(Some((pen(0.4), (0.0, 0.0))));
+            wintab::ink_pen();
+            assert_eq!(mouse_pen(), None);
+        }
     }
 
     #[test]
