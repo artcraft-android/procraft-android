@@ -796,7 +796,8 @@ fn generated_brush(g: &procraft_engine::gbr::Generated) -> Brush {
         Some(tip) => tip_brush(&tip),
         None => {
             let mut b = Brush { name: g.name.clone(), ..Brush::round_pen() };
-            b.hardness = g.hardness;
+            // ours paints half halfway between its hardness and its edge: where GIMP's does
+            b.hardness = (2.0 * procraft_engine::gbr::generated_half(g.hardness) - 1.0).clamp(0.0, 1.0);
             b.shape.roundness = (1.0 / g.aspect).clamp(0.01, 1.0);
             b
         }

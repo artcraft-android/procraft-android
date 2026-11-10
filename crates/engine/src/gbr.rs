@@ -161,8 +161,9 @@ pub fn read_generated(bytes: &[u8]) -> Option<Generated> {
     })
 }
 
-/// A generated brush's tip drawn, solid to its hardness of the way out and fading to the edge;
-/// none for a plain circle (a round tip, not an image).
+/// A generated brush's tip drawn, falling off as GIMP's do ([`generated_falloff`]); none for a
+/// plain circle our round tip stands in for (one that paints half no nearer the middle than
+/// halfway out, as ours can: see [`generated_half`]).
 ///
 /// The shape is the same in each of `spikes` slices around: a point's angle is folded into the
 /// first half slice, its distance up from that slice's middle taken `aspect` times, and the shape
@@ -170,7 +171,7 @@ pub fn read_generated(bytes: &[u8]) -> Option<Generated> {
 /// whose points `aspect` sharpens.
 pub fn generated_tip(g: &Generated) -> Option<AbrTip> {
     let reach: fn(f32, f32) -> f32 = match g.shape {
-        GeneratedShape::Circle if g.spikes == 2 => return None,
+        GeneratedShape::Circle if g.spikes == 2 && generated_half(g.hardness) >= 0.5 => return None,
         GeneratedShape::Circle => f32::hypot,
         GeneratedShape::Square => f32::max,
         GeneratedShape::Diamond => |x, y| x + y,
@@ -188,17 +189,27 @@ pub fn generated_tip(g: &Generated) -> Option<AbrTip> {
             let folded = folded.min(slice - folded);
             let r = px.hypot(py);
             let d = reach(r * folded.cos(), r * folded.sin() * g.aspect);
-            let v = if d <= g.hardness {
-                1.0
-            } else if g.hardness >= 1.0 {
-                0.0
-            } else {
-                ((1.0 - d) / (1.0 - g.hardness)).clamp(0.0, 1.0)
-            };
-            pixels.push((v * 255.0).round() as u8);
+            pixels.push((generated_falloff(d, g.hardness) * 255.0).round() as u8);
         }
     }
     Some(AbrTip { name: g.name.clone(), spacing: Some(g.spacing), width: w as u32, height: h as u32, pixels })
+}
+
+/// How much a generated brush paints `t` of the way out (1 its edge, none past it), as GIMP's do:
+/// an S from all of it to none, `1 - 2f^2` to the half and `2(1-f)^2` after, of `t` raised to
+/// `0.4 / (1 - hardness)` (so the harder, the later it falls).
+pub fn generated_falloff(t: f32, hardness: f32) -> f32 {
+    if t >= 1.0 {
+        return 0.0;
+    }
+    let soft = 1.0 - hardness.clamp(0.0, 1.0);
+    let f = if soft < 4e-7 { 0.0 } else { t.max(0.0).powf(0.4 / soft) };
+    if f < 0.5 { 1.0 - 2.0 * f * f } else { 2.0 * (1.0 - f) * (1.0 - f) }
+}
+
+/// How far out a generated brush of `hardness` paints half ([`generated_falloff`]).
+pub fn generated_half(hardness: f32) -> f32 {
+    0.5f32.powf((1.0 - hardness.clamp(0.0, 1.0)) / 0.4)
 }
 
 /// A pipe: its name, a line starting with how many brushes it has, then the brushes (the first
@@ -340,6 +351,20 @@ mod tests {
     }
 
     #[test]
+    fn a_generated_brush_falls_off_as_gimp_s_do() {
+        let near = |a: f32, b: f32| (a - b).abs() < 2e-3;
+        // half the hardness: t^0.8 through the S, a third or so at half way out
+        assert!(near(generated_falloff(0.5, 0.5), 2.0 * (1.0 - 0.5f32.powf(0.8)).powi(2)));
+        assert!(near(generated_falloff(0.0, 0.0), 1.0) && generated_falloff(1.0, 0.0) == 0.0);
+        // all hard: solid to its edge
+        assert!(generated_falloff(0.99, 1.0) == 1.0 && generated_falloff(1.0, 1.0) == 0.0);
+        // half where it says
+        for hardness in [0.0, 0.5, 0.9] {
+            assert!(near(generated_falloff(generated_half(hardness), hardness), 0.5), "{hardness}");
+        }
+    }
+
+    #[test]
     fn generated_brushes_read_in_both_versions() {
         let old =
             read_generated(b"GIMP-VBR\n1.0\n2. Hardness 050\n10.000000\n25.000000\n0.500000\n2.5\n30.0\n").unwrap();
@@ -348,16 +373,20 @@ mod tests {
             ("2. Hardness 050", GeneratedShape::Circle, 0.5, 2.5)
         );
         assert!((old.spacing - 0.1).abs() < 1e-6 && (old.angle - 30f32.to_radians()).abs() < 1e-6);
-        assert!(generated_tip(&old).is_none());
+        // softer than our round tip goes (GIMP's paints half at 0.42 of the way out): drawn; a
+        // harder one is our round tip
+        assert!(generated_tip(&old).is_some());
+        assert!(generated_tip(&Generated { hardness: 0.75, ..old.clone() }).is_none());
         let block =
             read_generated(b"GIMP-VBR\r\n1.5\r\n2. Block 01\r\nsquare\r\n10.0\r\n25.0\r\n2\r\n0.95\r\n4.0\r\n0.0\r\n")
                 .unwrap();
         assert_eq!((block.shape, block.aspect), (GeneratedShape::Square, 4.0));
-        // a square four times as wide as tall, solid to its edge's last twentieth
+        // a square four times as wide as tall, near solid to two thirds of the way out, fading to
+        // its edge
         let tip = generated_tip(&block).unwrap();
         assert_eq!((tip.width, tip.height), (128, 32));
-        assert_eq!((tip.pixels[16 * 128 + 64], tip.pixels[16 * 128 + 4]), (255, 255));
-        assert!(tip.pixels[16 * 128] < 128);
+        assert!(tip.pixels[16 * 128 + 64] == 255 && tip.pixels[16 * 128 + 20] > 240);
+        assert!(tip.pixels[16 * 128 + 4] < 160 && tip.pixels[16 * 128] < 10);
         // a diamond's corners are empty
         let diamond = Generated { shape: GeneratedShape::Diamond, aspect: 1.0, ..block };
         let tip = generated_tip(&diamond).unwrap();
