@@ -1,7 +1,7 @@
 //! The brush studio's source editor, as the Android app's (ui/SourceEditorUi.kt): the shape, the
 //! grain, or what the brush paints metalness or roughness through, in a 600 square. Import takes a
 //! photo, a file, a shipped image from the source library or a picture on the clipboard, and a
-//! two-finger tap turns the image negative; all but the shape can also be made to repeat without
+//! two-finger tap (or the other mouse button) turns the image negative; all but the shape can also be made to repeat without
 //! seams. Cancel leaves the brush as it was, the tick keeps the change.
 
 use std::collections::HashSet;
@@ -266,7 +266,7 @@ impl SourceEditor {
     }
 
     /// The image in its 600 square (the round tip a white disc, a grain of none white all over);
-    /// a two-finger tap on it turns it negative.
+    /// a two-finger tap on it, or the other mouse button, turns it negative.
     fn view(&mut self, ui: &Ui, page: Rect) {
         let view = Rect::from_center_size(page.center() + vec2(0.0, 32.0), vec2(600.0, 601.0));
         ui.painter().rect_filled(view, 20, argb(VIEW));
@@ -282,6 +282,9 @@ impl SourceEditor {
         if self.importing.is_some() || self.library.is_some() {
             return;
         }
+        if ui.interact(view, ui.scope_id().with("source view"), Sense::click()).secondary_clicked() {
+            self.negative();
+        }
         let events = ui.input(|i| i.events.clone());
         for event in events {
             let egui::Event::Touch { id, phase, pos, .. } = event else { continue };
@@ -294,15 +297,22 @@ impl SourceEditor {
                 egui::TouchPhase::End | egui::TouchPhase::Cancel
                     if self.touches.remove(&id.0) && self.touches.is_empty() =>
                 {
-                    if self.most == 2 && !self.image.is_empty() {
-                        self.image.iter_mut().for_each(|v| *v = 255 - *v);
-                        self.shipped = None;
-                        self.stale = true;
+                    if self.most == 2 {
+                        self.negative();
                     }
                     self.most = 0;
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// The image turned negative (not the round tip or a grain of none, which have no image).
+    fn negative(&mut self) {
+        if !self.image.is_empty() {
+            self.image.iter_mut().for_each(|v| *v = 255 - *v);
+            self.shipped = None;
+            self.stale = true;
         }
     }
 
