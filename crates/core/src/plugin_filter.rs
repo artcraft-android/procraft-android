@@ -247,7 +247,7 @@ mod tests {
 
     /// Clears what isn't dark, by the amount of `cut`.
     const LINES: &str = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
-        let dark = 1.0 - dot(colour.rgb, vec3<f32>(0.299, 0.587, 0.114));
+        let dark = clamp(1.0 - dot(colour.rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
         let shade = select(vec3<f32>(0.0), colour.rgb, v.keep_colour > 0.5);
         return vec4<f32>(shade, step(v.cut, dark) * colour.a);
     }";
