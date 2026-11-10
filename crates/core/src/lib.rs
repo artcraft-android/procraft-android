@@ -106,6 +106,7 @@ pub use animation::{
     export_fps_label, frame_rate,
 };
 pub use brush_files::{BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes};
+pub use brush_library::prepare_brushes;
 pub use brushes::{BrushInfo, BrushSetInfo, RecentBrush};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
@@ -477,6 +478,9 @@ pub(crate) struct State {
     pub(crate) pad_strokes: Option<Vec<(PointerKind, Vec<PenSample>)>>,
     /// Brush files' grains at their own size.
     pub(crate) grain_store: grain_store::GrainStore,
+    /// Where the library was last kept or read whole, and what it held then (see
+    /// `brush_library::Images::Told`): kept again only once that changes.
+    pub(crate) library_kept: Option<(std::path::PathBuf, u64)>,
     /// The pad shows only its sample scribble: a stroke of one's own takes it away.
     pub(crate) pad_sample: bool,
     /// The pad drawn as a sphere, the flat pad's strokes set aside meanwhile.
@@ -1305,6 +1309,7 @@ impl CanvasSession {
             frames: 0,
             pad_strokes: None,
             grain_store: grain_store::GrainStore::default(),
+            library_kept: None,
             pad_sample: false,
             sphere: None,
             frame_interval_ms: 0.0,

@@ -10844,3 +10844,72 @@ fn smudging_moves_paint_only_inside_the_selection() {
     assert!(changed(0..95) > 100, "smudged inside");
     assert_eq!(changed(102..200), 0, "nothing moved outside");
 }
+
+/// How long a large library takes to keep and to open again: `LIBRARY_CORPUS` a folder of brush
+/// files (searched through), all brought in first.
+#[test]
+#[ignore]
+fn a_large_librarys_keeping_and_opening_timed() {
+    let Ok(root) = std::env::var("LIBRARY_CORPUS") else { return };
+    let mut files = Vec::new();
+    let mut folders = vec![std::path::PathBuf::from(&root)];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            let path = entry.path();
+            let kind = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if path.is_dir() {
+                folders.push(path);
+            } else if matches!(kind.as_str(), "brush" | "brushset" | "abr" | "kpp" | "gbr" | "sut") {
+                files.push((path, kind));
+            }
+        }
+    }
+    files.sort();
+    let s = CanvasSession::new(64, 64);
+    let started = std::time::Instant::now();
+    for (path, kind) in &files {
+        let bytes = std::fs::read(path).unwrap();
+        if kind == "brush" || kind == "brushset" {
+            s.import_brushes(bytes);
+        } else {
+            s.import_other_brushes(bytes, "Corpus".to_owned());
+        }
+    }
+    let count: usize = s.brush_library().iter().map(|set| set.brushes.len()).sum();
+    eprintln!("{} files, {count} brushes, brought in in {:?}", files.len(), started.elapsed());
+    let dir = std::env::temp_dir().join(format!("procraft-library-timed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_string_lossy().into_owned();
+    let t = std::time::Instant::now();
+    assert!(s.keep_brushes(d.clone()));
+    eprintln!("kept whole in {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    assert!(s.keep_brush_choices(d.clone()));
+    eprintln!("choices kept in {:?}", t.elapsed());
+    let set = s.brush_library().iter().position(|set| set.brushes.len() > 1).unwrap() as u32;
+    assert!(s.select_brush(set, 1));
+    let t = std::time::Instant::now();
+    assert!(s.keep_brushes(d.clone()));
+    eprintln!("kept again after a brush chosen in {:?}", t.elapsed());
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        eprintln!("  {} {} KB", entry.file_name().to_string_lossy(), entry.metadata().unwrap().len() / 1024);
+    }
+    let t = std::time::Instant::now();
+    let json = s.saved_brush_library();
+    eprintln!("written as text in {:?} ({} KB)", t.elapsed(), json.len() / 1024);
+
+    let taken = CanvasSession::new(64, 64);
+    let t = std::time::Instant::now();
+    assert!(taken.open_brushes(d.clone()));
+    eprintln!("opened as held from the keeping in {:?}", t.elapsed());
+    // as read from the file: what it was held as let go (another file kept)
+    s.keep_brushes(dir.join("elsewhere").to_string_lossy().into_owned());
+    let other = CanvasSession::new(64, 64);
+    let t = std::time::Instant::now();
+    assert!(other.open_brushes(d.clone()));
+    eprintln!("opened in {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    assert!(other.keep_brushes(d));
+    eprintln!("kept by the session that opened it in {:?}", t.elapsed());
+    let _ = std::fs::remove_dir_all(&dir);
+}

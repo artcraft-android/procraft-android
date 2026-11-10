@@ -380,6 +380,11 @@ impl ApplicationHandler for App {
         };
         // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
         pen::watch(&window, self.wake.clone());
+        // the brushes read while the gallery shows, so the first artwork opens without reading them
+        let read = std::thread::Builder::new().name("procraft-read-brushes".to_owned());
+        if let Err(e) = read.spawn(|| procraft_core::prepare_brushes(files::brushes_dir())) {
+            log::warn!("reading the brushes ahead: {e}");
+        }
         // in this machine's order, from the backend the last run used, or the next if that one
         // was at risk when it stopped
         let order = startup::backend_order();
@@ -749,7 +754,14 @@ impl App {
             p.draw(&screen.gpu, Some(&session));
         }
         if std::mem::take(&mut self.ui.keep_brushes) {
-            session.keep_brushes(files::brushes_dir());
+            // off the window's thread: a library with many brushes brought in is tens of megabytes
+            // when something in it changed (a brush chosen only writes the choices)
+            let kept = Arc::clone(&session);
+            let thread = std::thread::Builder::new().name("procraft-keep-brushes".to_owned());
+            if let Err(e) = thread.spawn(move || kept.keep_brushes(files::brushes_dir())) {
+                log::warn!("keeping the brushes on a thread of their own: {e}");
+                session.keep_brushes(files::brushes_dir());
+            }
         }
         for action in std::mem::take(&mut self.ui.actions) {
             self.act(action, &session);

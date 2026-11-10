@@ -1066,6 +1066,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshGallery()
         // the GPU made while the gallery shows, so the first artwork opens at once
         viewModelScope.launch(Dispatchers.Default) { io.github.artcraftandroid.procraft.core.warmGpu() }
+        // and the brushes read (with many imported, reading them took seconds at each open)
+        viewModelScope.launch(Dispatchers.IO) { io.github.artcraftandroid.procraft.core.prepareBrushes(brushesDir.path) }
     }
 
     // ---- gallery ----

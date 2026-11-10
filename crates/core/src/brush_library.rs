@@ -15,6 +15,7 @@ use procraft_engine::library::{BrushSet, SHELF};
 use crate::{CanvasSession, State};
 
 /// A set in the library as it is now: the shipped sets as edited, and the user's own.
+#[derive(Clone)]
 pub(crate) struct LibrarySet {
     pub(crate) name: String,
     pub(crate) brushes: Vec<Brush>,
@@ -232,6 +233,32 @@ impl SavedNotches {
     }
 }
 
+/// How a kept brush's images are put: whole (as base64), or only by what tells each apart from any
+/// other, to see whether the library changed without writing them out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Images {
+    Whole,
+    Told,
+}
+
+impl Images {
+    /// Bytes kept with a brush (a preview, a picture).
+    fn bytes(self, bytes: &[u8]) -> String {
+        match self {
+            Images::Whole => procraft_engine::base64::encode(bytes),
+            Images::Told => format!("{:016x}:{}", crate::project::pixels_hash(bytes), bytes.len()),
+        }
+    }
+
+    /// A shape, grain or material image of the brush's own.
+    fn source(self, source: &Source) -> String {
+        match self {
+            Images::Whole => source.to_text(),
+            Images::Told => format!("{:016x}", source.id),
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedSet {
     name: String,
@@ -333,6 +360,71 @@ const FIRST_SHIPPED: [u32; 6] = [3, 3, 3, 2, 2, 2];
 /// The files a library is kept in, in the app's folder for it: the library, the brushes' choices
 /// and sliders, and how many brushes of each shipped set it has seen.
 const LIBRARY_FILE: &str = "library.json";
+
+/// Held while the library or its choices are read out and written, so that writes from two threads
+/// (a window's, one keeping it in the background) land in the order they read it.
+static LIBRARY_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn library_writes() -> std::sync::MutexGuard<'static, ()> {
+    LIBRARY_WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The library as last kept or read whole in this run: the next artwork takes it from here while
+/// its file is as it was then, not read again (tens of megabytes with many brushes brought in, which
+/// took seconds to read on a tablet). One for the app: it keeps one library.
+static LAST_LIBRARY: std::sync::Mutex<Option<LastLibrary>> = std::sync::Mutex::new(None);
+
+struct LastLibrary {
+    path: std::path::PathBuf,
+    /// The file's size and time once kept or read: anything else writing it changes them.
+    stamp: (u64, std::time::SystemTime),
+    /// What it held (see [`Images::Told`]).
+    told: u64,
+    library: Vec<LibrarySet>,
+}
+
+/// Reads the library kept in folder `dir` ahead of the first artwork (while the gallery shows), so
+/// that it opens without reading it (see [`CanvasSession::open_brushes`]); nothing if it is held
+/// already or there is none. Slow with many brushes brought in: call it off the main thread.
+#[uniffi::export]
+pub fn prepare_brushes(dir: String) {
+    let library = std::path::Path::new(&dir).join(LIBRARY_FILE);
+    if holds(&LAST_LIBRARY, &library) || !library.is_file() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    if CanvasSession::new(1, 1).load_brush_library_file(library.to_string_lossy().into_owned()) {
+        log::info!("the brushes read ahead in {} ms", started.elapsed().as_millis());
+    }
+}
+
+/// Whether `slot` holds the library of the file at `path` as the file is now.
+fn holds(slot: &std::sync::Mutex<Option<LastLibrary>>, path: &std::path::Path) -> bool {
+    let held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.as_ref().is_some_and(|last| last.path == path && stamp(path) == Some(last.stamp))
+}
+
+/// `file`'s size and time, if it is there.
+fn stamp(file: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(file).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// Holds `library` in `slot` as the file at `path` holds it now.
+fn remember(slot: &std::sync::Mutex<Option<LastLibrary>>, path: &std::path::Path, told: u64, library: Vec<LibrarySet>) {
+    let held = stamp(path).map(|stamp| LastLibrary { path: path.to_path_buf(), stamp, told, library });
+    *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = held;
+}
+
+/// The library held in `slot` for the file at `path`, and what it holds, while the file is as it
+/// was when it was held.
+fn remembered(slot: &std::sync::Mutex<Option<LastLibrary>>, path: &std::path::Path) -> Option<(Vec<LibrarySet>, u64)> {
+    if !holds(slot, path) {
+        return None;
+    }
+    let held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.as_ref().filter(|last| last.path == path).map(|last| (last.library.clone(), last.told))
+}
 const CHOICES_FILE: &str = "choices.json";
 const SEEN_FILE: &str = "seen.txt";
 
@@ -384,18 +476,45 @@ impl State {
 
     /// Brush `i` of `set` as kept: its origin and its changes from there.
     fn saved(&self, set: &LibrarySet, i: usize) -> Option<SavedBrush> {
-        let brush = set.brushes.get(i)?;
-        Some(self.saved_brush(brush, set.origins.get(i).copied().flatten()))
+        self.saved_as(set, i, Images::Whole)
     }
 
-    /// `brush` as kept, as changed from what it started as (`from`).
-    fn saved_brush(&self, brush: &Brush, from: Option<(usize, usize)>) -> SavedBrush {
+    /// [`Self::saved`] with its images put as `images` says.
+    fn saved_as(&self, set: &LibrarySet, i: usize, images: Images) -> Option<SavedBrush> {
+        let brush = set.brushes.get(i)?;
+        Some(self.saved_brush(brush, set.origins.get(i).copied().flatten(), images))
+    }
+
+    /// The library's sets as kept, their images put as `images` says.
+    fn saved_sets(&self, images: Images) -> Vec<SavedSet> {
+        self.library
+            .iter()
+            .map(|set| SavedSet {
+                name: set.name.clone(),
+                brushes: (0..set.brushes.len()).filter_map(|i| self.saved_as(set, i, images)).collect(),
+                icon: Some(set.icon),
+                icons: ICON_NUMBERING,
+            })
+            .collect()
+    }
+
+    /// What the library holds, told apart from any other: the library as kept, with each image
+    /// by what tells it apart in place of the image (quick, where the whole library written out
+    /// is tens of megabytes with many brushes brought in).
+    fn library_told(&self) -> u64 {
+        crate::project::pixels_hash(&serde_json::to_vec(&self.saved_sets(Images::Told)).unwrap_or_default())
+    }
+
+    /// `brush` as kept, as changed from what it started as (`from`), its images put as `images`
+    /// says.
+    fn saved_brush(&self, brush: &Brush, from: Option<(usize, usize)>, images: Images) -> SavedBrush {
         let base = self.origin_brush(from);
         let kept = |c: &Curve, b: &Curve| -> Vec<[f32; 2]> {
             if c == b { Vec::new() } else { c.points().iter().map(|p| [p.x, p.y]).collect() }
         };
         let image = |mine: Option<u32>, theirs: Option<u32>| (mine != theirs).then(|| mine.map_or(-1, i64::from));
-        let text = |png: &Option<std::sync::Arc<[u8]>>| png.as_deref().map(procraft_engine::base64::encode);
+        let text = |png: &Option<std::sync::Arc<[u8]>>| png.as_deref().map(|bytes| images.bytes(bytes));
+        let source = |s: &Source| images.source(s);
         SavedBrush {
             from,
             name: brush.name.clone(),
@@ -412,16 +531,16 @@ impl State {
                     .collect()
             }),
             // a stock shape's is made again from its name when the brush comes back
-            shape_source: brush.shape.source.as_ref().filter(|_| brush.stock.shape.is_none()).map(Source::to_text),
+            shape_source: brush.shape.source.as_ref().filter(|_| brush.stock.shape.is_none()).map(source),
             // a stock grain's is made again from its name when the brush comes back
-            grain_source: brush.grain.source.as_ref().filter(|_| brush.stock.grain.is_none()).map(Source::to_text),
+            grain_source: brush.grain.source.as_ref().filter(|_| brush.stock.grain.is_none()).map(source),
             grain_file: brush
                 .grain_file_now()
                 .map(|f| SavedGrainFile { width: f.width, full: f.full.as_ref().map(|g| (g.id, g.side)) }),
             shape_full: brush.shape_file_now().map(|f| (f.full.id, f.full.side)),
             shape_image: image(brush.shape.image, base.shape.image),
             grain_image: image(brush.grain.image, base.grain.image),
-            thumbnail: brush.thumbnail.as_deref().map(procraft_engine::base64::encode),
+            thumbnail: brush.thumbnail.as_deref().map(|bytes| images.bytes(bytes)),
             notches: SavedNotches::of(&brush.notches),
             sliders: if brush.sliders.iter().any(Option::is_some) { brush.sliders.to_vec() } else { Vec::new() },
             author: brush.author.as_ref().map(|a| SavedAuthor {
@@ -432,16 +551,16 @@ impl State {
             reset: brush
                 .reset_point
                 .as_ref()
-                .map(|r| SavedReset { made: r.made, brush: Box::new(self.saved_brush(&r.brush, from)) }),
+                .map(|r| SavedReset { made: r.made, brush: Box::new(self.saved_brush(&r.brush, from, images)) }),
             shape_stock: brush.stock.shape.as_ref().map(|s| (s.name.clone(), s.inverted)),
             grain_stock: brush.stock.grain.as_ref().map(|s| (s.name.clone(), s.inverted)),
-            metallic_source: brush.metallic.source.as_ref().map(Source::to_text),
-            roughness_source: brush.roughness.source.as_ref().map(Source::to_text),
+            metallic_source: brush.metallic.source.as_ref().map(source),
+            roughness_source: brush.roughness.source.as_ref().map(source),
             metallic_image: image(brush.metallic.image, base.metallic.image),
             roughness_image: image(brush.roughness.image, base.roughness.image),
             metallic_stock: brush.stock.metallic.as_ref().map(|s| (s.name.clone(), s.inverted)),
             roughness_stock: brush.stock.roughness.as_ref().map(|s| (s.name.clone(), s.inverted)),
-            secondary: brush.secondary.as_ref().map(|s| Box::new(self.saved_brush(s, None))),
+            secondary: brush.secondary.as_ref().map(|s| Box::new(self.saved_brush(s, None, images))),
         }
     }
 
@@ -951,34 +1070,37 @@ impl CanvasSession {
 
     /// The library as kept between sessions (JSON).
     pub fn saved_brush_library(&self) -> String {
-        let st = self.shared.lock();
-        let sets: Vec<SavedSet> = st
-            .library
-            .iter()
-            .map(|set| SavedSet {
-                name: set.name.clone(),
-                brushes: (0..set.brushes.len()).filter_map(|i| st.saved(set, i)).collect(),
-                icon: Some(set.icon),
-                icons: ICON_NUMBERING,
-            })
-            .collect();
-        serde_json::to_string(&sets).unwrap_or_default()
+        serde_json::to_string(&self.shared.lock().saved_sets(Images::Whole)).unwrap_or_default()
     }
 
     /// Keeps the library in the file at `path` (its folder made if missing), replaced whole: it
-    /// can be large, with the images of brushes brought in. False if it couldn't be written.
+    /// can be large, with the images of brushes brought in. Not written again while it holds what
+    /// was last kept there (or read from there): a brush chosen, or a slider moved, changes only
+    /// the choices kept beside it. False if it couldn't be written.
     pub fn save_brush_library_file(&self, path: String) -> bool {
-        let json = self.saved_brush_library();
-        let path = std::path::Path::new(&path);
+        let _writing = library_writes();
+        let path = std::path::PathBuf::from(path);
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
             self.shared.lock().grain_store.use_folder(dir);
         }
-        let written = crate::project::write_atomically(path, |p| {
+        let (told, json, library) = {
+            let st = self.shared.lock();
+            let told = st.library_told();
+            if path.is_file() && st.library_kept.as_ref().is_some_and(|(at, was)| *at == path && *was == told) {
+                return true;
+            }
+            (told, serde_json::to_string(&st.saved_sets(Images::Whole)).unwrap_or_default(), st.library.clone())
+        };
+        let written = crate::project::write_atomically(&path, |p| {
             std::fs::write(p, json.as_bytes()).map_err(|e| crate::project::file_error("keeping the brushes", e))
         });
-        if let Err(e) = &written {
-            log::error!("{e}");
+        match &written {
+            Ok(()) => {
+                remember(&LAST_LIBRARY, &path, told, library);
+                self.shared.lock().library_kept = Some((path, told));
+            }
+            Err(e) => log::error!("{e}"),
         }
         written.is_ok()
     }
@@ -986,10 +1108,31 @@ impl CanvasSession {
     /// Puts back a library kept with [`Self::save_brush_library_file`]; false, changing nothing,
     /// if there is none or it can't be read.
     pub fn load_brush_library_file(&self, path: String) -> bool {
-        if let Some(dir) = std::path::Path::new(&path).parent() {
+        let path = std::path::PathBuf::from(path);
+        if let Some(dir) = path.parent() {
             self.shared.lock().grain_store.use_folder(dir);
         }
-        std::fs::read_to_string(&path).is_ok_and(|json| self.load_brush_library(json))
+        // as last kept or read in this run, the file unchanged since
+        if let Some((library, told)) = remembered(&LAST_LIBRARY, &path) {
+            let mut st = self.shared.lock();
+            st.library = library;
+            st.sliders.clear();
+            st.move_brush_refs(Some);
+            st.library_kept = Some((path, told));
+            return true;
+        }
+        let loaded = std::fs::read_to_string(&path).is_ok_and(|json| self.load_brush_library(json));
+        if loaded {
+            // the file holds this (or more, of what couldn't be read back): kept again once it changes
+            let (told, library) = {
+                let mut st = self.shared.lock();
+                let told = st.library_told();
+                st.library_kept = Some((path.clone(), told));
+                (told, st.library.clone())
+            };
+            remember(&LAST_LIBRARY, &path, told, library);
+        }
+        loaded
     }
 
     /// Puts back a library kept with [`Self::saved_brush_library`]; false, changing nothing, if it
@@ -1066,6 +1209,7 @@ impl CanvasSession {
     /// (as [`Self::keep_brushes`] does with the library): for a brush chosen, the library as it
     /// was. False if they couldn't be written.
     pub fn keep_brush_choices(&self, dir: String) -> bool {
+        let _writing = library_writes();
         let dir = std::path::PathBuf::from(dir);
         let choices = self.saved_brush_choices();
         let _ = std::fs::create_dir_all(&dir);
@@ -1298,6 +1442,53 @@ mod keeping {
     }
 
     #[test]
+    fn a_library_is_written_again_only_once_it_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "procraft-brushes-again-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        ));
+        let path = dir.to_string_lossy().into_owned();
+        let (library, choices) = (dir.join(super::LIBRARY_FILE), dir.join(super::CHOICES_FILE));
+        // a mark after the library's text (a space, still JSON): gone once it is written again
+        let mark = || {
+            let mut text = std::fs::read(&library).unwrap();
+            text.push(b' ');
+            std::fs::write(&library, text).unwrap();
+        };
+        let marked = || std::fs::read(&library).unwrap().ends_with(b" ");
+        let s = CanvasSession::new(32, 32);
+        assert!(s.keep_brushes(path.clone()));
+        mark();
+        // a brush chosen and a slider moved: only the choices change
+        let before = std::fs::read_to_string(&choices).unwrap();
+        assert!(s.select_brush(0, 1));
+        s.set_brush_size(0.42);
+        assert!(s.keep_brushes(path.clone()));
+        assert!(marked(), "the library written again with nothing in it changed");
+        assert_ne!(std::fs::read_to_string(&choices).unwrap(), before);
+        // a brush added: written
+        assert!(s.duplicate_brush(0, 0).is_some());
+        assert!(s.keep_brushes(path.clone()));
+        assert!(!marked());
+        // read back by another session, which keeps it as it was: not written
+        let next = CanvasSession::new(32, 32);
+        assert!(next.open_brushes(path.clone()));
+        mark();
+        assert!(next.keep_brushes(path.clone()));
+        assert!(marked());
+        // gone from the folder: written again
+        std::fs::remove_file(&library).unwrap();
+        assert!(next.keep_brushes(path.clone()));
+        assert!(library.is_file());
+        // kept elsewhere: written there
+        let other = dir.join("other");
+        assert!(next.keep_brushes(other.to_string_lossy().into_owned()));
+        assert!(other.join(super::LIBRARY_FILE).is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_file_chosen_to_import_is_told_apart_by_its_name_and_contents() {
         let s = CanvasSession::new(32, 32);
         let file = s.brush_as_file(0, 0).unwrap_or_default();
@@ -1307,6 +1498,99 @@ mod keeping {
         assert_eq!(s.import_any_brushes(file, None, 0), Some(0), "no name: told by its contents");
         assert_eq!(s.import_any_brushes(vec![1, 2, 3], Some("junk.abr".into()), 0), None);
         assert_eq!(s.import_any_brushes(vec![1, 2, 3], None, 0), None);
+    }
+
+    #[test]
+    fn the_next_artwork_has_the_library_as_kept_and_a_file_changed_elsewhere_is_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "procraft-brushes-held-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        ));
+        let path = dir.to_string_lossy().into_owned();
+        let first = CanvasSession::new(32, 32);
+        first.open_brushes(path.clone());
+        let set = first.new_brush_set();
+        assert!(first.rename_brush_set(set, "Mine".into()));
+        let full = first.brush_library().iter().position(|s| s.brushes.len() > 2).unwrap() as u32;
+        assert!(first.select_brush(full, 1));
+        first.set_brush_size(0.37);
+        assert!(first.duplicate_brush(full, 2).is_some());
+        assert!(first.keep_brushes(path.clone()));
+        let (library, choices) = (first.saved_brush_library(), first.saved_brush_choices());
+
+        let next = CanvasSession::new(32, 32);
+        assert!(next.open_brushes(path.clone()));
+        assert_eq!(next.saved_brush_library(), library);
+        assert_eq!(next.saved_brush_choices(), choices);
+        assert!((next.info().size - 0.37).abs() < 1e-4, "{}", next.info().size);
+
+        // the file written by something else: read from it
+        let other = CanvasSession::new(32, 32);
+        let elsewhere = other.saved_brush_library();
+        std::fs::write(dir.join(super::LIBRARY_FILE), &elsewhere).unwrap();
+        let after = CanvasSession::new(32, 32);
+        assert!(after.open_brushes(path));
+        assert_eq!(after.saved_brush_library(), elsewhere);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn brushes_read_ahead_open_as_kept() {
+        let dir = std::env::temp_dir().join(format!(
+            "procraft-brushes-ahead-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        ));
+        let path = dir.to_string_lossy().into_owned();
+        // nothing kept yet: nothing read
+        super::prepare_brushes(path.clone());
+        let first = CanvasSession::new(32, 32);
+        let set = first.new_brush_set();
+        assert!(first.rename_brush_set(set, "Ahead".into()));
+        assert!(first.keep_brushes(path.clone()));
+        // held for another folder meanwhile, then read ahead for this one
+        assert!(CanvasSession::new(32, 32).keep_brushes(dir.join("other").to_string_lossy().into_owned()));
+        super::prepare_brushes(path.clone());
+        let next = CanvasSession::new(32, 32);
+        assert!(next.open_brushes(path));
+        assert_eq!(next.saved_brush_library(), first.saved_brush_library());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_held_library_is_used_only_while_its_file_is_as_it_was() {
+        let dir = std::env::temp_dir().join(format!(
+            "procraft-brushes-stamp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(super::LIBRARY_FILE);
+        std::fs::write(&file, b"0123456789").unwrap();
+        let slot = std::sync::Mutex::new(None);
+        let s = CanvasSession::new(32, 32);
+        let library = s.shared.lock().library.clone();
+        let count = library.len();
+        super::remember(&slot, &file, 7, library);
+        assert_eq!(super::remembered(&slot, &file).map(|(l, told)| (l.len(), told)), Some((count, 7)));
+        assert!(super::remembered(&slot, &dir.join("other.json")).is_none(), "another file");
+        // written again at the same size, its time put back: still as it was
+        let time = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::fs::write(&file, b"9876543210").unwrap();
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(time).unwrap();
+        assert!(super::remembered(&slot, &file).is_some());
+        // another size, or another time: read again
+        std::fs::write(&file, b"01234567890").unwrap();
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(time).unwrap();
+        assert!(super::remembered(&slot, &file).is_none());
+        std::fs::write(&file, b"0123456789").unwrap();
+        let later = time + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(later).unwrap();
+        assert!(super::remembered(&slot, &file).is_none());
+        std::fs::remove_file(&file).unwrap();
+        assert!(super::remembered(&slot, &file).is_none(), "gone");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
