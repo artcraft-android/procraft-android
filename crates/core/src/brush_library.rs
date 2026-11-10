@@ -567,6 +567,8 @@ impl State {
     /// A kept brush made again.
     fn restored(&self, b: SavedBrush) -> Brush {
         let mut brush = self.origin_brush(b.from);
+        // where its origin's size controls sit (a size kept there isn't written down)
+        let origin_sizes = [("max_size", brush.setting("max_size")), ("min_size", brush.setting("min_size"))];
         if !b.name.trim().is_empty() {
             brush.name = b.name.chars().take(256).collect();
         }
@@ -632,6 +634,13 @@ impl State {
             }
         }
         brush.set_settings(b.settings.iter().map(|(k, v)| (k.as_str(), *v)));
+        // a size left out sits where its origin's did: with a shape of its own (another unit) or
+        // another spacing (another most), that place is other pixels than its origin's
+        for (key, place) in origin_sizes {
+            if !b.settings.contains_key(key) {
+                brush.set_setting(key, place);
+            }
+        }
         for (points, curve) in [
             (&b.curve, &mut brush.pressure_curve),
             (&b.size_curve, &mut brush.size_curve),
@@ -1556,6 +1565,28 @@ mod keeping {
         assert!(next.open_brushes(path));
         assert_eq!(next.saved_brush_library(), first.saved_brush_library());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_seconds_own_shape_keeps_its_sizes_through_a_restart() {
+        use procraft_engine::brush::{Brush, Source};
+        use procraft_engine::textures::TEXTURE_SIZE;
+        let s = CanvasSession::new(32, 32);
+        let round = Brush::round_pen();
+        // a second with a shape of its own, its sizes where the round pen's controls sit (so
+        // left out when kept, as its origin's are): other pixels than the round pen's
+        let mut second = Brush::round_pen();
+        second.shape.image = None;
+        second.shape.source = Source::new(vec![255; TEXTURE_SIZE * TEXTURE_SIZE]);
+        second.set_setting("max_size", round.setting("max_size"));
+        second.set_setting("min_size", round.setting("min_size"));
+        assert!((second.min_size - round.min_size).abs() > 0.1, "{} {}", second.min_size, round.min_size);
+        s.shared.lock().library[0].brushes[0].secondary = Some(Box::new(second.clone()));
+        let t = CanvasSession::new(32, 32);
+        assert!(t.load_brush_library(s.saved_brush_library()));
+        let back = t.shared.lock().library[0].brushes[0].secondary.clone().unwrap();
+        assert!((back.max_size - second.max_size).abs() < 1e-3, "{} {}", back.max_size, second.max_size);
+        assert!((back.min_size - second.min_size).abs() < 1e-4, "{} {}", back.min_size, second.min_size);
     }
 
     #[test]

@@ -71,11 +71,13 @@ pub const PIXELS_PER_SIZE: f32 = 256.0;
 pub const ROUND_TIP_SHARE: f32 = 0.8157;
 
 /// Sets `brush`'s sizes from a file's (`maxSize`, `minSize`, in units of its
-/// [`Brush::size_unit`], so its shape first), the least kept no larger than the most.
+/// [`Brush::size_unit`], so its shape first), the least kept no larger than the most, and the most
+/// no larger than its size controls reach (its spacing sets that, so its spacing first): kept as
+/// the controls' places, a size past their end would come back smaller after a restart.
 pub fn set_sizes(brush: &mut Brush, max_size: f32, min_size: Option<f32>) {
     let unit = brush.size_unit();
     if max_size.is_finite() {
-        brush.max_size = (max_size.max(0.0) * unit).max(0.5);
+        brush.max_size = (max_size.max(0.0) * unit).max(0.5).min(brush.most_size() * unit);
     }
     if let Some(min) = min_size.filter(|m| m.is_finite()) {
         brush.min_size = (min.max(0.0) * unit).min(brush.max_size);
@@ -982,10 +984,10 @@ mod tests {
         assert!(back.opacity_curve.is_none());
         assert!((back.shape_angle - brush.shape.rotation).abs() < 1e-6);
         let mut again = Brush::round_pen();
-        set_sizes(&mut again, back.max_size, back.min_size);
         for (k, v) in &back.settings {
             again.set_setting(k, *v);
         }
+        set_sizes(&mut again, back.max_size, back.min_size);
         for key in [
             "spacing",
             "rendering_mode",
@@ -1374,5 +1376,18 @@ mod tests {
         for (k, v) in &file.settings {
             println!("  {k} = {v:.4}");
         }
+    }
+    #[test]
+    fn a_size_past_what_the_controls_reach_is_kept_to_their_end() {
+        let mut b = Brush::round_pen();
+        // closely spaced: it may be smaller than a roomy brush
+        b.spacing = Brush::spacing_within_reach(0.01);
+        set_sizes(&mut b, 1e6, Some(0.5));
+        let most = b.most_size() * b.size_unit();
+        assert!((b.max_size - most).abs() < 1e-3, "{} {most}", b.max_size);
+        // kept as its control's place and read back, as after a restart: the same
+        let mut again = b.clone();
+        again.set_setting("max_size", b.setting("max_size"));
+        assert!((again.max_size - b.max_size).abs() < 1e-3 * b.max_size);
     }
 }

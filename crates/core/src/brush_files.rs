@@ -479,7 +479,6 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
 /// own), ours.
 fn csp_spray(b: &mut Brush, s: &procraft_engine::csp::CspSpray, area: f32, stamp: f32, spacing: Option<f32>) {
     use std::f32::consts::{FRAC_PI_2, TAU};
-    brushfile::set_sizes(b, stamp * ABR_SIZE_PER_PIXEL, Some(0.01));
     // the particle carries the tip's roundness: the area is round
     b.shape.roundness = 1.0;
     b.shape.follow = if s.follows { 1.0 } else { 0.0 };
@@ -495,6 +494,8 @@ fn csp_spray(b: &mut Brush, s: &procraft_engine::csp::CspSpray, area: f32, stamp
     // (sprayed, a ribbon's spacing has nothing to go by: left to us, as a tip is)
     let spacing = spacing.map_or(Brush::round_pen().spacing, |s| s * area / stamp.max(1e-3));
     b.spacing = Brush::spacing_within_reach(spacing);
+    // (the spacing first: it sets how big it may be)
+    brushfile::set_sizes(b, stamp * ABR_SIZE_PER_PIXEL, Some(0.01));
     let gathered = 1.0 - 0.5 * s.bias.max(0.0);
     let control = jitter_control(b, 0.5 * area / stamp.max(1e-3) * gathered);
     b.set_setting("jitter_lateral", control);
@@ -1029,7 +1030,7 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     if let Some(m) = &k.masking {
         let mut second = krita_brush(&m.brush);
         second.min_size = b.min_size * m.size;
-        second.max_size = b.max_size * m.size;
+        second.max_size = (b.max_size * m.size).min(second.most_size() * second.size_unit());
         masking_paint(&mut second, m);
         b.secondary = Some(Box::new(second));
         let mode = masking_mode(&m.op).unwrap_or_else(|| {

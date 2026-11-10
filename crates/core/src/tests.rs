@@ -10913,3 +10913,68 @@ fn a_large_librarys_keeping_and_opening_timed() {
     eprintln!("kept by the session that opened it in {:?}", t.elapsed());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Each brush brought in from `SIZE_CORPUS` (a folder of brush files) keeps its size range and
+/// sizes through the library kept and read back, as after a restart.
+#[test]
+#[ignore]
+fn brushes_brought_in_keep_their_size_range_through_a_restart() {
+    let Ok(root) = std::env::var("SIZE_CORPUS") else { return };
+    let mut files = Vec::new();
+    let mut folders = vec![std::path::PathBuf::from(&root)];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            let path = entry.path();
+            let kind = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if path.is_dir() {
+                folders.push(path);
+            } else if matches!(
+                kind.as_str(),
+                "brush" | "brushset" | "abr" | "kpp" | "gbr" | "vbr" | "gih" | "sut" | "bundle"
+            ) {
+                files.push((path, kind));
+            }
+        }
+    }
+    files.sort();
+    let s = CanvasSession::new(64, 64);
+    for (path, kind) in &files {
+        let bytes = std::fs::read(path).unwrap();
+        if kind == "brush" || kind == "brushset" {
+            s.import_brushes(bytes);
+        } else {
+            s.import_other_brushes(bytes, "Corpus".to_owned());
+        }
+    }
+    let t = CanvasSession::new(64, 64);
+    assert!(t.load_brush_library(s.saved_brush_library()));
+    let (before, after) = (s.shared.lock(), t.shared.lock());
+    let mut shifted = Vec::new();
+    let mut count = 0;
+    for (a, b) in before.library.iter().zip(after.library.iter()) {
+        let pairs = a.brushes.iter().zip(b.brushes.iter());
+        let seconds = pairs.clone().filter_map(|(x, y)| x.secondary.as_deref().zip(y.secondary.as_deref()));
+        for (x, y) in pairs.chain(seconds) {
+            count += 1;
+            let close = |p: f32, q: f32| (p - q).abs() <= 1e-4 * p.abs().max(1.0);
+            if !close(x.max_size, y.max_size) || !close(x.min_size, y.min_size) || x.size_unit() != y.size_unit() {
+                shifted.push(format!(
+                    "{} / {}: max {} -> {}, min {} -> {}, unit {} -> {}",
+                    a.name,
+                    x.name,
+                    x.max_size,
+                    y.max_size,
+                    x.min_size,
+                    y.min_size,
+                    x.size_unit(),
+                    y.size_unit()
+                ));
+            }
+        }
+    }
+    eprintln!("{count} brushes, {} shifted", shifted.len());
+    for line in shifted.iter().take(20) {
+        eprintln!("  {line}");
+    }
+    assert!(shifted.is_empty());
+}
