@@ -169,7 +169,7 @@ pub use scene3d::{
 pub use selection::{SelectionDisplay, SelectionJoin};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
-    small_source, source_from_picture, source_library, source_size,
+    small_source, source_from_copy, source_from_picture, source_library, source_size,
 };
 pub use text::{TextAlignment, TextDraw, TextDrawn, TextInfo, TextSide};
 pub use text_draw::{

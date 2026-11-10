@@ -999,6 +999,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** What was last copied or cut, for pasting (in this artwork or another). */
     private var clipboard: io.github.artcraftandroid.procraft.core.ThumbnailImage? = null
+        set(v) {
+            // when something new was cut or copied here, against the system's clipboard
+            if (v !== field) clipboardAt = System.currentTimeMillis()
+            field = v
+        }
+
+    /** When [clipboard] last took something new (wall clock, as the system clipboard's time is). */
+    private var clipboardAt = 0L
     var canPaste by mutableStateOf(false)
         private set
 
@@ -4962,7 +4970,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A picture on the clipboard as a source image; none if there isn't one. */
     suspend fun pastedSource(): ByteArray? {
-        val uri = systemClipboard?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+        val clip = systemClipboard?.primaryClip?.takeIf { it.itemCount > 0 }
+        val uri = clip?.getItemAt(0)?.uri
+        // what was cut or copied here, unless another app's picture went on the clipboard since
+        val own = clipboard
+        if (own != null && (uri == null || clipboardAt >= (clip.description?.timestamp ?: 0L))) {
+            val source = withContext(Dispatchers.Default) { io.github.artcraftandroid.procraft.core.sourceFromCopy(own) }
+            if (source.isNotEmpty()) return source
+        }
         if (uri == null) {
             message = "There's no picture to paste."
             return null

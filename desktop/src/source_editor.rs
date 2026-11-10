@@ -618,8 +618,15 @@ fn picked_picture(title: &str) -> Option<Vec<u8>> {
     Some(procraft_core::source_from_picture(rgba.into_raw(), w, h))
 }
 
-/// A picture on the clipboard as a source image; none if there isn't one.
+/// A picture on the clipboard as a source image; none if there isn't one. What was cut or copied
+/// here comes first, unless the system's clipboard took another app's picture since.
 fn pasted() -> Option<Vec<u8>> {
+    if let Some(own) = crate::system_clipboard::own_copy_unless_replaced() {
+        let source = procraft_core::source_from_copy(own);
+        if !source.is_empty() {
+            return Some(source);
+        }
+    }
     let image = arboard::Clipboard::new().ok().and_then(|mut c| c.get_image().ok());
     let Some(image) = image else {
         crate::files::tell("Can't paste", "There's no picture to paste.");

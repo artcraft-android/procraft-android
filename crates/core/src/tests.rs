@@ -10788,3 +10788,26 @@ fn whole_canvas_changes_with_layers_off_the_gpu_save_and_reopen_as_with_them_all
         assert_eq!(budgeted_reopened, all_on, "{name}: kept off the GPU, reopened");
     }
 }
+
+#[test]
+fn a_copied_drawing_becomes_a_shape_source_filling_it_as_drawn() {
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.6);
+    s.set_color(1.0, 1.0, 1.0);
+    // a short white stroke in a corner of a transparent layer
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_add((1..10).map(|k| sample(30.0 + k as f32 * 4.0, 30.0, k as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let copied = s.copy_layer().expect("a copy");
+    let source = crate::studio::source_from_copy(copied.clone());
+    let n = (source.len() as f64).sqrt() as usize;
+    assert!(n > 0 && n * n == source.len());
+    // cut to the stroke: it spans the square's width, white where painted, black around
+    let middle = &source[n / 2 * n..n / 2 * n + n];
+    let lit: Vec<usize> = middle.iter().enumerate().filter(|(_, v)| **v > 128).map(|(i, _)| i).collect();
+    assert!(lit.first().is_some_and(|&a| a < n / 8) && lit.last().is_some_and(|&b| b > n * 7 / 8), "{lit:?}");
+    assert!(source[..n].iter().all(|&v| v < 16), "black above the stroke");
+    // nothing painted, nothing to take
+    let empty = crate::layers::ThumbnailImage { width: 4, height: 4, rgba: vec![0; 64] };
+    assert!(crate::studio::source_from_copy(empty).is_empty());
+}

@@ -112,6 +112,37 @@ pub fn source_from_picture(rgba: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
     out
 }
 
+/// What was cut or copied in the app (premultiplied, as a copy is) as a source image: only where it
+/// is painted, cut to that, its lightness over black, fitted into a square as
+/// [`source_from_picture`] fits a picture. Empty if nothing is painted.
+#[uniffi::export]
+pub fn source_from_copy(image: crate::layers::ThumbnailImage) -> Vec<u8> {
+    let (w, h) = (image.width as usize, image.height as usize);
+    if w == 0 || h == 0 || image.rgba.len() != w * h * 4 {
+        return Vec::new();
+    }
+    // where it is painted
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for (y, row) in image.rgba.chunks(w * 4).enumerate() {
+        for (x, px) in row.as_chunks::<4>().0.iter().enumerate() {
+            if px[3] > 0 {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return Vec::new();
+    }
+    // premultiplied, its colour is already what shows over black: taken as solid
+    let mut cut = Vec::with_capacity((x1 - x0) * (y1 - y0) * 4);
+    for row in image.rgba.chunks(w * 4).skip(y0).take(y1 - y0) {
+        for px in row.as_chunks::<4>().0.iter().skip(x0).take(x1 - x0) {
+            cut.extend_from_slice(&[px[0], px[1], px[2], 255]);
+        }
+    }
+    source_from_picture(cut, (x1 - x0) as u32, (y1 - y0) as u32)
+}
+
 /// Which of a brush's images the studio's editors change: its shape, its grain, or what it paints a
 /// model's metalness or roughness through (tiled as the grain is, from the same library).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]

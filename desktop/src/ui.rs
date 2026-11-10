@@ -1774,7 +1774,7 @@ impl Interface {
         }
         let Some(cut) = session.cut_layer() else { return false };
         self.clipboard = Some(cut);
-        self.system_clipboard.copied_here();
+        self.system_clipboard.copied_here(self.clipboard.as_ref());
         self.overlays.notice("Layer cut", false);
         true
     }
@@ -1784,7 +1784,7 @@ impl Interface {
         self.open = None;
         if let Some(copied) = session.copy_layer() {
             self.clipboard = Some(copied);
-            self.system_clipboard.copied_here();
+            self.system_clipboard.copied_here(self.clipboard.as_ref());
             self.overlays.notice("Layer copied", false);
         }
     }
@@ -1794,7 +1794,7 @@ impl Interface {
         self.open = None;
         if let Some(copied) = session.copy_canvas() {
             self.clipboard = Some(copied);
-            self.system_clipboard.copied_here();
+            self.system_clipboard.copied_here(self.clipboard.as_ref());
             self.overlays.notice("Canvas copied", false);
         }
     }
@@ -2238,7 +2238,7 @@ impl Interface {
                 }
                 if let Some(copied) = self.layers.copied.take() {
                     self.clipboard = Some(copied);
-                    self.system_clipboard.copied_here();
+                    self.system_clipboard.copied_here(self.clipboard.as_ref());
                 }
                 if std::mem::take(&mut self.layers.share) {
                     self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));

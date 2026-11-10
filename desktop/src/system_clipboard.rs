@@ -13,6 +13,19 @@ use procraft_core::ThumbnailImage;
 /// One look at a time: the clipboard's connection is shared.
 static LOOKING: Mutex<()> = Mutex::new(());
 
+/// What was last cut or copied here, for the studio's source editors, which paste on their own:
+/// the copy, the mark of what the system held as it was made (none until looked at), and which
+/// files count as pictures.
+type OwnCopy = (ThumbnailImage, Option<u64>, fn(&std::path::Path) -> bool);
+static OWN: Mutex<Option<OwnCopy>> = Mutex::new(None);
+
+/// What was last cut or copied here, unless the system's clipboard took something else since.
+pub fn own_copy_unless_replaced() -> Option<ThumbnailImage> {
+    let (image, mark, picture) = OWN.lock().ok()?.clone()?;
+    let replaced = mark.is_some_and(|mark| Held::read(picture).mark() != mark);
+    (!replaced).then_some(image)
+}
+
 /// What the system's clipboard holds that can be pasted.
 #[derive(Debug, PartialEq)]
 enum Held {
@@ -106,9 +119,20 @@ impl SystemClipboard {
         result
     }
 
-    /// Something was copied here: what the system holds now is older than that.
-    pub fn copied_here(&mut self) {
-        self.marking = Some(self.look(|held| held.mark()));
+    /// Something (`copy`) was copied here: what the system holds now is older than that.
+    pub fn copied_here(&mut self, copy: Option<&ThumbnailImage>) {
+        if let Ok(mut own) = OWN.lock() {
+            *own = copy.map(|c| (c.clone(), None, self.picture));
+        }
+        self.marking = Some(self.look(|held| {
+            let mark = held.mark();
+            if let Ok(mut own) = OWN.lock()
+                && let Some(own) = own.as_mut()
+            {
+                own.1.get_or_insert(mark);
+            }
+            mark
+        }));
     }
 
     /// Paste's button is coming up: whether it is lit goes by this too.
