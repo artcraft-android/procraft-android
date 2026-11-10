@@ -39,6 +39,26 @@ pub struct CspBrush {
     pub tip_pngs: Vec<Vec<u8>>,
     /// The paper texture it paints through, if it has one.
     pub texture: Option<CspTexture>,
+    /// Its tip sprayed as particles about each place, if it is.
+    pub spray: Option<CspSpray>,
+}
+
+/// How a sub tool sprays its tip: as particles falling about each place, in an area the brush's
+/// size across.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CspSpray {
+    /// A particle's size, pixels, at the brush's own size.
+    pub particle: f32,
+    /// How many fall at each place, and what of that follows the pen.
+    pub density: u32,
+    pub density_by: Option<CspDynamics>,
+    /// How they gather, -1 to 1: the higher, the nearer the middle.
+    pub bias: f32,
+    /// Each particle's angle, radians (from the stroke's way, where it turns with the stroke), and
+    /// how far each turns at random (0 not at all, 1 any way).
+    pub angle: f32,
+    pub random_turn: f32,
+    pub follows: bool,
 }
 
 /// How a sub tool's size, opacity, flow, thickness and texture density follow the pen (none where
@@ -270,6 +290,23 @@ fn brush(name: &str, variant: Option<(&Table, &Vec<Value>)>, materials: Option<&
         let (size, opacity) = blob("BrushInOutTarget").map_or((1.0, 0.0), taper_targets);
         CspTaper { start, end, of_stroke, size, opacity }
     });
+    // its tip sprayed: the particles' own size, how many, how they gather and turn
+    let spray_turns = number("BrushRotationEffectorInSpray").map_or(0, |v| v as i64);
+    let spray = number("BrushUseSpray").filter(|v| *v != 0.0).and_then(|_| {
+        Some(CspSpray {
+            particle: length("BrushSpraySize")?,
+            density: number("BrushSprayDensity").map_or(1, |v| v.clamp(1.0, 100.0) as u32),
+            density_by: follows("BrushSprayDensityEffector"),
+            bias: number("BrushSprayBias").map_or(0.0, |v| (v / 100.0).clamp(-1.0, 1.0) as f32),
+            angle: number("BrushRotationInSpray").map_or(0.0, |v| v.to_radians() as f32),
+            random_turn: if spray_turns & TURNS_AT_RANDOM != 0 {
+                percent("BrushRotationRandomInSpray").unwrap_or(1.0)
+            } else {
+                0.0
+            },
+            follows: spray_turns & TURNS_WITH_STROKE != 0,
+        })
+    });
     CspBrush {
         name: name.to_owned(),
         hardness: percent("BrushHardness"),
@@ -291,6 +328,7 @@ fn brush(name: &str, variant: Option<(&Table, &Vec<Value>)>, materials: Option<&
         taper,
         tip_pngs: tips,
         texture,
+        spray,
     }
 }
 
@@ -747,6 +785,53 @@ mod tests {
             [id, on, amount].iter().for_each(|v| out.extend(v.to_be_bytes()));
         }
         out
+    }
+
+    #[test]
+    fn a_sprayed_sub_tool_reads_its_particles() {
+        let columns = "VariantID INTEGER, BrushSize REAL, BrushUseSpray INTEGER, BrushSpraySize REAL, BrushSpraySizeUnit INTEGER, BrushSprayDensity INTEGER, BrushSprayBias INTEGER, BrushRotationInSpray REAL, BrushRotationEffectorInSpray INTEGER, BrushRotationRandomInSpray INTEGER";
+        let (int, real) = (Value::Int, Value::Real);
+        let variant = format!("CREATE TABLE Variant({columns})");
+        let text = |t: &str| Value::Text(t.into());
+        let db = database(&[
+            (
+                "Node",
+                "CREATE TABLE Node(NodeName TEXT, NodeVariantID INTEGER)",
+                vec![vec![text("A"), int(1)], vec![text("B"), int(2)], vec![text("C"), int(3)]],
+            ),
+            (
+                "Variant",
+                variant.as_str(),
+                vec![
+                    // particles of 7.5 pixels, 16 to a place, gathered a little less than even,
+                    // turned at random 90 %
+                    vec![
+                        int(1),
+                        real(30.0),
+                        int(1),
+                        real(7.5),
+                        int(0),
+                        int(16),
+                        int(-50),
+                        real(90.0),
+                        int(131),
+                        int(90),
+                    ],
+                    // half a millimetre, turned with the stroke, not at random (its scale kept)
+                    vec![int(2), real(30.0), int(1), real(0.5), int(2), int(4), int(100), real(0.0), int(67), int(100)],
+                    // not sprayed
+                    vec![int(3), real(30.0), int(0), real(7.5), int(0), int(16), int(0), real(0.0), int(3), int(100)],
+                ],
+            ),
+        ]);
+        let brushes = read(&db).unwrap();
+        let first = brushes[0].spray.as_ref().unwrap();
+        assert_eq!((first.particle, first.density, first.bias, first.follows), (7.5, 16, -0.5, false));
+        assert!((first.angle - 90f32.to_radians()).abs() < 1e-6 && (first.random_turn - 0.9).abs() < 1e-6);
+        let second = brushes[1].spray.as_ref().unwrap();
+        assert!((second.particle - 0.5 * PIXELS_PER_MM as f32).abs() < 1e-4, "{}", second.particle);
+        assert_eq!((second.density, second.bias, second.random_turn, second.follows), (4, 1.0, 0.0, true));
+        assert_eq!(brushes[2].spray, None);
     }
 
     #[test]

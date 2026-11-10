@@ -397,6 +397,19 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
     use std::f32::consts::{FRAC_PI_2, TAU};
     // the first of its pictures that lays any ink
     let tip = c.tip_pngs.iter().find_map(|png| csp_ink(png));
+    // sprayed: a stamp as wide as the area the particles fall in (or a particle, if larger), the
+    // particle in its middle, as many to a place as fall there, each thrown about the area
+    let spray = c.spray.as_ref().zip(c.size).map(|(s, area)| (s, area, area.max(s.particle)));
+    let tip = match spray {
+        Some((s, _, stamp)) => Some(spray_tip(
+            tip.as_ref(),
+            c.hardness.unwrap_or(1.0),
+            (c.roundness.unwrap_or(1.0), c.flattened_vertically),
+            c.angle,
+            s.particle / stamp,
+        )),
+        None => tip,
+    };
     let picture = tip.as_ref().map(|t| (t.width as f32, t.height as f32));
     let mut b = match tip {
         Some(t) => tip_brush(&procraft_engine::abr::AbrTip { name: c.name.clone(), ..t }),
@@ -438,6 +451,9 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
     if let Some(px) = c.size {
         brushfile::set_sizes(&mut b, px * ABR_SIZE_PER_PIXEL, Some(0.01));
     }
+    if let Some((s, area, stamp)) = spray {
+        csp_spray(&mut b, s, area, stamp, c.spacing);
+    }
     csp_pen(&mut b, &c.pen);
     if let Some(t) = &c.taper {
         csp_taper(&mut b, t);
@@ -454,6 +470,110 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
         b.set_setting("grain_depth_jitter", d.random.map_or(0.0, |least| 1.0 - least));
     }
     b
+}
+
+/// Gives `b` a Clip Studio spray: its stamp `stamp` pixels across holding one particle in its middle
+/// (see [`spray_tip`]), as many to a place as the density says (up to our 16), each thrown at
+/// random as far as the `area` the particles fall in reaches (nearer the middle the more they
+/// gather), turned as the particles are. The sub tool's spacing goes by the area; none (the app's
+/// own), ours.
+fn csp_spray(b: &mut Brush, s: &procraft_engine::csp::CspSpray, area: f32, stamp: f32, spacing: Option<f32>) {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    brushfile::set_sizes(b, stamp * ABR_SIZE_PER_PIXEL, Some(0.01));
+    // the particle carries the tip's roundness: the area is round
+    b.shape.roundness = 1.0;
+    b.shape.follow = if s.follows { 1.0 } else { 0.0 };
+    b.shape.rotation = (s.angle - if s.follows { FRAC_PI_2 } else { 0.0 }).rem_euclid(TAU);
+    b.shape.scatter = s.random_turn.clamp(0.0, 1.0);
+    b.shape.count = s.density.clamp(1, 16);
+    // fewer with less pressure (down to the share it leaves), and at random
+    if let Some(d) = &s.density_by {
+        use procraft_engine::brush::PressureCurve;
+        b.pressure_curves.set(PressureCurve::Count, d.pressure.as_ref().map(|p| csp_curve(&p.points, p.least)));
+        b.set_setting("count_jitter", d.random.map_or(0.0, |least| 1.0 - least.clamp(0.0, 1.0)));
+    }
+    // (sprayed, a ribbon's spacing has nothing to go by: left to us, as a tip is)
+    let spacing = spacing.map_or(Brush::round_pen().spacing, |s| s * area / stamp.max(1e-3));
+    b.spacing = Brush::spacing_within_reach(spacing);
+    let gathered = 1.0 - 0.5 * s.bias.max(0.0);
+    let control = jitter_control(b, 0.5 * area / stamp.max(1e-3) * gathered);
+    b.set_setting("jitter_lateral", control);
+    b.set_setting("jitter_linear", control);
+}
+
+/// A sprayed tip's picture: one particle of `share` of its width in its middle, the tip's picture
+/// (or, round, a disc of the tip's hardness) made that small, flattened by its roundness (top to
+/// bottom if `flattened.1`, else side to side) and turned by its `angle`. Each pixel is the mean
+/// of 16 places in it, so a particle a few pixels across keeps its ink.
+fn spray_tip(
+    particle: Option<&procraft_engine::abr::AbrTip>,
+    hardness: f32,
+    flattened: (f32, bool),
+    angle: f32,
+    share: f32,
+) -> procraft_engine::abr::AbrTip {
+    const PLACES: usize = 4;
+    let n = TEXTURE_SIZE;
+    let side = (n as f32 * share.clamp(0.0, 1.0)).max(1.0);
+    let middle = n as f32 / 2.0;
+    let roundness = flattened.0.clamp(0.01, 1.0);
+    let (wide, tall) = if flattened.1 { (1.0, roundness) } else { (roundness, 1.0) };
+    let fitted = particle.map(fitted);
+    // the particle at (x, y), each -0.5 to 0.5 across it: the picture between its pixels, or the disc
+    let soft = (0.5 * (1.0 - hardness.clamp(0.0, 1.0))).max(0.75 / side);
+    let at = |x: f32, y: f32| -> f32 {
+        if x.abs() > 0.5 || y.abs() > 0.5 {
+            return 0.0;
+        }
+        match &fitted {
+            Some(pixels) => {
+                let (u, v) = ((x + 0.5) * n as f32 - 0.5, (y + 0.5) * n as f32 - 0.5);
+                let (x0, y0) = (u.floor(), v.floor());
+                let (fx, fy) = (u - x0, v - y0);
+                let get = |i: f32, j: f32| {
+                    if i < 0.0 || j < 0.0 || i >= n as f32 || j >= n as f32 {
+                        0.0
+                    } else {
+                        f32::from(pixels.get(j as usize * n + i as usize).copied().unwrap_or(0)) / 255.0
+                    }
+                };
+                let top = get(x0, y0) * (1.0 - fx) + get(x0 + 1.0, y0) * fx;
+                let bottom = get(x0, y0 + 1.0) * (1.0 - fx) + get(x0 + 1.0, y0 + 1.0) * fx;
+                top * (1.0 - fy) + bottom * fy
+            }
+            None => ((0.5 - x.hypot(y)) / soft + 0.5).clamp(0.0, 1.0),
+        }
+    };
+    let (cos, sin) = (angle.cos(), angle.sin());
+    let pixels = (0..n * n)
+        .map(|i| {
+            let (px, py) = ((i % n) as f32 - middle, (i / n) as f32 - middle);
+            // nothing past the particle's reach
+            if px.hypot(py) > side * 0.75 + 2.0 {
+                return 0;
+            }
+            let mut sum = 0.0;
+            for k in 0..PLACES * PLACES {
+                let (dx, dy) =
+                    (((k % PLACES) as f32 + 0.5) / PLACES as f32, ((k / PLACES) as f32 + 0.5) / PLACES as f32);
+                let (x, y) = (px + dx, py + dy);
+                // back through the turn, then the flattening, into the particle's own square
+                let (lx, ly) = (x * cos + y * sin, -x * sin + y * cos);
+                sum += at(lx / (side * wide), ly / (side * tall));
+            }
+            (sum / (PLACES * PLACES) as f32 * 255.0).round() as u8
+        })
+        .collect();
+    procraft_engine::abr::AbrTip { name: String::new(), spacing: None, width: n as u32, height: n as u32, pixels }
+}
+
+/// Our jitter's control that throws a stamp of `b` at most `amount` of its diameters away: our
+/// jitter throws a stamp up to its control to the power 2.2 times the scale, of half its diagonal
+/// (for a round stamp a little over 0.7 of its diameter).
+fn jitter_control(b: &Brush, amount: f32) -> f32 {
+    use procraft_engine::stroke::JITTER_FILE_SCALE;
+    let reach = 0.5 * (1.0 + b.shape.roundness * b.shape.roundness).sqrt();
+    (amount / reach / JITTER_FILE_SCALE).powf(1.0 / 2.2).clamp(0.0, 1.0)
 }
 
 /// A Clip Studio source's curve as ours: `least` and up to all of it, as the curve goes. Its points
@@ -979,11 +1099,7 @@ fn eased_root(curve: &Curve) -> Curve {
 /// (its amount of diameters, up to as far as our jitter reaches) and as the pressure lets it.
 fn krita_scatter(b: &mut Brush, s: &procraft_engine::krita::KritaScatter) {
     use procraft_engine::brush::PressureCurve;
-    use procraft_engine::stroke::JITTER_FILE_SCALE;
-    // our jitter throws a stamp up to its control to the power 2.2 times the scale, of half its
-    // diagonal: for a round stamp a little over 0.7 of its diameter
-    let reach = 0.5 * (1.0 + b.shape.roundness * b.shape.roundness).sqrt();
-    let control = (s.amount / reach / JITTER_FILE_SCALE).powf(1.0 / 2.2).clamp(0.0, 1.0);
+    let control = jitter_control(b, s.amount);
     let curve = s.pressure.as_deref().map(Curve::new);
     for (on, key, by) in [
         (s.along, "jitter_linear", PressureCurve::LinearJitter),
@@ -1994,6 +2110,63 @@ mod tests {
         let pattern = CspTexture { pngs: vec![crate::project::rgba_png(5, 5, &dither)], width: None, scale: None, ..t };
         let b = csp_brush(&CspBrush { texture: Some(pattern), ..c });
         assert_eq!((b.grain.scale, shown(&b, "grain_filtering")), (5.0, 0.0));
+    }
+
+    #[test]
+    fn a_sprayed_sub_tool_lays_its_particles_about_each_place() {
+        use procraft_engine::csp::{CspBrush, CspSpray};
+        use procraft_engine::stroke::JITTER_FILE_SCALE;
+        let spray = CspSpray {
+            particle: 10.0,
+            density: 24,
+            density_by: None,
+            bias: -1.0,
+            angle: 0.0,
+            random_turn: 0.5,
+            follows: false,
+        };
+        let c = CspBrush {
+            name: "Spray".into(),
+            size: Some(40.0),
+            hardness: Some(1.0),
+            spacing: Some(0.2),
+            spray: Some(spray.clone()),
+            ..Default::default()
+        };
+        let b = csp_brush(&c);
+        // a stamp as wide as the area, its particle (a quarter of it) in its middle
+        let pixels = &b.shape.source.as_ref().unwrap().pixels;
+        let n = TEXTURE_SIZE;
+        let at = |x: usize, y: usize| pixels[y * n + x];
+        assert_eq!(at(n / 2, n / 2), 255);
+        assert!(at(n / 2 + n / 8 - 4, n / 2) > 200 && at(n / 2, n / 2 - n / 8 + 4) > 200);
+        assert_eq!((at(n / 2 + n / 8 + 4, n / 2), at(4, 4)), (0, 0));
+        // as many to a place as ours lays, turned half way at random, the area round
+        assert_eq!((b.shape.count, b.shape.scatter, b.shape.roundness), (16, 0.5, 1.0));
+        assert!((b.spacing - 0.2).abs() < 1e-5, "{}", b.spacing);
+        // each thrown as far as half the area, either way along the stroke and across it
+        let reach = |b: &Brush| JITTER_FILE_SCALE * b.setting("jitter_lateral").powf(2.2) * 0.5 * 2f32.sqrt();
+        assert!((reach(&b) - 0.5).abs() < 1e-3, "{}", reach(&b));
+        assert_eq!(b.setting("jitter_linear"), b.setting("jitter_lateral"));
+        // a particle larger than the area: the stamp as large as it, thrown half the area (a
+        // quarter of the stamp), spaced by the area still
+        let big = csp_brush(&CspBrush { spray: Some(CspSpray { particle: 80.0, ..spray.clone() }), ..c.clone() });
+        assert!((big.max_size / b.max_size - 2.0).abs() < 1e-4, "{} {}", big.max_size, b.max_size);
+        assert!((reach(&big) - 0.25).abs() < 1e-3, "{}", reach(&big));
+        assert!((big.spacing - 0.1).abs() < 1e-5, "{}", big.spacing);
+        // gathered to the middle: thrown half as far
+        let gathered = csp_brush(&CspBrush { spray: Some(CspSpray { bias: 1.0, ..spray.clone() }), ..c.clone() });
+        assert!((reach(&gathered) - 0.25).abs() < 1e-3, "{}", reach(&gathered));
+        // fewer with less pressure, down to a fifth, and some at random
+        let by = procraft_engine::csp::CspDynamics {
+            pressure: Some(procraft_engine::csp::CspCurve { points: vec![(0.0, 0.0), (1.0, 1.0)], least: 0.2 }),
+            random: Some(0.6),
+            ..Default::default()
+        };
+        let pressed = csp_brush(&CspBrush { spray: Some(CspSpray { density_by: Some(by), ..spray }), ..c });
+        let curve = pressed.pressure_curves.get(procraft_engine::brush::PressureCurve::Count).unwrap();
+        assert!((curve.eval(0.0) - 0.2).abs() < 0.02 && (curve.eval(1.0) - 1.0).abs() < 0.02);
+        assert!((pressed.setting("count_jitter") - 0.4).abs() < 1e-5);
     }
 
     #[test]
