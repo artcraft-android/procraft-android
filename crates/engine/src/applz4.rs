@@ -20,6 +20,7 @@ pub fn decode(data: &[u8], limit: usize) -> Option<Vec<u8>> {
                 }
                 let block = data.get(at + 12..at.checked_add(12)?.checked_add(comp)?)?;
                 let goal = out.len() + raw;
+                out.reserve(raw);
                 block_into(block, &mut out, goal)?;
                 at += 12 + comp;
             }
@@ -96,13 +97,28 @@ fn decode_block(src: &[u8], out: &mut Vec<u8>, limit: usize) -> Option<()> {
         if offset == 0 || out.len().checked_add(length)? > goal {
             return None;
         }
-        // byte by byte: the match may overlap what it writes
-        for k in 0..length {
-            let b = *out.get(start + k)?;
-            out.push(b);
-        }
+        copy_match(out, start, length);
     }
     Some(())
+}
+
+/// Appends `length` bytes to `out` copied from `start` on, as if one at a time: a match nearer than
+/// its length repeats what it begins with. Done as whole runs: its first period, then from the
+/// match's own start runs doubling in length (whole periods each, so they line up), rather than a
+/// byte at a time (a layer's clear stretches are matches thousands of bytes long).
+fn copy_match(out: &mut Vec<u8>, start: usize, length: usize) {
+    out.reserve(length);
+    let offset = out.len() - start;
+    let first = length.min(offset);
+    out.extend_from_within(start..start + first);
+    let at = out.len() - first;
+    let (mut written, mut left) = (first, length - first);
+    while left > 0 {
+        let n = left.min(written);
+        out.extend_from_within(at..at + n);
+        written += n;
+        left -= n;
+    }
 }
 
 /// Encodes `data` in the framing, each block compressed (or stored, when that is smaller).
@@ -149,7 +165,22 @@ fn compress_block(src: &[u8]) -> Vec<u8> {
             // extend the match, stopping short of the block's literal tail
             let max = src.len() - LAST_LITERALS;
             let mut len = 4;
-            while i + len < max && src.get(candidate + len) == src.get(i + len) {
+            // eight bytes at a time while they agree (a clear stretch matches for thousands), the
+            // first that differs found in the eight, else a byte at a time near the end
+            let read8 =
+                |at: usize| src.get(at..at + 8).and_then(|b| <[u8; 8]>::try_from(b).ok()).map(u64::from_le_bytes);
+            let mut differs = false;
+            while i + len + 8 <= max {
+                let (Some(a), Some(b)) = (read8(candidate + len), read8(i + len)) else { break };
+                let d = a ^ b;
+                if d != 0 {
+                    len += (d.trailing_zeros() / 8) as usize;
+                    differs = true;
+                    break;
+                }
+                len += 8;
+            }
+            while !differs && i + len < max && src.get(candidate + len) == src.get(i + len) {
                 len += 1;
             }
             emit(&mut out, src.get(anchor..i).unwrap_or(&[]), Some(((i - candidate) as u16, len)));
@@ -194,6 +225,44 @@ fn emit(out: &mut Vec<u8>, literals: &[u8], m: Option<(u16, usize)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layer_like_data_round_trips_whatever_its_runs() {
+        // clear stretches, painted runs and noise, at lengths around the eight-byte steps
+        let mut data = Vec::new();
+        let mut seed = 7u32;
+        for k in 0..400usize {
+            match k % 3 {
+                0 => data.extend(std::iter::repeat_n(0u8, k * 13 % 997 + 1)),
+                1 => data.extend([30u8, 60, 200, 255].repeat(k % 37 + 1)),
+                _ => data.extend((0..k % 23 + 1).map(|_| {
+                    seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    (seed >> 16) as u8
+                })),
+            }
+        }
+        let packed = encode(&data);
+        assert!(packed.len() < data.len() / 2);
+        assert_eq!(decode(&packed, data.len()).as_deref(), Some(data.as_slice()));
+    }
+
+    #[test]
+    fn a_match_is_copied_as_one_byte_at_a_time_would() {
+        // the old way, a byte at a time, against runs: every offset and length up to 70
+        for offset in 1..20 {
+            for length in 1..70 {
+                let mut seed: Vec<u8> = (0..30u8).map(|b| b.wrapping_mul(37).wrapping_add(11)).collect();
+                let mut byte_wise = seed.clone();
+                let start = seed.len() - offset;
+                for k in 0..length {
+                    let b = byte_wise[start + k];
+                    byte_wise.push(b);
+                }
+                copy_match(&mut seed, start, length);
+                assert_eq!(seed, byte_wise, "offset {offset}, length {length}");
+            }
+        }
+    }
 
     #[test]
     fn data_round_trips() {

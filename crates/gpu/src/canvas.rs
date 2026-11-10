@@ -8941,6 +8941,29 @@ fn ink_bounds(t: &Thumbnail) -> Option<[u32; 4]> {
 
 /// The pixels of a thumbnail that `painted` holds for, as [x0, y0, x1, y1); none if none.
 fn painted_bounds(t: &Thumbnail, painted: impl Fn([u8; 4]) -> bool) -> Option<[u32; 4]> {
+    painted_bounds_of(&t.rgba, t.width, painted)
+}
+
+/// [`painted_bounds`] of pixels `width` wide, a row at a time: a row's first and last painted
+/// pixels only widen the box.
+fn painted_bounds_of(rgba: &[u8], width: u32, painted: impl Fn([u8; 4]) -> bool) -> Option<[u32; 4]> {
+    let mut b: Option<[u32; 4]> = None;
+    for (y, row) in rgba.chunks_exact(width.max(1) as usize * 4).enumerate() {
+        let pixels = row.as_chunks::<4>().0;
+        let Some(first) = pixels.iter().position(|p| painted(*p)) else { continue };
+        let last = pixels.iter().rposition(|p| painted(*p)).unwrap_or(first);
+        let (x0, x1, y) = (first as u32, last as u32 + 1, y as u32);
+        b = Some(match b {
+            Some([bx0, by0, bx1, _]) => [bx0.min(x0), by0, bx1.max(x1), y + 1],
+            None => [x0, y, x1, y + 1],
+        });
+    }
+    b
+}
+
+/// The old [`painted_bounds`], a pixel at a time: what [`painted_bounds_of`] must still give.
+#[cfg(test)]
+fn painted_bounds_slowly(t: &Thumbnail, painted: impl Fn([u8; 4]) -> bool) -> Option<[u32; 4]> {
     let mut b: Option<[u32; 4]> = None;
     for (i, px) in t.rgba.as_chunks::<4>().0.iter().enumerate() {
         if painted(*px) {
@@ -9039,10 +9062,11 @@ struct Pictures {
 impl Pictures {
     /// Of a layer's pixels (premultiplied RGBA, `width` x `height`).
     fn of(rgba: &[u8], width: u32, height: u32) -> Pictures {
-        let full = Thumbnail { width, height, rgba: rgba.to_vec() };
-        let whole = shrink(&full, PARKED_PICTURE_SIDE);
-        let painted = alpha_bounds(&full);
-        let drawn = painted.map(|b| shrink(&crop(&full, b), PARKED_PICTURE_SIDE));
+        // read where they are, the layer neither copied nor cut out first (a large one is many
+        // megabytes, and an undo brings one back and parks another)
+        let whole = shrink_part(rgba, width, [0, 0, width, height], PARKED_PICTURE_SIDE);
+        let painted = painted_bounds_of(rgba, width, |[_, _, _, alpha]| alpha > 0);
+        let drawn = painted.map(|b| shrink_part(rgba, width, b, PARKED_PICTURE_SIDE));
         let bounds =
             painted.map(|[x0, y0, x1, y1]| IRect { x0: x0 as i32, y0: y0 as i32, x1: x1 as i32, y1: y1 as i32 });
         Pictures { whole, drawn, bounds }
@@ -9051,6 +9075,70 @@ impl Pictures {
 
 /// A picture box-filtered to fit `side` pixels (never enlarged).
 fn shrink(t: &Thumbnail, side: u32) -> Thumbnail {
+    shrink_part(&t.rgba, t.width, [0, 0, t.width, t.height], side)
+}
+
+/// Part [x0, y0, x1, y1) of a picture `width` wide (its rows in `rgba`), box-filtered to fit `side`
+/// pixels (never enlarged): each pixel the rounded mean of those that fall in it, as [`shrink`]
+/// was before, but which column each source column goes to worked out once, the counts by row
+/// and column, and clear pixels (nothing to add) passed over.
+fn shrink_part(rgba: &[u8], width: u32, [x0, y0, x1, y1]: [u32; 4], side: u32) -> Thumbnail {
+    let (pw, ph) = ((x1.saturating_sub(x0)).max(1), (y1.saturating_sub(y0)).max(1));
+    let scale = (side.max(1) as f32 / pw.max(ph) as f32).min(1.0);
+    let w = ((pw as f32 * scale).round() as u32).clamp(1, pw);
+    let h = ((ph as f32 * scale).round() as u32).clamp(1, ph);
+    let stride = width as usize * 4;
+    let row_of = |y: u32| {
+        let start = (y0 + y) as usize * stride + x0 as usize * 4;
+        rgba.get(start..start + pw as usize * 4).unwrap_or_default()
+    };
+    if (w, h) == (pw, ph) {
+        let mut out = Vec::with_capacity(pw as usize * ph as usize * 4);
+        for y in 0..ph {
+            out.extend_from_slice(row_of(y));
+        }
+        return Thumbnail { width: pw, height: ph, rgba: out };
+    }
+    let columns: Vec<usize> = (0..pw).map(|x| (u64::from(x) * u64::from(w) / u64::from(pw)) as usize).collect();
+    let mut per_column = vec![0u32; w as usize];
+    for &c in &columns {
+        if let Some(n) = per_column.get_mut(c) {
+            *n += 1;
+        }
+    }
+    let mut per_row = vec![0u32; h as usize];
+    let mut sums = vec![0u32; w as usize * h as usize * 4];
+    let line = w as usize * 4;
+    for y in 0..ph {
+        let ty = (u64::from(y) * u64::from(h) / u64::from(ph)) as usize;
+        if let Some(n) = per_row.get_mut(ty) {
+            *n += 1;
+        }
+        let Some(out) = sums.get_mut(ty * line..(ty + 1) * line) else { continue };
+        for (px, &tx) in row_of(y).as_chunks::<4>().0.iter().zip(&columns) {
+            if u32::from_ne_bytes(*px) == 0 {
+                continue;
+            }
+            if let Some(sum) = out.get_mut(tx * 4..tx * 4 + 4) {
+                for (s, v) in sum.iter_mut().zip(px) {
+                    *s += u32::from(*v);
+                }
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    for (row, rn) in sums.chunks(line).zip(&per_row) {
+        for (sum, cn) in row.as_chunks::<4>().0.iter().zip(&per_column) {
+            let n = (rn * cn).max(1);
+            out.extend(sum.iter().map(|v| ((v + n / 2) / n) as u8));
+        }
+    }
+    Thumbnail { width: w, height: h, rgba: out }
+}
+
+/// The old [`shrink`], a pixel at a time: what [`shrink_part`] must still give.
+#[cfg(test)]
+fn shrink_slowly(t: &Thumbnail, side: u32) -> Thumbnail {
     let (width, height) = (t.width.max(1), t.height.max(1));
     let scale = (side.max(1) as f32 / width.max(height) as f32).min(1.0);
     let w = ((width as f32 * scale).round() as u32).clamp(1, width);
@@ -9869,6 +9957,45 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pictures of every size up to a few dozen, painted in patches with clear between (as a
+    /// layer is), the shrunken ones and the painted bounds as the old pixel-at-a-time ways give.
+    #[test]
+    fn a_parked_layers_pictures_are_made_as_they_were() {
+        let mut seed = 12345u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 16) as u8
+        };
+        for (w, h) in [(1, 1), (3, 7), (40, 9), (64, 64), (193, 50), (37, 410), (500, 300)] {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in 0..h {
+                for x in 0..w {
+                    // patches: clear where (x / 5 + y / 3) is odd
+                    if (x / 5 + y / 3) % 2 == 0 && (x + y) % 11 != 0 {
+                        let i = ((y * w + x) * 4) as usize;
+                        let a = next();
+                        rgba[i..i + 4].copy_from_slice(&[next().min(a), next().min(a), next().min(a), a]);
+                    }
+                }
+            }
+            let t = Thumbnail { width: w, height: h, rgba };
+            for side in [1, 5, 16, 64, 192, 1000] {
+                let fast = shrink(&t, side);
+                let slow = shrink_slowly(&t, side);
+                assert_eq!((fast.width, fast.height), (slow.width, slow.height), "{w}x{h} to {side}");
+                assert!(fast.rgba == slow.rgba, "{w}x{h} to {side}: pixels differ");
+            }
+            let alpha = |p: [u8; 4]| p[3] > 0;
+            let bounds = painted_bounds(&t, alpha);
+            assert_eq!(bounds, painted_bounds_slowly(&t, alpha), "{w}x{h} bounds");
+            if let Some(b) = bounds {
+                let fast = shrink_part(&t.rgba, w, b, 64);
+                let slow = shrink_slowly(&crop(&t, b), 64);
+                assert!(fast.rgba == slow.rgba && fast.width == slow.width, "{w}x{h} part");
+            }
+        }
+    }
 
     std::thread_local! {
         /// The label of textures this thread can't make, as past the GPU's memory.
