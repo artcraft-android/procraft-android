@@ -2630,6 +2630,33 @@ fn a_smudge_wider_than_what_it_carries_still_drags_colour() {
 }
 
 #[test]
+fn a_smudge_mixes_blue_into_yellow_as_paint_does() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // yellow on the left, blue on the right, the blue dragged into the yellow at half strength:
+    // where they meet the mix leans green, as paint does, not to an even grey
+    let mut doc = Document::new(512, 128);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // (an even grey mixed as light: halfway, green is no more than the others)
+    for (rgb, x) in [([1.0, 0.85, 0.0], 128.0), ([0.0, 0.15, 1.0], 384.0)] {
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, rgb, 1.0));
+        canvas.add_stamps(&(0..128).map(|y| dot(Vec2::new(x, y as f32), 128.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+    }
+    canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 0.5));
+    canvas.add_stamps(&(0..=80).map(|i| dot(Vec2::new(300.0 - i as f32 * 2.0, 64.0), 40.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    let greenest = (60..320)
+        .map(|x| pixel(&layer, 512, x, 64))
+        .map(|[r, g, b, _]| i32::from(g) - i32::from(r.max(b)))
+        .max()
+        .unwrap();
+    assert!(greenest > 15, "{greenest}");
+}
+
+#[test]
 fn a_wet_stroke_redrawn_whole_is_laid_once() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
