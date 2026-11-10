@@ -3,6 +3,9 @@
 A plugin is a `.procraft-plugin` file. Someone imports it on the Plugins page, and it has a card there
 with Turn on, Turn off and Remove. With none on, the app is as it always was.
 
+Making one doesn't change the app or its code here, and needs no access to this repository: you
+build the file on your own computer (see [Building it](#building-it)) and share the file itself.
+
 For now the samples in [`plugins/`](../plugins) also come inside the app, packed: see
 [The plugins that come with the app](#the-plugins-that-come-with-the-app).
 
@@ -299,6 +302,12 @@ Code stops if it runs out of steps, asks for too much memory, traps, or gives an
 sense. Whatever it was handed goes on as it came.
 
 ## Building it
+
+1. Get a copy of this repository: `git clone https://github.com/artcraft-android/procraft`, or
+   Code > Download ZIP on its GitHub page. It stays on your computer; nothing you do in it comes
+   back here.
+2. For code, install Rust (from rustup.rs). Python 3 runs the packer.
+3. Put your plugin's folder under `plugins/` in that copy, then, from the copy's top folder:
 
 ```
 rustup target add wasm32-unknown-unknown
