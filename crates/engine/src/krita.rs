@@ -29,9 +29,38 @@ pub struct KritaBrush {
     /// Each stamp turns at random: a round tip drawn with holes or noise in it, which Krita makes
     /// afresh for each stamp.
     pub turns_at_random: bool,
-    /// Whether pen pressure changes the size and the opacity.
-    pub pressure_size: bool,
-    pub pressure_opacity: bool,
+    /// Each stamp turned at random as far as this share of a half turn either way (0 none).
+    pub rotation_random: f32,
+    /// Each stroke turned at random as it starts.
+    pub rotation_per_stroke: bool,
+    /// The tip turns the way the pen leans.
+    pub follows_tilt: bool,
+    /// Each stamp mirrored at random, across and up.
+    pub mirror: (bool, bool),
+    /// Its stamps scattered from the stroke, if they are.
+    pub scatter: Option<KritaScatter>,
+    /// Its colour changed at random, each stamp and each stroke: how far its hue turns (a share of
+    /// a half turn either way), its saturation goes, and it lightens and darkens (0 to 1 each).
+    pub color_random: [f32; 4],
+    pub color_per_stroke: [f32; 4],
+    /// Each stamp flattened at random as far as this (0 round always, 1 as far as flat), and by
+    /// the pressure along its curve, if it is.
+    pub ratio_random: f32,
+    pub ratio_pressure: Option<Vec<Vec2>>,
+    /// How much of its colour, not the background colour, pressure lets it paint (its amount
+    /// along its curve), if pressure does: the rest is the background colour.
+    pub mix_pressure: Option<Vec<Vec2>>,
+    /// How pen pressure scales its size, opacity and flow (see [`pressure_curve`]): the curve,
+    /// none where pressure doesn't.
+    pub size_pressure: Option<Vec<Vec2>>,
+    pub opacity_pressure: Option<Vec<Vec2>>,
+    pub flow_pressure: Option<Vec<Vec2>>,
+    /// Its opacity and flow (0 to 1).
+    pub opacity: f32,
+    pub flow: f32,
+    /// Painted in wash mode (its stamps build up towards its opacity), as Krita takes a preset that
+    /// doesn't say; else built up (each stamp lays its opacity times its flow).
+    pub wash: bool,
     /// The texture it paints through, if it has one.
     pub texture: Option<KritaTexture>,
     /// The pictures it names that neither it nor its bundle holds in a form we read (pictures that
@@ -40,6 +69,16 @@ pub struct KritaBrush {
     pub missing: Vec<String>,
     /// Its masking brush, if it has one turned on whose tip can be had.
     pub masking: Option<Box<KritaMasking>>,
+}
+
+/// How a preset scatters its stamps: each as far as `amount` diameters (at most), at random, along
+/// the stroke and across it as it says; as far as pressure lets it, by its curve, if it does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KritaScatter {
+    pub amount: f32,
+    pub pressure: Option<Vec<Vec2>>,
+    pub along: bool,
+    pub across: bool,
 }
 
 /// A preset's masking brush: a second brush painted along the same stroke, its coverage combined
@@ -63,13 +102,71 @@ pub struct KritaMasking {
 }
 
 /// A preset's texture: its picture, its scale (1 the picture's own size), how strongly it shows (0
-/// to 1) and whether it is inverted.
+/// to 1), how its picture becomes the mask each stamp is combined with
+/// ([`KritaTexture::mask_value`]) and by what ([`KritaTexture::op`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct KritaTexture {
     pub picture: KritaPicture,
     pub scale: f32,
     pub strength: f32,
     pub invert: bool,
+    /// Krita's number for how the mask combines with a stamp (0 multiply, 1 subtract...).
+    pub mode: u32,
+    /// Taken off the mask (-1 to 1), and its contrast (1 as it is).
+    pub brightness: f32,
+    pub contrast: f32,
+    /// The mask value taken as its middle (0.5 leaves it as it is).
+    pub neutral: f32,
+    /// Outside `left..=right` (0 to 1) the mask is none (policy 1) or whole (2); 0 keeps it.
+    pub cutoff: (u32, f32, f32),
+}
+
+impl KritaTexture {
+    /// The mask at a pixel of the picture `grey` light and `alpha` opaque (both 0 to 1), as Krita
+    /// makes it: what is clear counts as white; then made lighter, of more contrast, inverted,
+    /// its middle moved to the neutral point, and cut outside the cutoffs. 1 keeps a stamp's
+    /// paint where it multiplies, and takes it all where it subtracts.
+    pub fn mask_value(&self, grey: f32, alpha: f32) -> f32 {
+        let alpha = alpha.clamp(0.0, 1.0);
+        let lit = grey.clamp(0.0, 1.0) * alpha + (1.0 - alpha);
+        let mut m = ((lit - self.brightness - 0.5) * self.contrast + 0.5).clamp(0.0, 1.0);
+        if self.invert {
+            m = 1.0 - m;
+        }
+        let n = self.neutral.clamp(0.0, 1.0);
+        let m = if n >= 1.0 || (n > 0.0 && m <= n) { m / (2.0 * n) } else { 0.5 + (m - n) / (2.0 - 2.0 * n) };
+        let (policy, left, right) = self.cutoff;
+        let outside = m < left || m > right;
+        match policy {
+            1 if outside => 0.0,
+            2 if outside => 1.0,
+            _ => m.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Krita's name for how the mask combines with a stamp (as a masking brush's ops are named);
+    /// none for the lightness and gradient modes, which colour the stamp instead.
+    pub fn op(&self) -> Option<&'static str> {
+        const OPS: [&str; 16] = [
+            "multiply",
+            "subtract",
+            "",
+            "",
+            "darken",
+            "overlay",
+            "dodge",
+            "burn",
+            "linear_dodge",
+            "linear_burn",
+            "hard_mix_photoshop",
+            "hard_mix_softer_photoshop",
+            "height",
+            "linear_height",
+            "height_photoshop",
+            "linear_height_photoshop",
+        ];
+        OPS.get(self.mode as usize).copied().filter(|op| !op.is_empty())
+    }
 }
 
 /// A texture's picture.
@@ -204,8 +301,8 @@ fn preset(kpp: &[u8], file: &dyn Fn(&Wanted<'_>) -> Option<Vec<u8>>, most_text: 
                 size: value("MaskingBrush/MasterSizeCoeff").filter(|s| *s > 0.0).unwrap_or(1.0),
                 opacity: unit("OpacityValue"),
                 flow: unit("FlowValue"),
-                opacity_pressure: pressure_curve(&own, "Opacity"),
-                flow_pressure: pressure_curve(&own, "Flow"),
+                opacity_pressure: pressure_curve(&own, "Opacity", false),
+                flow_pressure: pressure_curve(&own, "Flow", false),
                 brush,
             }));
         } else {
@@ -233,6 +330,18 @@ fn brush_of<'p>(
         .unwrap_or((KritaTip::Round { hardness: 1.0, roundness: 1.0 }, false));
     let flag = |name: &str| param(name).is_some_and(|v| v == "true");
     let value = |name: &str| param(name).and_then(real);
+    // an option switched on with its pen settings, and driven by a sensor
+    let on = |option: &str| flag(&format!("Pressure{option}")) && param(&format!("{option}UseCurve")) != Some("false");
+    let driven = |option: &str, id: &str| on(option) && sensors_of(param, option).contains(&id);
+    let turned = value("RotationValue").unwrap_or(1.0).clamp(0.0, 1.0);
+    let amount = |option: &str| value(&format!("{option}Value")).unwrap_or(1.0).clamp(0.0, 1.0);
+    // the hue turned, the saturation, the value (lighter or darker) and Darken (darker), each
+    // as far as its amount where `id` drives it
+    let colours = |id: &str| {
+        let by = |option: &str| if driven(option, id) { amount(option) } else { 0.0 };
+        let value = by("v");
+        [by("h"), by("s"), value, value.max(by("Darken"))]
+    };
     // the texture's picture: in the preset as the base64 of its base64 (older ones); else one it
     // names, by its file's name, its own and its sum
     let inline = || {
@@ -269,6 +378,15 @@ fn brush_of<'p>(
                 .unwrap_or(1.0)
                 .clamp(0.0, 1.0),
             invert: flag("Texture/Pattern/Invert"),
+            mode: value("Texture/Pattern/TexturingMode").map_or(0, |m| m.clamp(0.0, 255.0) as u32),
+            brightness: value("Texture/Pattern/Brightness").unwrap_or(0.0).clamp(-1.0, 1.0),
+            contrast: value("Texture/Pattern/Contrast").unwrap_or(1.0).clamp(0.0, 16.0),
+            neutral: value("Texture/Pattern/NeutralPoint").unwrap_or(0.5).clamp(0.0, 1.0),
+            cutoff: (
+                value("Texture/Pattern/CutoffPolicy").map_or(0, |p| p.clamp(0.0, 2.0) as u32),
+                value("Texture/Pattern/CutoffLeft").unwrap_or(0.0) / 255.0,
+                value("Texture/Pattern/CutoffRight").unwrap_or(255.0) / 255.0,
+            ),
         });
     KritaBrush {
         name: called.to_owned(),
@@ -278,31 +396,90 @@ fn brush_of<'p>(
         // the tip's rotation by the Drawing Angle sensor, alone or among others
         follows: flag("PressureRotation") && param("RotationSensor").is_some_and(|s| s.contains("drawingangle")),
         turns_at_random,
-        pressure_size: param("PressureSize").is_none_or(|v| v == "true"),
-        pressure_opacity: param("PressureOpacity").is_some_and(|v| v == "true"),
+        rotation_random: if driven("Rotation", "fuzzy") { turned } else { 0.0 },
+        rotation_per_stroke: driven("Rotation", "fuzzystroke") && turned > 0.0,
+        follows_tilt: driven("Rotation", "ascension"),
+        mirror: if driven("Mirror", "fuzzy") {
+            (flag("HorizontalMirrorEnabled"), flag("VerticalMirrorEnabled"))
+        } else {
+            (false, false)
+        },
+        scatter: on("Scatter")
+            .then(|| KritaScatter {
+                amount: value("ScatterValue").or_else(|| value("Scattering/Amount")).unwrap_or(1.0).clamp(0.0, 5.0),
+                pressure: pressure_curve(param, "Scatter", true),
+                along: flag("Scattering/AxisX"),
+                across: flag("Scattering/AxisY"),
+            })
+            .filter(|s| (s.along || s.across) && s.amount > 0.0),
+        color_random: colours("fuzzy"),
+        color_per_stroke: colours("fuzzystroke"),
+        ratio_random: if driven("Ratio", "fuzzy") { amount("Ratio") } else { 0.0 },
+        ratio_pressure: pressure_curve(param, "Ratio", true),
+        mix_pressure: pressure_curve(param, "Mix", true)
+            .map(|points| points.into_iter().map(|p| Vec2::new(p.x, p.y * amount("Mix"))).collect()),
+        size_pressure: pressure_curve(param, "Size", true),
+        opacity_pressure: pressure_curve(param, "Opacity", false),
+        flow_pressure: pressure_curve(param, "Flow", false),
+        // none of either would lay nothing, which no brush is made to (older presets keep a flow
+        // of 0 from before brushes had one): taken as all of it
+        opacity: value("OpacityValue").filter(|v| *v > 0.0).unwrap_or(1.0).clamp(0.0, 1.0),
+        flow: value("FlowValue").filter(|v| *v > 0.0).unwrap_or(1.0).clamp(0.0, 1.0),
+        wash: param("PaintOpAction").and_then(real) != Some(1.0),
         texture,
         missing,
         masking: None,
     }
 }
 
-/// How pen pressure scales the setting `option` (`Opacity`, `Flow`) of those `param` gives, if it
-/// does: its pressure sensor's curve (alone or among other sensors, which aren't taken), the one
-/// its sensors share if they share one, a straight line if it keeps none. None if its pen settings
-/// are switched off (`UseCurve`) or the setting is turned off; only a `false` turns it off, as
-/// older presets keep its sensors and not whether it is on.
-fn pressure_curve<'p>(param: &dyn Fn(&str) -> Option<&'p str>, option: &str) -> Option<Vec<Vec2>> {
+/// How pen pressure scales the setting `option` (`Size`, `Opacity`, `Flow`) of those `param`
+/// gives, as Krita reads it, if it does: none if the setting can be switched off (`checkable`,
+/// as the size can) and isn't on, if its pen settings are off (`UseCurve`), or if its sensors
+/// leave pressure out (with none, pressure drives it). The curve is the one its sensors share,
+/// as they do unless told not to: its own key, else the sensor read last, else the older keys,
+/// else a straight line; or, not shared, the pressure sensor's own.
+fn pressure_curve<'p>(param: &dyn Fn(&str) -> Option<&'p str>, option: &str, checkable: bool) -> Option<Vec<Vec2>> {
     let key = |what: &str| param(&format!("{option}{what}"));
-    if param(&format!("Pressure{option}")) == Some("false") || key("UseCurve") == Some("false") {
+    if (checkable && param(&format!("Pressure{option}")) != Some("true")) || key("UseCurve") == Some("false") {
         return None;
     }
-    let sensors = xml::parse(key("Sensor")?)?;
-    let pressure =
-        std::iter::once(&sensors).chain(sensors.all("ChildSensor")).find(|s| s.attribute("id") == Some("pressure"))?;
-    let shared = key("UseSameCurve").filter(|v| *v == "true").and_then(|_| key("commonCurve"));
-    let own = pressure.child("curve").map(|c| c.text.as_str());
-    let points = shared.or(own).map(curve_points).unwrap_or_default();
+    let definition = key("Sensor").unwrap_or_default();
+    let root = xml::parse(definition);
+    let sensors: Vec<&Element> = match &root {
+        Some(r) if r.attribute("id") == Some("sensorslist") => r.all("ChildSensor").into_iter().collect(),
+        Some(r) => vec![r],
+        None => Vec::new(),
+    };
+    let pressure = sensors.iter().find(|s| s.attribute("id") == Some("pressure"));
+    if pressure.is_none() && !sensors.is_empty() {
+        return None;
+    }
+    let older = (param(&format!("Custom{option}")) == Some("true")).then(|| param(&format!("Curve{option}"))).flatten();
+    let last = sensors.last().and_then(|s| s.child("curve")).map(|c| c.text.as_str());
+    let read = if definition.contains("curve") { last } else { older };
+    let own = pressure.and_then(|s| s.child("curve")).map(|c| c.text.as_str());
+    let text = if key("UseSameCurve") != Some("false") { key("commonCurve").or(read) } else { own };
+    let points = text.map(curve_points).unwrap_or_default();
     Some(if points.len() >= 2 { points } else { vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)] })
+}
+
+/// The sensors that drive `option` of those `param` gives, by their names (pressure, where it
+/// names none, as Krita takes it).
+fn sensors_of<'p>(param: &dyn Fn(&str) -> Option<&'p str>, option: &str) -> Vec<&'p str> {
+    let named: Vec<&'p str> = match param(&format!("{option}Sensor")) {
+        Some(text) => {
+            let ids = |tag: &str| {
+                let at = format!("<{tag} id=\"");
+                text.match_indices(&at)
+                    .filter_map(|(i, _)| text.get(i + at.len()..).and_then(|rest| rest.split('"').next()))
+                    .collect::<Vec<&'p str>>()
+            };
+            let root = ids("params");
+            if root.first() == Some(&"sensorslist") { ids("ChildSensor") } else { root }
+        }
+        None => Vec::new(),
+    };
+    if named.is_empty() { vec!["pressure"] } else { named }
 }
 
 /// A curve's points as a preset keeps them: `x,y;x,y;...`.
@@ -463,11 +640,13 @@ fn picture_tip(bytes: Vec<u8>, file: &str, name: Option<&str>) -> Option<KritaTi
 /// How an auto brush's paint falls off from its middle to its edge.
 #[derive(Clone, Debug, PartialEq)]
 enum Falloff {
-    /// Solid to its fade's share of the way out, then down in a straight line.
+    /// Solid inside its fades, then down to nothing at the edge: a circle with the square of the
+    /// way out, a rectangle in a straight line along the side it is nearer the edge of.
     Fade,
-    /// Blurred: a little at a fade of 1, a bell over the whole tip at 0.
+    /// Blurred (Gaussian): hard at a fade of 1, a bell at 0 (a rectangle stays soft at 1).
     Blur,
-    /// As its softness curve says: how much paints at each share of the way out.
+    /// As its softness curve says: a circle by the square of the way out, a rectangle by both
+    /// sides' shares at once.
     Curve(crate::curve::Curve),
 }
 
@@ -513,9 +692,12 @@ fn auto_tip(brush: &Element) -> Option<(KritaTip, bool)> {
     let speckled = m.density < 1.0 || m.randomness > 0.0;
     let plain = !m.rectangle && (m.spikes == 2 || round) && !speckled;
     let fade = (m.fades.0 + m.fades.1) / 2.0;
+    // our round tip paints half halfway between its hardness and its edge: a hardness of twice
+    // where Krita's paints half, less 1, matches it there (a softer blur than that is drawn)
     Some(match (&m.falloff, plain) {
-        (Falloff::Fade, true) => (KritaTip::Round { hardness: fade, roundness: m.ratio }, false),
-        // our round tip paints half no nearer the middle than halfway out: a softer blur is drawn
+        (Falloff::Fade, true) => {
+            (KritaTip::Round { hardness: 2.0 * faded_half(fade) - 1.0, roundness: m.ratio }, false)
+        }
         (Falloff::Blur, true) if blur_half(fade) >= 0.5 => {
             (KritaTip::Round { hardness: 2.0 * blur_half(fade) - 1.0, roundness: m.ratio }, false)
         }
@@ -564,26 +746,51 @@ fn paint_at(m: &Mask, u: f32, v: f32) -> f32 {
     let (hfade, vfade) = m.fades;
     if m.rectangle {
         let (u, v) = (u.abs(), v.abs());
+        if u.max(v) > 1.0 {
+            return 0.0;
+        }
         return match &m.falloff {
-            Falloff::Fade => straight(u, hfade) * straight(v, vfade),
-            Falloff::Blur => blurred(u, hfade) * blurred(v, vfade),
-            Falloff::Curve(c) if u.max(v) <= 1.0 => c.eval(u.max(v)),
-            Falloff::Curve(_) => 0.0,
+            // the side it is nearer the edge of, as far as it is past its fade
+            Falloff::Fade => straight(u, hfade).min(straight(v, vfade)),
+            Falloff::Blur => blurred_side(u, hfade) * blurred_side(v, vfade),
+            // each side's share through the curve, less the curve from the other end
+            Falloff::Curve(c) => {
+                let side = |t: f32| c.eval(t) * (1.0 - c.eval(1.0 - t));
+                side(u) * side(v)
+            }
         };
     }
-    let out = u.hypot(v);
+    // the square of the way out (1 at the edge)
+    let n = u * u + v * v;
+    if n > 1.0 {
+        return 0.0;
+    }
     match &m.falloff {
-        // solid inside the ellipse of the fades, down in a straight line to the edge along each ray
+        // solid inside the ellipse of the fades; past it down with the square of the way out, to
+        // nothing at the edge (all the way from the middle, a fade of 0)
         Falloff::Fade => {
-            if out <= 0.0 {
-                return 1.0;
+            let share = |w: f32, fade: f32| {
+                if w == 0.0 {
+                    0.0
+                } else if fade <= 1e-4 {
+                    f32::INFINITY
+                } else {
+                    (w / fade) * (w / fade)
+                }
+            };
+            let nf = share(u, hfade) + share(v, vfade);
+            if nf < 1.0 {
+                1.0
+            } else if !nf.is_finite() {
+                1.0 - n
+            } else if nf - n <= 1e-6 {
+                0.0
+            } else {
+                (1.0 - n * (nf - 1.0) / (nf - n)).clamp(0.0, 1.0)
             }
-            let inner = 1.0 / (u / (out * hfade.max(1e-4))).hypot(v / (out * vfade.max(1e-4)));
-            straight(out, inner)
         }
-        Falloff::Blur => blurred(out, (hfade + vfade) / 2.0),
-        Falloff::Curve(c) if out <= 1.0 => c.eval(out),
-        Falloff::Curve(_) => 0.0,
+        Falloff::Blur => blurred_round(n.sqrt(), (hfade + vfade) / 2.0),
+        Falloff::Curve(c) => c.eval(n),
     }
 }
 
@@ -598,20 +805,43 @@ fn straight(t: f32, inner: f32) -> f32 {
     }
 }
 
-/// A blurred edge's paint at `t` of the way out: a disc reaching 0.9 of the way at a fade of 1
-/// (softened over a tenth), blurred more as the fade falls, to a bell over the whole tip at 0;
-/// nothing left at the edge.
-fn blurred(t: f32, fade: f32) -> f32 {
-    let edge = (0.9 * fade).max(0.05);
-    let blur = (1.0 - edge) / 2.2;
+/// A blurred edge's paint at `t` of the way out (along a ray or a side): an edge `edge` of the way
+/// out blurred over `blur` (both shares of the way out), as a share of the paint in the middle;
+/// none past the tip's edge.
+fn gaussian(t: f32, edge: f32, blur: f32) -> f32 {
+    if t >= 1.0 {
+        return 0.0;
+    }
+    let blur = blur.max(1e-4);
     let at = |t: f32| erf((edge - t) / blur) + erf((edge + t) / blur);
-    (at(t) / at(0.0)).clamp(0.0, 1.0)
+    let middle = at(0.0);
+    if middle > 0.0 { (at(t) / middle).clamp(0.0, 1.0) } else { 0.0 }
 }
 
-/// How far out a blurred edge at `fade` ([`blurred`]) paints half. Our round tip paints half
-/// halfway between its hardness and its edge, so a hardness of twice that less 1 matches it.
+/// A blurred circle's paint at `t` of the way out, its fade `fade` (1 the hardest): as Krita's,
+/// its edge coming in by 0.676 of what the fade lacks of 1, blurred over 0.382 of it.
+fn blurred_round(t: f32, fade: f32) -> f32 {
+    let soft = (1.0 - fade).clamp(1e-6, 1.0 - 1e-6);
+    gaussian(t, 1.0 - 0.6761 * soft, 0.3825 * soft)
+}
+
+/// A blurred rectangle's paint at `t` of the way out along a side, that side's fade `fade`: as
+/// Krita's, its edge in by half of 1 less half the fade, blurred over 0.283 of it (so still soft
+/// at a fade of 1).
+fn blurred_side(t: f32, fade: f32) -> f32 {
+    let soft = 1.0 - fade.clamp(0.0, 1.0) / 2.0;
+    gaussian(t, 1.0 - 0.5 * soft, 0.2828 * soft)
+}
+
+/// How far out a blurred circle at `fade` ([`blurred_round`]) paints half.
 fn blur_half(fade: f32) -> f32 {
-    (0..=200).map(|i| i as f32 / 200.0).find(|t| blurred(*t, fade) <= 0.5).unwrap_or(1.0)
+    (0..=200).map(|i| i as f32 / 200.0).find(|t| blurred_round(*t, fade) <= 0.5).unwrap_or(1.0)
+}
+
+/// How far out a faded circle at `fade` (solid inside it, then down with the square of the way
+/// out) paints half.
+fn faded_half(fade: f32) -> f32 {
+    ((1.0 + fade * fade) / 2.0).sqrt()
 }
 
 /// The error function, to within about 1e-7 (Abramowitz and Stegun's 7.1.26).
@@ -769,9 +999,15 @@ mod tests {
         assert_eq!(b.name, "Soft Ellipse");
         assert_eq!(b.spacing, Some(0.15));
         assert_eq!(b.angle, 0.5);
-        assert!(!b.pressure_size && b.pressure_opacity && !b.turns_at_random && b.missing.is_empty());
+        // its size not on; its opacity, which can't be switched off, by pressure (none other said)
+        assert!(
+            b.size_pressure.is_none() && b.opacity_pressure.is_some() && !b.turns_at_random && b.missing.is_empty()
+        );
         match b.tip {
-            KritaTip::Round { hardness, roundness } => assert!((hardness - 0.3).abs() < 1e-6 && roundness == 0.5),
+            // a fade of 0.3 (the two's mean) paints half where our hardness 0.48 does
+            KritaTip::Round { hardness, roundness } => {
+                assert!((hardness - (2.0 * faded_half(0.3) - 1.0)).abs() < 1e-6 && roundness == 0.5)
+            }
             t => panic!("{t:?}"),
         }
         // a rectangle is drawn, solid in the middle and gone at the edge
@@ -786,13 +1022,14 @@ mod tests {
         // its numbers may have been saved with commas
         let comma = r#"<Brush type="auto_brush" spacing="0,25" useAutoSpacing="0"><MaskGenerator type="circle" ratio="0,5" hfade="0,5" vfade="0,5"/></Brush>"#;
         let b = read_preset(&kpp(&preset("Comma", comma, true)), &|_| None).unwrap();
-        assert_eq!((b.spacing, b.tip), (Some(0.25), KritaTip::Round { hardness: 0.5, roundness: 0.5 }));
+        let hardness = 2.0 * faded_half(0.5) - 1.0;
+        assert_eq!((b.spacing, b.tip), (Some(0.25), KritaTip::Round { hardness, roundness: 0.5 }));
         // so is one saved as "rct", half as tall
         let (t, _) = drawn(
             r#"<Brush type="auto_brush"><MaskGenerator type="rct" id="soft" ratio="0.5" softness_curve="0,1;1,0"/></Brush>"#,
         );
         assert_eq!((t.width as usize, t.height as usize), (n, n / 2));
-        assert!(t.pixels[n / 4 * n + n / 2] > 250 && t.pixels[n / 4 * n] < 10);
+        assert!(t.pixels[n / 4 * n + n / 2] > 230 && t.pixels[n / 4 * n] < 10);
     }
 
     #[test]
@@ -814,12 +1051,16 @@ mod tests {
         // with a ratio of 1 the points are a plain circle: our round tip
         let plain = r#"<Brush type="auto_brush"><MaskGenerator type="circle" ratio="1" spikes="9" hfade="0.8" vfade="0.8"/></Brush>"#;
         let b = read_preset(&kpp(&preset("Ink", plain, true)), &|_| None).unwrap();
-        assert!(matches!(b.tip, KritaTip::Round { hardness, .. } if (hardness - 0.8).abs() < 1e-6));
-        // a softness curve is how much paints at each share of the way out: a ring here
+        assert!(
+            matches!(b.tip, KritaTip::Round { hardness, .. } if (hardness - (2.0 * faded_half(0.8) - 1.0)).abs() < 1e-6)
+        );
+        // a softness curve is how much paints at each share of the square of the way out: a ring
+        // at the square root of 0.75 here
         let (ring, _) = drawn(
             r#"<Brush type="auto_brush"><MaskGenerator type="circle" id="soft" hfade="0" vfade="0" softness_curve="0,0;0.5,0;0.75,1;1,0"/></Brush>"#,
         );
-        assert!(at(&ring, 0.0, 0.0) < 10 && at(&ring, 0.75, 0.0) > 240 && at(&ring, 0.99, 90.0) < 40);
+        assert!(at(&ring, 0.0, 0.0) < 10 && at(&ring, 0.866, 0.0) > 240 && at(&ring, 0.99, 90.0) < 40);
+        assert!(at(&ring, 0.75, 0.0) < 200, "{}", at(&ring, 0.75, 0.0));
         // holes: about the share it keeps, and the stamps turn (Krita's holes move each stamp)
         let (holes, turns) = drawn(
             r#"<Brush type="auto_brush" density="0.5"><MaskGenerator type="circle" hfade="1" vfade="1"/></Brush>"#,
@@ -846,11 +1087,169 @@ mod tests {
             KritaTip::Round { hardness, .. } => hardness,
             t => panic!("{t:?}"),
         };
-        assert!((hardness("1") - 0.8).abs() < 0.02, "{}", hardness("1"));
+        assert!((hardness("1") - 1.0).abs() < 0.02, "{}", hardness("1"));
         assert!(hardness("0.8") > 0.3 && hardness("0.8") < hardness("1"));
         let KritaTip::Image(bell) = blur("0") else { panic!() };
         assert!(at(&bell, 0.0, 0.0) == 255 && at(&bell, 0.4, 0.0) < 170 && at(&bell, 0.98, 0.0) < 5);
-        assert!(blurred(1.0, 0.0) < 0.01 && blurred(1.0, 1.0) < 0.01 && (blurred(0.9, 1.0) - 0.5).abs() < 0.01);
+        assert!(blurred_round(1.0, 0.0) == 0.0 && blurred_round(0.99, 1.0) > 0.99);
+    }
+
+    #[test]
+    fn a_preset_keeps_its_opacity_flow_size_curve_and_painting_mode() {
+        let round = r#"<Brush type="auto_brush"><MaskGenerator type="circle"/></Brush>"#;
+        let sized_with = |sized: bool, params: &[(&str, &str)]| {
+            let extra: String = params.iter().map(|(k, v)| param(k, v)).collect();
+            let xml = preset("Pencil", round, sized).replace("</Preset>", &format!("{extra}</Preset>"));
+            read_preset(&kpp(&xml), &|_| None).unwrap()
+        };
+        let read = |params: &[(&str, &str)]| sized_with(false, params);
+        let pts = |v: &[(f32, f32)]| Some(v.iter().map(|&(x, y)| Vec2::new(x, y)).collect::<Vec<_>>());
+        // built up, its opacity and flow as kept; a flow of nothing (left from before) as all
+        let b = read(&[("OpacityValue", "0.4"), ("FlowValue", "0"), ("PaintOpAction", "1")]);
+        assert_eq!((b.opacity, b.flow, b.wash), (0.4, 1.0, false));
+        // washed unless it says it builds up
+        assert!(read(&[]).wash && read(&[("PaintOpAction", "2")]).wash);
+        // its size by its own curve once switched on, and not when it isn't
+        let curve = r#"<!DOCTYPE params> <params id="pressure"> <curve>0,0.4;1,1;</curve> </params> "#;
+        let sized = sized_with(true, &[("SizeSensor", curve)]);
+        assert_eq!(sized.size_pressure, pts(&[(0.0, 0.4), (1.0, 1.0)]));
+        assert_eq!(read(&[("SizeSensor", curve)]).size_pressure, None);
+    }
+
+    #[test]
+    fn a_preset_turns_mirrors_and_scatters_its_stamps_as_it_says() {
+        let round = r#"<Brush type="auto_brush"><MaskGenerator type="circle"/></Brush>"#;
+        let read = |params: &[(&str, &str)]| {
+            let extra: String = params.iter().map(|(k, v)| param(k, v)).collect();
+            let xml = preset("Spray", round, false).replace("</Preset>", &format!("{extra}</Preset>"));
+            read_preset(&kpp(&xml), &|_| None).unwrap()
+        };
+        let sensor = |id: &str| format!(r#"<!DOCTYPE params> <params id="{id}"/> "#);
+        let turned =
+            |id: &str| read(&[("PressureRotation", "true"), ("RotationSensor", &sensor(id)), ("RotationValue", "0.6")]);
+        // at random each stamp, as far as its amount of a half turn; or each stroke; or with the lean
+        let b = turned("fuzzy");
+        assert_eq!((b.rotation_random, b.rotation_per_stroke, b.follows_tilt), (0.6, false, false));
+        assert!(turned("fuzzystroke").rotation_per_stroke && turned("ascension").follows_tilt);
+        assert_eq!(read(&[("PressureRotation", "false"), ("RotationSensor", &sensor("fuzzy"))]).rotation_random, 0.0);
+        // mirrored at random, across only
+        let mirrored =
+            [("PressureMirror", "true"), ("HorizontalMirrorEnabled", "true"), ("VerticalMirrorEnabled", "false")];
+        let fuzzy = sensor("fuzzy");
+        assert_eq!(read(&[&mirrored[..], &[("MirrorSensor", fuzzy.as_str())]].concat()).mirror, (true, false));
+        // scattered both ways by the pressure, half a diameter at most; the older key for the amount
+        let s = read(&[
+            ("PressureScatter", "true"),
+            ("ScatterValue", "0.5"),
+            ("Scattering/AxisX", "true"),
+            ("Scattering/AxisY", "true"),
+        ])
+        .scatter
+        .unwrap();
+        assert_eq!((s.amount, s.along, s.across), (0.5, true, true));
+        assert_eq!(s.pressure, Some(vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)]));
+        let old = read(&[("PressureScatter", "true"), ("Scattering/Amount", "2"), ("Scattering/AxisY", "true")])
+            .scatter
+            .unwrap();
+        assert_eq!((old.amount, old.along, old.across), (2.0, false, true));
+        // at random alone, its pressure leaves it be; switched off, none
+        let random =
+            read(&[("PressureScatter", "true"), ("ScatterSensor", &sensor("fuzzy")), ("Scattering/AxisX", "true")]);
+        assert_eq!(random.scatter.unwrap().pressure, None);
+        assert_eq!(read(&[("ScatterValue", "0.5"), ("Scattering/AxisX", "true")]).scatter, None);
+        // its colour at random: the hue each stamp, the value (lighter and darker) and Darken each
+        // stroke; flattened at random, and by the pressure
+        let coloured = read(&[
+            ("Pressureh", "true"),
+            ("hSensor", &sensor("fuzzy")),
+            ("hValue", "0.4"),
+            ("Pressurev", "true"),
+            ("vSensor", &sensor("fuzzystroke")),
+            ("vValue", "0.3"),
+            ("PressureDarken", "true"),
+            ("DarkenSensor", &sensor("fuzzystroke")),
+            ("PressureRatio", "true"),
+            ("RatioSensor", &sensor("fuzzy")),
+            ("RatioValue", "0.7"),
+        ]);
+        assert_eq!((coloured.color_random, coloured.color_per_stroke), ([0.4, 0.0, 0.0, 0.0], [0.0, 0.0, 0.3, 1.0]));
+        assert_eq!((coloured.ratio_random, coloured.ratio_pressure.is_none()), (0.7, true));
+        // its colour by the pressure, the background colour where light: at most 0.8 of its own
+        let mixed = read(&[("PressureMix", "true"), ("MixValue", "0.8")]);
+        assert_eq!(mixed.mix_pressure, Some(vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.8)]));
+        let pressed = read(&[("PressureRatio", "true")]);
+        assert_eq!(
+            (pressed.ratio_random, pressed.ratio_pressure),
+            (0.0, Some(vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)]))
+        );
+    }
+
+    #[test]
+    fn a_texture_s_mask_is_made_as_krita_makes_it() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let plain = KritaTexture {
+            picture: KritaPicture::Encoded(Vec::new()),
+            scale: 1.0,
+            strength: 1.0,
+            invert: false,
+            mode: 0,
+            brightness: 0.0,
+            contrast: 1.0,
+            neutral: 0.5,
+            cutoff: (0, 0.0, 1.0),
+        };
+        // as it is, what is clear counting as white
+        assert!(near(plain.mask_value(0.3, 1.0), 0.3) && near(plain.mask_value(0.0, 0.0), 1.0));
+        assert!(near(plain.mask_value(0.0, 0.5), 0.5));
+        // lighter, of more contrast, inverted, its middle moved
+        assert!(near(KritaTexture { brightness: 0.3, ..plain.clone() }.mask_value(0.3, 1.0), 0.0));
+        assert!(near(KritaTexture { contrast: 2.0, ..plain.clone() }.mask_value(0.6, 1.0), 0.7));
+        assert!(near(KritaTexture { invert: true, ..plain.clone() }.mask_value(0.3, 1.0), 0.7));
+        let moved = KritaTexture { neutral: 0.25, ..plain.clone() };
+        assert!(near(moved.mask_value(0.25, 1.0), 0.5) && near(moved.mask_value(0.625, 1.0), 0.75));
+        // cut outside its cutoffs: to none, or to all of it
+        let cut = |policy| KritaTexture { cutoff: (policy, 0.2, 0.8), ..plain.clone() };
+        assert!(cut(1).mask_value(0.1, 1.0) == 0.0 && cut(2).mask_value(0.9, 1.0) == 1.0);
+        assert!(near(cut(1).mask_value(0.5, 1.0), 0.5) && near(cut(0).mask_value(0.1, 1.0), 0.1));
+        // how it combines, by its number
+        let op = |mode| KritaTexture { mode, ..plain.clone() }.op();
+        assert_eq!(
+            (op(0), op(1), op(2), op(4), op(15), op(16)),
+            (Some("multiply"), Some("subtract"), None, Some("darken"), Some("linear_height_photoshop"), None)
+        );
+    }
+
+    #[test]
+    fn an_auto_tip_falls_off_as_krita_s_does() {
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        let mask = |rectangle: bool, falloff: Falloff, fade: f32| Mask {
+            rectangle,
+            falloff,
+            ratio: 1.0,
+            fades: (fade, fade),
+            spikes: 2,
+            density: 1.0,
+            randomness: 0.0,
+        };
+        // a faded circle: solid inside its fade, then down with the square of the way out
+        let circle = mask(false, Falloff::Fade, 0.5);
+        assert!(paint_at(&circle, 0.4, 0.0) == 1.0 && paint_at(&circle, 1.01, 0.0) == 0.0);
+        assert!(near(paint_at(&circle, 0.75, 0.0), (1.0 - 0.5625) / 0.75), "{}", paint_at(&circle, 0.75, 0.0));
+        assert!(near(paint_at(&mask(false, Falloff::Fade, 0.0), 0.5, 0.0), 0.75));
+        // as our round tip, it paints half where Krita's does
+        assert!(near(faded_half(0.5), (0.625f32).sqrt()) && faded_half(1.0) == 1.0);
+        // a faded rectangle: the side nearer its edge, not both at once
+        let square = mask(true, Falloff::Fade, 0.5);
+        assert!(near(paint_at(&square, 0.75, 0.75), 0.5) && near(paint_at(&square, 0.75, 0.2), 0.5));
+        // blurred: a circle hard at a fade of 1, its edge in and wider as the fade falls; a
+        // rectangle still soft at 1, half at three quarters of the way out
+        assert!(blurred_round(0.98, 1.0) > 0.99 && near(blur_half(0.0), 0.403));
+        assert!(near(blurred_side(0.75, 1.0), 0.5) && blurred_side(1.0, 1.0) == 0.0);
+        // a softness curve (straight down from the middle): a circle by the square of the way out,
+        // a rectangle by each side's share through it and the curve from the other end
+        let down = || Falloff::Curve(crate::curve::Curve::new(&[Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0)]));
+        assert!(near(paint_at(&mask(false, down(), 1.0), 0.5, 0.0), 0.75));
+        assert!(near(paint_at(&mask(true, down(), 1.0), 0.5, 0.0), 0.25));
     }
 
     #[test]
@@ -974,7 +1373,7 @@ mod tests {
         let KritaTip::Image(t) = &m.brush.tip else { panic!("{:?}", m.brush.tip) };
         assert_eq!(t.pixels, [10, 20, 30]);
         assert_eq!((m.brush.spacing, m.brush.angle, m.brush.name.as_str()), (Some(0.4), 0.5, "Grainy"));
-        assert!(!m.brush.pressure_size && m.brush.pressure_opacity);
+        assert!(m.brush.size_pressure.is_none() && m.brush.opacity_pressure.is_some());
         assert!(m.brush.texture.is_none() && m.brush.masking.is_none());
         // an auto brush masks too, as our round tip; the op saved or not
         let auto = [(
@@ -984,7 +1383,7 @@ mod tests {
         let b = read_preset(&kpp(&masked(&auto, "linear_dodge", "1,5")), &|_| None).unwrap();
         let m = b.masking.unwrap();
         assert_eq!((m.op.as_str(), m.size, m.opacity, m.flow), ("linear_dodge", 1.5, 1.0, 1.0));
-        assert_eq!(m.brush.tip, KritaTip::Round { hardness: 0.5, roundness: 1.0 });
+        assert_eq!(m.brush.tip, KritaTip::Round { hardness: 2.0 * faded_half(0.5) - 1.0, roundness: 1.0 });
         let none = masked(&auto, "", "0").replace(&param("MaskingBrush/MaskingCompositeOp", ""), "");
         let m = read_preset(&kpp(&none), &|_| None).unwrap().masking.unwrap();
         assert_eq!((m.op.as_str(), m.size), ("multiply", 1.0));
@@ -1023,7 +1422,8 @@ mod tests {
             ),
         ]);
         assert_eq!(m.opacity_pressure, pts(&[(0.6, 0.0), (0.83, 0.38), (0.9, 0.74)]));
-        assert_eq!(m.flow_pressure, None);
+        // the flow, of which nothing is said: by the pressure, straight, as Krita takes it
+        assert_eq!(m.flow_pressure, pts(&[(0.0, 0.0), (1.0, 1.0)]));
         // among other sensors; the shared curve when they share one; straight when it keeps none
         let listed = r#"<!DOCTYPE params> <params id="sensorslist"> <ChildSensor id="fade" length="100"/> <ChildSensor id="pressure"> <curve>0,0;1,0.5;</curve> </ChildSensor> </params> "#;
         let m = read(&[("PressureFlow", "true"), ("FlowUseCurve", "true"), ("FlowSensor", listed)]);
@@ -1038,15 +1438,18 @@ mod tests {
         let plain = r#"<!DOCTYPE params> <params id="pressure"/> "#;
         let m = read(&[("PressureFlow", "true"), ("FlowUseCurve", "true"), ("FlowSensor", plain)]);
         assert_eq!(m.flow_pressure, pts(&[(0.0, 0.0), (1.0, 1.0)]));
-        // on when not said to be off (older presets), so long as it has a sensor
-        let m = read(&[("FlowSensor", listed)]);
+        // the opacity and flow can't be switched off: a "false" for them is left from before
+        let m = read(&[("PressureFlow", "false"), ("FlowSensor", listed)]);
         assert_eq!(m.flow_pressure, pts(&[(0.0, 0.0), (1.0, 0.5)]));
-        assert_eq!(m.opacity_pressure, None);
-        // driven by something else, its pen settings off, or turned off: not by the pressure
+        // shared, the curve of the sensor read last; not shared, the pressure sensor's own
+        let after = r#"<!DOCTYPE params> <params id="sensorslist"> <ChildSensor id="pressure"> <curve>0,0;1,0.5;</curve> </ChildSensor> <ChildSensor id="fade"> <curve>0,1;1,0;</curve> </ChildSensor> </params> "#;
+        assert_eq!(read(&[("FlowSensor", after)]).flow_pressure, pts(&[(0.0, 1.0), (1.0, 0.0)]));
+        let own = read(&[("FlowUseSameCurve", "false"), ("FlowSensor", after)]);
+        assert_eq!(own.flow_pressure, pts(&[(0.0, 0.0), (1.0, 0.5)]));
+        // driven by something else, or its pen settings off: not by the pressure
         assert_eq!(read(&[("FlowUseCurve", "false"), ("FlowSensor", listed)]).flow_pressure, None);
         let fuzzy = r#"<!DOCTYPE params> <params id="fuzzy"/> "#;
         assert_eq!(read(&[("PressureOpacity", "true"), ("OpacitySensor", fuzzy)]).opacity_pressure, None);
-        assert_eq!(read(&[("PressureFlow", "false"), ("FlowSensor", listed)]).flow_pressure, None);
     }
 
     #[test]
@@ -1095,6 +1498,10 @@ mod tests {
                 param("Texture/Pattern/Scale", "0.35"),
                 param("Texture/Pattern/Strength", "0.8"),
                 param("Texture/Pattern/Invert", "true"),
+                param("Texture/Pattern/TexturingMode", "1"),
+                param("Texture/Pattern/Brightness", "0.3"),
+                param("Texture/Pattern/CutoffPolicy", "2"),
+                param("Texture/Pattern/CutoffLeft", "51"),
             ]
             .concat(),
         );
@@ -1103,6 +1510,8 @@ mod tests {
             (t.picture, t.scale, t.strength, t.invert),
             (KritaPicture::Encoded(picture.clone()), 0.35, 0.8, true)
         );
+        // how its mask is made and combines; what it doesn't say, as Krita leaves it
+        assert_eq!((t.mode, t.brightness, t.contrast, t.neutral, t.cutoff), (1, 0.3, 1.0, 0.5, (2, 0.2, 1.0)));
         // turned off: none
         let off = with(&[param("Texture/Pattern/Enabled", "false"), param("Texture/Pattern/Pattern", &twice)].concat());
         assert_eq!(read_preset(&kpp(&off), &|_| None).unwrap().texture, None);

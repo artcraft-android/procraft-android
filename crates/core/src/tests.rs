@@ -6499,7 +6499,9 @@ fn a_krita_preset_becomes_a_round_brush_with_its_settings() {
     let st = s.shared.lock();
     let b = &st.library[set].brushes[0];
     assert_eq!(b.name, "Soft Round");
-    assert!((b.spacing - 0.2).abs() < 1e-6 && (b.hardness - 0.25).abs() < 1e-6 && b.shape.roundness == 0.5);
+    // a fade of 0.25: our hardness paints half where Krita's fade does
+    let hardness = 2.0 * ((1.0f32 + 0.25 * 0.25) / 2.0).sqrt() - 1.0;
+    assert!((b.spacing - 0.2).abs() < 1e-6 && (b.hardness - hardness).abs() < 1e-6 && b.shape.roundness == 0.5);
     assert_eq!(b.pressure_size, 0.0);
     assert!(b.shape.source.is_none());
     // the texture as paper grain: 70 % strong, its 100 px tiles at half size
@@ -6571,7 +6573,7 @@ fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
     let tip = procraft_engine::base64::encode(&tip);
     let kpp = |op: &str| {
         let xml = format!(
-            r#"<Preset paintopid="paintbrush" name="Eroded" embedded_resources="1"><resources><resource md5sum="dd" filename="Debris.gbr" name="Debris" type="brushes"><![CDATA[{tip}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.1" useAutoSpacing="0"><MaskGenerator type="circle" hfade="0.8" vfade="0.8"/></Brush>]]></param><param name="MaskingBrush/Enabled"><![CDATA[true]]></param><param name="MaskingBrush/MaskingCompositeOp"><![CDATA[{op}]]></param><param name="MaskingBrush/UseMasterSize"><![CDATA[true]]></param><param name="MaskingBrush/MasterSizeCoeff"><![CDATA[0.5]]></param><param name="MaskingBrush/Preset/brush_definition"><![CDATA[<Brush md5sum="dd" type="gbr_brush" filename="Debris.gbr" spacing="0.3" useAutoSpacing="0"/>]]></param><param name="MaskingBrush/Preset/PressureSize"><![CDATA[false]]></param><param name="MaskingBrush/Preset/FlowValue"><![CDATA[0.4]]></param><param name="MaskingBrush/Preset/OpacityValue"><![CDATA[0.9]]></param></Preset>"#
+            r#"<Preset paintopid="paintbrush" name="Eroded" embedded_resources="1"><resources><resource md5sum="dd" filename="Debris.gbr" name="Debris" type="brushes"><![CDATA[{tip}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.1" useAutoSpacing="0"><MaskGenerator type="circle" hfade="0.8" vfade="0.8"/></Brush>]]></param><param name="MaskingBrush/Enabled"><![CDATA[true]]></param><param name="MaskingBrush/MaskingCompositeOp"><![CDATA[{op}]]></param><param name="MaskingBrush/UseMasterSize"><![CDATA[true]]></param><param name="MaskingBrush/MasterSizeCoeff"><![CDATA[0.5]]></param><param name="MaskingBrush/Preset/brush_definition"><![CDATA[<Brush md5sum="dd" type="gbr_brush" filename="Debris.gbr" spacing="0.3" useAutoSpacing="0"/>]]></param><param name="MaskingBrush/Preset/PressureSize"><![CDATA[false]]></param><param name="MaskingBrush/Preset/FlowValue"><![CDATA[0.4]]></param><param name="MaskingBrush/Preset/OpacityValue"><![CDATA[0.9]]></param><param name="MaskingBrush/Preset/OpacityUseCurve"><![CDATA[false]]></param><param name="MaskingBrush/Preset/FlowUseCurve"><![CDATA[false]]></param></Preset>"#
         );
         let chunk = |kind: &[u8], data: &[u8]| {
             let mut out = (data.len() as u32).to_be_bytes().to_vec();
@@ -6594,13 +6596,15 @@ fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
         let st = s.shared.lock();
         let b = &st.library[set as usize].brushes[0];
         // the main brush round; its second the masking tip, painting at the top and not the bottom
-        assert!(b.shape.source.is_none() && (b.hardness - 0.8).abs() < 1e-6);
+        let hardness = 2.0 * ((1.0f32 + 0.8 * 0.8) / 2.0).sqrt() - 1.0;
+        assert!(b.shape.source.is_none() && (b.hardness - hardness).abs() < 1e-6);
         let second = b.secondary.as_deref().unwrap();
         let shape = second.shape.source.as_ref().unwrap();
         let n = procraft_engine::textures::TEXTURE_SIZE;
         assert!(shape.pixels[n * n / 4 + n / 2] == 255 && shape.pixels[n * n * 3 / 4 + n / 2] == 0);
         assert_eq!(b.setting("dual_blend"), BlendMode::Subtract.id() as f32);
         // half the main brush's size at every slider, its own spacing, flow, opacity and pressure
+        // (its pen settings off for the opacity and flow, which would else follow the pressure)
         for slider in [0.0, 0.3, 1.0] {
             assert!((second.diameter(slider) / b.diameter(slider) - 0.5).abs() < 1e-4);
         }

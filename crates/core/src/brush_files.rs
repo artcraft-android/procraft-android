@@ -556,13 +556,8 @@ fn csp_pen(b: &mut Brush, pen: &procraft_engine::csp::CspPen) {
         match &d.pressure {
             // all of the opacity follows the curve, from what it leaves at none up, unwound
             Some(p) => {
-                let points: Vec<(f32, f32)> = csp_curve(&p.points, p.least)
-                    .points()
-                    .iter()
-                    .map(|v| (v.x, v.y.max(0.0).powf(1.0 / FLOW_POWER)))
-                    .collect();
                 b.pressure_opacity = if p.least < 1.0 { 1.0 } else { 0.0 };
-                b.opacity_curve = csp_curve(&points, 0.0);
+                b.opacity_curve = eased_root(&csp_curve(&p.points, p.least));
             }
             None => b.pressure_opacity = 0.0,
         }
@@ -825,7 +820,7 @@ fn tip_brush(t: &procraft_engine::abr::AbrTip) -> Brush {
 /// A brush of a Krita preset: its tip (round, or an image), spacing, angle, and what pressure
 /// changes.
 fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
-    use procraft_engine::krita::{KritaPicture, KritaTip};
+    use procraft_engine::krita::KritaTip;
     let image = match &k.tip {
         KritaTip::Round { .. } => None,
         KritaTip::Image(t) => Some(fitted(t)),
@@ -855,18 +850,58 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
         // a half turn either way: any angle
         b.shape.scatter = 1.0;
     }
-    if !k.pressure_size {
-        b.pressure_size = 0.0;
+    b.shape.scatter = b.shape.scatter.max(k.rotation_random);
+    if k.rotation_per_stroke {
+        b.shape.randomise = true;
     }
-    if k.pressure_opacity {
-        b.pressure_opacity = 1.0;
+    if k.follows_tilt {
+        b.shape.follow_azimuth = true;
     }
+    for (key, on) in [("flip_x", k.mirror.0), ("flip_y", k.mirror.1)] {
+        if on {
+            b.set_setting(key, 1.0);
+        }
+    }
+    if let Some(s) = &k.scatter {
+        krita_scatter(&mut b, s);
+    }
+    // its colour changed at random each stamp, or each stroke
+    for (keys, amounts) in [
+        (["stamp_hue", "stamp_saturation", "stamp_lightness", "stamp_darkness"], k.color_random),
+        (["stroke_hue", "stroke_saturation", "stroke_lightness", "stroke_darkness"], k.color_per_stroke),
+    ] {
+        for (key, amount) in keys.into_iter().zip(amounts) {
+            if amount > 0.0 {
+                b.set_setting(key, amount);
+            }
+        }
+    }
+    // flattened at random, or by the pressure
+    if k.ratio_random > 0.0 {
+        b.set_setting("roundness_jitter_y", k.ratio_random);
+    }
+    // the secondary colour (Krita's background) where pressure leaves its colour out
+    if let Some(points) = &k.mix_pressure {
+        let left: Vec<procraft_engine::geom::Vec2> =
+            points.iter().map(|p| procraft_engine::geom::Vec2::new(p.x, 1.0 - p.y.clamp(0.0, 1.0))).collect();
+        b.set_setting("pressure_secondary", 1.0);
+        b.pressure_curves.set(procraft_engine::brush::PressureCurve::Secondary, Some(Curve::new(&left)));
+    }
+    if let Some(points) = &k.ratio_pressure {
+        b.set_setting("pressure_roundness", 1.0);
+        b.pressure_curves.set(procraft_engine::brush::PressureCurve::Roundness, Some(Curve::new(points)));
+    }
+    // the size from nothing up to all of it along its pressure curve, if pressure drives it
+    match &k.size_pressure {
+        Some(points) => {
+            b.pressure_size = 1.0;
+            b.size_curve = Curve::new(points);
+        }
+        None => b.pressure_size = 0.0,
+    }
+    krita_paint(&mut b, k.opacity, k.flow, k.opacity_pressure.as_deref(), k.flow_pressure.as_deref(), k.wash);
     if let Some(t) = &k.texture {
-        let png = match &t.picture {
-            KritaPicture::Encoded(png) => png.clone(),
-            KritaPicture::Grey(g) => sized_gray_png(g.width, g.height, &g.pixels),
-        };
-        paper(&mut b, &[png], t.invert, t.strength, t.scale);
+        krita_paper(&mut b, t, &k.name);
     }
     // a masking brush is a dual brush's second: its size a share of this one's, its coverage
     // combined with this one's by the nearest of the modes
@@ -888,31 +923,132 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     b
 }
 
-/// Gives a masking brush's second how much it lays, as Krita's wash mode (the only one it masks
-/// in) has it: each stamp lays its flow, through its pressure curve, towards the most the stroke
-/// may reach, which is its opacity through its own.
-fn masking_paint(second: &mut Brush, m: &procraft_engine::krita::KritaMasking) {
-    use procraft_engine::brush::{FLOW_POWER, PressureCurve};
+/// Gives `b` a Krita preset's texture as its grain: the mask Krita makes of its picture (light
+/// keeping the paint where it multiplies), as deep as its strength, combined with each stamp by
+/// the nearest of the modes to Krita's.
+fn krita_paper(b: &mut Brush, t: &procraft_engine::krita::KritaTexture, name: &str) {
+    use procraft_engine::krita::KritaPicture;
+    let mask = |grey: f32, alpha: f32| (t.mask_value(grey / 255.0, alpha / 255.0) * 255.0).round() as u8;
+    let picture = match &t.picture {
+        KritaPicture::Encoded(png) => decode_picture(png).map(|(w, h, channels, buf)| {
+            let pixels = buf
+                .chunks_exact(channels.max(1))
+                .take(w * h)
+                .map(|px| {
+                    let get = |k: usize| f32::from(px.get(k).copied().unwrap_or(0));
+                    // Krita's grey: its own weights of red, green and blue, in 32nds
+                    let grey = || ((11.0 * get(0) + 16.0 * get(1) + 5.0 * get(2)) / 32.0).floor();
+                    match channels {
+                        1 => mask(get(0), 255.0),
+                        2 => mask(get(0), get(1)),
+                        3 => mask(grey(), 255.0),
+                        _ => mask(grey(), get(3)),
+                    }
+                })
+                .collect::<Vec<u8>>();
+            (w as u32, h as u32, pixels)
+        }),
+        KritaPicture::Grey(g) => {
+            Some((g.width, g.height, g.pixels.iter().map(|&v| mask(f32::from(v), 255.0)).collect()))
+        }
+    };
+    let Some((w, h, pixels)) = picture else { return };
+    paper(b, &[sized_gray_png(w, h, &pixels)], false, t.strength, t.scale);
+    if b.grain.source.is_none() {
+        return;
+    }
+    let mode = t.op().and_then(masking_mode).unwrap_or_else(|| {
+        log::warn!("Krita preset \"{name}\": texturing mode {} combines as multiply", t.mode);
+        procraft_engine::document::BlendMode::Multiply.id()
+    });
+    b.set_setting("grain_blend", mode as f32);
+}
+
+/// The curve that, eased as a stamp's opacity is (to the power
+/// [`procraft_engine::brush::FLOW_POWER`]), lays what `curve` says: its root, taken across it (at 17
+/// places and at its own points, so a straight one bends as it should).
+fn eased_root(curve: &Curve) -> Curve {
+    use procraft_engine::brush::FLOW_POWER;
     use procraft_engine::geom::Vec2;
-    second.max_opacity = 1.0;
-    second.flow = m.flow;
-    // a stamp lays its opacity's pressure to the power FLOW_POWER: the curve's root lays the curve
-    second.pressure_opacity = 0.0;
-    if let Some(points) = &m.flow_pressure {
-        let root: Vec<Vec2> = points.iter().map(|p| Vec2::new(p.x, p.y.max(0.0).powf(1.0 / FLOW_POWER))).collect();
-        second.pressure_opacity = 1.0;
-        second.opacity_curve = Curve::new(&root);
+    let places = (0..=16).map(|i| i as f32 / 16.0).chain(curve.points().iter().map(|p| p.x));
+    Curve::new(&places.map(|x| Vec2::new(x, curve.eval(x).max(0.0).powf(1.0 / FLOW_POWER))).collect::<Vec<_>>())
+}
+
+/// Gives `b` a Krita preset's scatter as jitter along the stroke and across it: as far at most
+/// (its amount of diameters, up to as far as our jitter reaches) and as the pressure lets it.
+fn krita_scatter(b: &mut Brush, s: &procraft_engine::krita::KritaScatter) {
+    use procraft_engine::brush::PressureCurve;
+    use procraft_engine::stroke::JITTER_FILE_SCALE;
+    // our jitter throws a stamp up to its control to the power 2.2 times the scale, of half its
+    // diagonal: for a round stamp a little over 0.7 of its diameter
+    let reach = 0.5 * (1.0 + b.shape.roundness * b.shape.roundness).sqrt();
+    let control = (s.amount / reach / JITTER_FILE_SCALE).powf(1.0 / 2.2).clamp(0.0, 1.0);
+    let curve = s.pressure.as_deref().map(Curve::new);
+    for (on, key, by) in [
+        (s.along, "jitter_linear", PressureCurve::LinearJitter),
+        (s.across, "jitter_lateral", PressureCurve::LateralJitter),
+    ] {
+        if on {
+            b.set_setting(key, control);
+            b.pressure_curves.set(by, curve.clone());
+        }
+    }
+}
+
+/// Gives a masking brush's second how much it lays, as Krita's wash mode (the only one it masks
+/// in) has it (see [`krita_paint`]).
+fn masking_paint(second: &mut Brush, m: &procraft_engine::krita::KritaMasking) {
+    krita_paint(second, m.opacity, m.flow, m.opacity_pressure.as_deref(), m.flow_pressure.as_deref(), true);
+}
+
+/// Gives `b` how much a Krita brush lays, its `opacity` and `flow` each scaled by its pressure
+/// curve, if it has one. In wash mode each stamp lays the flow, towards the most the stroke may
+/// reach, which is the opacity; built up, each stamp lays the opacity times the flow.
+fn krita_paint(
+    b: &mut Brush,
+    opacity: f32,
+    flow: f32,
+    opacity_pressure: Option<&[procraft_engine::geom::Vec2]>,
+    flow_pressure: Option<&[procraft_engine::geom::Vec2]>,
+    wash: bool,
+) {
+    use procraft_engine::brush::PressureCurve;
+    use procraft_engine::geom::Vec2;
+    b.max_opacity = 1.0;
+    let rooted = |points: &[Vec2]| eased_root(&Curve::new(points));
+    b.pressure_opacity = 0.0;
+    if !wash {
+        b.flow = opacity * flow;
+        // both curves at once, multiplied across
+        let laid: Option<Vec<Vec2>> = match (opacity_pressure, flow_pressure) {
+            (None, None) => None,
+            (Some(one), None) | (None, Some(one)) => Some(one.to_vec()),
+            (Some(o), Some(f)) => {
+                let (o, f) = (Curve::new(o), Curve::new(f));
+                Some((0..=16).map(|i| i as f32 / 16.0).map(|x| Vec2::new(x, o.eval(x) * f.eval(x))).collect())
+            }
+        };
+        if let Some(points) = laid {
+            b.pressure_opacity = 1.0;
+            b.opacity_curve = rooted(&points);
+        }
+        return;
+    }
+    b.flow = flow;
+    if let Some(points) = flow_pressure {
+        b.pressure_opacity = 1.0;
+        b.opacity_curve = rooted(points);
     }
     // the stroke builds up towards what its transfer lets through: the opacity, by the pressure
-    let most = match &m.opacity_pressure {
-        Some(points) => points.iter().map(|p| Vec2::new(p.x, p.y * m.opacity)).collect(),
-        None => vec![Vec2::new(0.0, m.opacity), Vec2::new(1.0, m.opacity)],
+    let most = match opacity_pressure {
+        Some(points) => points.iter().map(|p| Vec2::new(p.x, p.y * opacity)).collect(),
+        None => vec![Vec2::new(0.0, opacity), Vec2::new(1.0, opacity)],
     };
-    if m.opacity_pressure.is_some() || m.opacity < 1.0 {
-        second.set_setting("pressure_flow", 1.0);
-        second.pressure_curves.set(PressureCurve::Flow, Some(Curve::new(&most)));
+    if opacity_pressure.is_some() || opacity < 1.0 {
+        b.set_setting("pressure_flow", 1.0);
+        b.pressure_curves.set(PressureCurve::Flow, Some(Curve::new(&most)));
     }
-    second.set_setting("rendering_mode", 1.0);
+    b.set_setting("rendering_mode", 1.0);
 }
 
 /// The dual mode nearest a Krita masking brush's composite op (by Krita's name for it), if there
@@ -1499,6 +1635,170 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_krita_texture_is_its_mask_combined_by_its_mode() {
+        use procraft_engine::document::BlendMode;
+        use procraft_engine::krita::{KritaBrush, KritaPicture, KritaTexture, KritaTip};
+        // black dots on clear, which Krita takes as white about them
+        let dots: Vec<u8> = (0..16 * 16).flat_map(|i| [0, 0, 0, if i % 4 == 0 { 255 } else { 0 }]).collect();
+        let texture = KritaTexture {
+            picture: KritaPicture::Encoded(crate::project::rgba_png(16, 16, &dots)),
+            scale: 1.0,
+            strength: 1.0,
+            invert: false,
+            mode: 1,
+            brightness: 0.0,
+            contrast: 1.0,
+            neutral: 0.5,
+            cutoff: (0, 0.0, 1.0),
+        };
+        let brush = |texture: KritaTexture| {
+            krita_brush(&KritaBrush {
+                name: "Paper".into(),
+                tip: KritaTip::Round { hardness: 1.0, roundness: 1.0 },
+                spacing: None,
+                angle: 0.0,
+                follows: false,
+                turns_at_random: false,
+                rotation_random: 0.0,
+                rotation_per_stroke: false,
+                follows_tilt: false,
+                mirror: (false, false),
+                scatter: None,
+                color_random: [0.0; 4],
+                color_per_stroke: [0.0; 4],
+                ratio_random: 0.0,
+                ratio_pressure: None,
+                mix_pressure: None,
+                size_pressure: None,
+                opacity_pressure: None,
+                flow_pressure: None,
+                opacity: 1.0,
+                flow: 1.0,
+                wash: true,
+                texture: Some(texture),
+                missing: Vec::new(),
+                masking: None,
+            })
+        };
+        let b = brush(texture.clone());
+        let source = b.grain.source.as_ref().unwrap();
+        let (dark, light) =
+            (source.pixels.iter().filter(|&&v| v == 0).count(), source.pixels.iter().filter(|&&v| v == 255).count());
+        assert!(dark > 0 && light > 3 * dark, "{dark} {light}");
+        // subtracted, as it says; multiplied otherwise, and where a mode has no near one of ours
+        assert_eq!(b.setting("grain_blend"), BlendMode::Subtract.id() as f32);
+        assert_eq!(
+            brush(KritaTexture { mode: 0, ..texture.clone() }).setting("grain_blend"),
+            BlendMode::Multiply.id() as f32
+        );
+        assert_eq!(brush(KritaTexture { mode: 2, ..texture }).setting("grain_blend"), BlendMode::Multiply.id() as f32);
+    }
+
+    #[test]
+    fn a_krita_brush_follows_the_pen_and_lays_as_its_painting_mode_says() {
+        use procraft_engine::brush::{FLOW_POWER, PressureCurve};
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::krita::{KritaBrush, KritaTip};
+        let near = |a: f32, b: f32| (a - b).abs() < 2e-3;
+        let straight = vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)];
+        let built = KritaBrush {
+            name: "Pen".into(),
+            tip: KritaTip::Round { hardness: 1.0, roundness: 1.0 },
+            spacing: None,
+            angle: 0.0,
+            follows: false,
+            turns_at_random: false,
+            rotation_random: 0.0,
+            rotation_per_stroke: false,
+            follows_tilt: false,
+            mirror: (false, false),
+            scatter: None,
+            color_random: [0.0; 4],
+            color_per_stroke: [0.0; 4],
+            ratio_random: 0.0,
+            ratio_pressure: None,
+            mix_pressure: None,
+            size_pressure: Some(vec![Vec2::new(0.0, 0.2), Vec2::new(1.0, 1.0)]),
+            opacity_pressure: Some(straight.clone()),
+            flow_pressure: None,
+            opacity: 0.8,
+            flow: 0.5,
+            wash: false,
+            texture: None,
+            missing: Vec::new(),
+            masking: None,
+        };
+        // the size from its curve's least up to all of it
+        let b = krita_brush(&built);
+        assert!(b.pressure_size == 1.0 && near(b.size_curve.eval(0.0), 0.2) && near(b.size_curve.eval(1.0), 1.0));
+        // built up: each stamp lays the opacity times the flow, by the opacity's curve once eased
+        assert!(near(b.flow, 0.4) && b.pressure_opacity == 1.0);
+        assert!(near(b.opacity_curve.eval(0.5).powf(FLOW_POWER), 0.5));
+        // washed: each stamp lays the flow, the stroke building up to the opacity by the pressure
+        let w = krita_brush(&KritaBrush { wash: true, ..built.clone() });
+        assert!(near(w.flow, 0.5) && w.pressure_opacity == 0.0 && w.setting("rendering_mode") == 1.0);
+        let most = w.pressure_curves.get(PressureCurve::Flow).unwrap();
+        assert!(near(most.eval(0.5), 0.4) && near(most.eval(1.0), 0.8));
+        // no pressure on the size: it stays as set
+        assert_eq!(krita_brush(&KritaBrush { size_pressure: None, ..built }).pressure_size, 0.0);
+    }
+
+    #[test]
+    fn a_krita_brush_turns_mirrors_and_scatters_as_its_preset_says() {
+        use procraft_engine::brush::PressureCurve;
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::krita::{KritaBrush, KritaScatter, KritaTip};
+        let straight = vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)];
+        let k = KritaBrush {
+            name: "Spray".into(),
+            tip: KritaTip::Round { hardness: 1.0, roundness: 1.0 },
+            spacing: None,
+            angle: 0.0,
+            follows: false,
+            turns_at_random: false,
+            rotation_random: 0.6,
+            rotation_per_stroke: true,
+            follows_tilt: true,
+            mirror: (true, false),
+            scatter: Some(KritaScatter { amount: 0.5, pressure: Some(straight), along: true, across: false }),
+            color_random: [0.4, 0.0, 0.3, 0.3],
+            color_per_stroke: [0.0, 0.5, 0.0, 0.0],
+            ratio_random: 0.7,
+            ratio_pressure: None,
+            mix_pressure: None,
+            size_pressure: None,
+            opacity_pressure: None,
+            flow_pressure: None,
+            opacity: 1.0,
+            flow: 1.0,
+            wash: true,
+            texture: None,
+            missing: Vec::new(),
+            masking: None,
+        };
+        let b = krita_brush(&k);
+        assert!((b.shape.scatter - 0.6).abs() < 1e-6 && b.shape.randomise && b.shape.follow_azimuth);
+        assert_eq!((b.setting("flip_x"), b.setting("flip_y")), (1.0, 0.0));
+        // half a diameter at most along the stroke: our jitter's control to the power 2.2, times its
+        // scale, of half the round stamp's diagonal; by the pressure; none across
+        let thrown =
+            procraft_engine::stroke::JITTER_FILE_SCALE * b.setting("jitter_linear").powf(2.2) * 0.5 * 2f32.sqrt();
+        assert!((thrown - 0.5).abs() < 1e-3, "{thrown}");
+        assert!(b.pressure_curves.get(PressureCurve::LinearJitter).is_some());
+        assert!(b.pressure_curves.get(PressureCurve::LateralJitter).is_none());
+        // its colour at random each stamp and each stroke, and flattened at random
+        let stamp = ["stamp_hue", "stamp_saturation", "stamp_lightness", "stamp_darkness"].map(|k| b.setting(k));
+        assert_eq!((stamp, b.setting("stroke_saturation")), ([0.4, 0.0, 0.3, 0.3], 0.5));
+        assert_eq!(b.setting("roundness_jitter_y"), 0.7);
+        // its colour by the pressure: the secondary colour where light, its own where full
+        let mixed =
+            krita_brush(&KritaBrush { mix_pressure: Some(vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)]), ..k });
+        let curve = mixed.pressure_curves.get(PressureCurve::Secondary).unwrap();
+        assert_eq!(mixed.setting("pressure_secondary"), 1.0);
+        assert!((curve.eval(0.0) - 1.0).abs() < 1e-3 && curve.eval(1.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn a_masking_brush_lays_as_krita_s_wash_mode_does() {
         use procraft_engine::brush::{FLOW_POWER, PressureCurve, Rendering};
         use procraft_engine::geom::Vec2;
@@ -1510,8 +1810,25 @@ mod tests {
             angle: 0.0,
             follows: false,
             turns_at_random: false,
-            pressure_size: true,
-            pressure_opacity: true,
+            rotation_random: 0.0,
+            rotation_per_stroke: false,
+            follows_tilt: false,
+            mirror: (false, false),
+            scatter: None,
+            color_random: [0.0; 4],
+            color_per_stroke: [0.0; 4],
+            ratio_random: 0.0,
+            ratio_pressure: None,
+            mix_pressure: None,
+            size_pressure: Some(vec![
+                procraft_engine::geom::Vec2::new(0.0, 0.0),
+                procraft_engine::geom::Vec2::new(1.0, 1.0),
+            ]),
+            opacity_pressure: None,
+            flow_pressure: None,
+            opacity: 1.0,
+            flow: 1.0,
+            wash: true,
             texture: None,
             missing: Vec::new(),
             masking: None,
@@ -1771,6 +2088,9 @@ mod tests {
         });
         let laid = |p: f32| pressed.pressure_factors(p).1.powf(procraft_engine::brush::FLOW_POWER);
         assert!(near(laid(0.0), 0.3) && near(laid(1.0), 1.0), "{} {}", laid(0.0), laid(1.0));
+        // and between, not only at its ends
+        let want = csp_curve(&bent.points, 0.3).eval(0.5);
+        assert!((laid(0.5) - want).abs() < 0.01, "{} {want}", laid(0.5));
         // the flow and the roundness follow the pressure all the way, straight
         assert!(near(b.setting("pressure_flow"), 1.0) && near(b.setting("pressure_roundness"), 1.0));
         assert!(b.pressure_curves.get(PressureCurve::Flow).is_some());

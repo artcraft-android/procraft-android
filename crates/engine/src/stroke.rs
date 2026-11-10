@@ -339,7 +339,7 @@ pub const MOST_ROUNDNESS: f32 = 20.0;
 
 /// The lateral and linear jitter as brush files keep them: the control to the power 2.2, times
 /// this; each moves a stamp up to that many times half its diagonal (plus a pixel).
-const JITTER_FILE_SCALE: f32 = 3.0;
+pub const JITTER_FILE_SCALE: f32 = 3.0;
 
 /// The brush's controls the builder reads beyond its own fields (see `studio`), read once.
 #[derive(Clone, Copy, Debug, Default)]
