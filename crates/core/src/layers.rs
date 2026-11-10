@@ -399,9 +399,10 @@ impl CanvasSession {
         self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
     }
 
-    /// A new empty root-level layer (outside any group), placed above the active
-    /// root frame/group; made current.
-    pub fn add_root_layer(&self) -> u64 {
+    /// Add Frame (New Page with Page Assist): a new empty root-level layer (outside any group),
+    /// placed above the active root frame/group, named "Frame N" ("Page N") by the frames there
+    /// are with it.
+    pub fn add_frame(&self) -> u64 {
         self.change("new layer", |d| {
             if !d.has_room(1) {
                 return None;
@@ -413,6 +414,12 @@ impl CanvasSession {
             Some(id.0)
         })
         .unwrap_or(0)
+    }
+
+    /// A new empty root-level layer (outside any group), placed above the active
+    /// root frame/group; made current.
+    pub fn add_root_layer(&self) -> u64 {
+        self.add_frame()
     }
 
     /// Makes `id` the layer painting goes to, and the only one chosen (no picks): an undo step,
