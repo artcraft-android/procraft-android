@@ -901,11 +901,18 @@ impl CanvasSession {
         let st = &mut *guard;
         st.flush();
         let Some(canvas) = st.canvas.as_ref() else { return Vec::new() };
+        let paint: std::collections::HashMap<LayerId, u64> =
+            st.doc.layers().iter().map(|l| (l.id, canvas.layer_version(l.id))).collect();
         st.doc
             .layers()
             .iter()
-            .filter(|l| l.kind != LayerKind::Group)
-            .map(|l| LayerVersion { id: l.id.0, version: canvas.layer_version(l.id) })
+            .map(|l| LayerVersion {
+                id: l.id.0,
+                version: match l.kind {
+                    LayerKind::Group => group_version(&st.doc, l.id, &paint),
+                    _ => canvas.layer_version(l.id),
+                },
+            })
             .collect()
     }
 
@@ -921,13 +928,17 @@ impl CanvasSession {
                 let st = &mut *guard;
                 let is_group = st.doc.layer(id).is_some_and(|l| l.kind == LayerKind::Group);
                 if is_group {
-                    let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Err(no_canvas()) };
+                    let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
+                        return Err(no_canvas());
+                    };
                     Some(canvas.start_group_thumbnail(gpu, &mut st.doc, id, max_side)?)
                 } else {
                     None
                 }
             };
-            if let Some(pending) = group_pending { return pending.pixels(); }
+            if let Some(pending) = group_pending {
+                return pending.pixels();
+            }
             let first = {
                 let mut guard = self.shared.lock();
                 let st = &mut *guard;
@@ -954,6 +965,25 @@ impl CanvasSession {
             }
         }
     }
+}
+
+/// A group's thumbnail version follows the pixels and appearance of every member.
+fn group_version(doc: &Document, id: LayerId, paint: &std::collections::HashMap<LayerId, u64>) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64 ^ id.0;
+    let mut mix = |value: u64| {
+        hash = (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for child in doc.contents(id) {
+        mix(child.0);
+        mix(paint.get(&child).copied().unwrap_or(0));
+        if let Some(layer) = doc.layer(child) {
+            mix(u64::from(layer.visible));
+            mix((layer.opacity.clamp(0.0, 1.0) * 1000.0) as u64);
+            mix(u64::from(layer.blend.id()));
+            mix(u64::from(matches!(layer.kind, LayerKind::Mask)));
+        }
+    }
+    hash
 }
 
 /// Whether layer `id` exists and `differs` holds for it.
