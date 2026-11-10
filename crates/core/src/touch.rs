@@ -839,7 +839,8 @@ impl CanvasSession {
             t.pen_left = Some(now);
         }
         let lone = matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Pick | Mode::Held);
-        if hovering && !was_near && Self::pen_near(&t, None) && !t.down.is_empty() && t.modify_pointer.is_none() && lone {
+        if hovering && !was_near && Self::pen_near(&t, None) && !t.down.is_empty() && t.modify_pointer.is_none() && lone
+        {
             drop(self.hand_aside(t, None, &mut out));
         }
         out

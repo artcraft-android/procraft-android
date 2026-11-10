@@ -53,7 +53,8 @@ pub fn read_wav(bytes: &[u8]) -> Option<(Vec<f32>, u32)> {
         match (tag, b.len()) {
             (1, 1) => b.first().map_or(0.0, |&v| (f32::from(v) - 128.0) / 128.0),
             (1, 2) => <[u8; 2]>::try_from(b).map_or(0.0, |a| f32::from(i16::from_le_bytes(a)) / 32_768.0),
-            (1, 3) => <[u8; 3]>::try_from(b).map_or(0.0, |[x, y, z]| (i32::from_le_bytes([0, x, y, z]) >> 8) as f32 / 8_388_608.0),
+            (1, 3) => <[u8; 3]>::try_from(b)
+                .map_or(0.0, |[x, y, z]| (i32::from_le_bytes([0, x, y, z]) >> 8) as f32 / 8_388_608.0),
             (1, 4) => <[u8; 4]>::try_from(b).map_or(0.0, |a| i32::from_le_bytes(a) as f32 / 2_147_483_648.0),
             (3, 4) => <[u8; 4]>::try_from(b).map_or(0.0, f32::from_le_bytes),
             (3, 8) => <[u8; 8]>::try_from(b).map_or(0.0, |a| f64::from_le_bytes(a) as f32),

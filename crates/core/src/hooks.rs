@@ -694,7 +694,8 @@ pub(crate) mod tests {
         let plugins = Plugins::with_store(dir.clone());
         let mut manifest = coded(ID, &module);
         manifest["hooks"] = json!(["stroke_sound"]);
-        manifest["controls"] = json!([{ "key": "pencil", "type": "file", "label": "Pencil recording", "accepts": "sound" }]);
+        manifest["controls"] =
+            json!([{ "key": "pencil", "type": "file", "label": "Pencil recording", "accepts": "sound" }]);
         assert_eq!(plugins.install(file(&manifest, &module)), None);
         assert!(plugins.set_on(ID.to_owned(), true));
         let key = format!("{ID}.pencil");
@@ -733,7 +734,10 @@ pub(crate) mod tests {
         let said = || plugins.hooks().stroke_sound().unwrap();
         // as it starts: full volume, erasing heard as the eraser, each brush its kind's, no recordings
         let (settings, recordings) = said();
-        assert_eq!((settings.volume, settings.eraser_own, settings.eraser, settings.chosen), (1.0, true, Kind::Eraser, None));
+        assert_eq!(
+            (settings.volume, settings.eraser_own, settings.eraser, settings.chosen),
+            (1.0, true, Kind::Eraser, None)
+        );
         assert_eq!(recordings, [None, None, None, None, None, None]);
         // the controls moved
         assert!(plugins.set_slider(format!("{ID}.sound"), 3.0).is_some());

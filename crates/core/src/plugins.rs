@@ -240,7 +240,9 @@ impl PluginControl {
             (PluginControl::Slider { control }, PluginControl::Slider { control: from }) => {
                 control.value = control.stepped(from.value);
             }
-            (PluginControl::File { control }, PluginControl::File { control: from }) => control.chosen.clone_from(&from.chosen),
+            (PluginControl::File { control }, PluginControl::File { control: from }) => {
+                control.chosen.clone_from(&from.chosen)
+            }
             _ => {}
         }
     }
@@ -803,7 +805,8 @@ impl Plugins {
         let Some(PluginControl::File { control }) = plugin.controls.get_mut(at) else { return false };
         let (file, named) = plugin_file::chosen_paths(store, &id, &key);
         let written = |tmp: &std::path::Path| {
-            std::fs::write(tmp, crate::sound_file::write_wav(&samples, rate)).map_err(|e| crate::project::file_error("saving", e))
+            std::fs::write(tmp, crate::sound_file::write_wav(&samples, rate))
+                .map_err(|e| crate::project::file_error("saving", e))
         };
         let kept = file.parent().is_some_and(|folder| std::fs::create_dir_all(folder).is_ok())
             && crate::project::write_atomically(&file, written).is_ok()

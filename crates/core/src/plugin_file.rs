@@ -1276,7 +1276,12 @@ pub(crate) mod tests {
         named["controls"][0]["names"] = json!(["Off", "Half", "All"]);
         let slider = slider_of(&read_package(&a_filter_file(&named)).unwrap());
         assert_eq!(slider.names, ["Off", "Half", "All"]);
-        for names in [json!(["Off", "All"]), json!(["Off", "", "All"]), json!(["Off", "Ha\u{200B}lf", "All"]), json!(["Off", "x".repeat(17), "All"])] {
+        for names in [
+            json!(["Off", "All"]),
+            json!(["Off", "", "All"]),
+            json!(["Off", "Ha\u{200B}lf", "All"]),
+            json!(["Off", "x".repeat(17), "All"]),
+        ] {
             let mut wrong = named.clone();
             wrong["controls"][0]["names"] = names.clone();
             assert_eq!(refusal(&a_filter_file(&wrong)), Refusal::Described, "{names}");
@@ -1339,16 +1344,27 @@ pub(crate) mod tests {
         let filter = with(a_filter(), "/controls", json!([sound.clone()]));
         assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
         // code can: up to eight, besides eight others
-        let module = crate::plugin_run::tests::position_module(r#"(func (export "procraft_control") (param i32 f32))"#, "(i64.const 0)");
+        let module = crate::plugin_run::tests::position_module(
+            r#"(func (export "procraft_control") (param i32 f32))"#,
+            "(i64.const 0)",
+        );
         let mut manifest = coded("org.example.sounds", &module);
-        let mut controls: Vec<Value> = (0..MOST_FILES).map(|i| json!({ "key": format!("f{i}"), "type": "file", "label": "A", "accepts": "sound" })).collect();
+        let mut controls: Vec<Value> = (0..MOST_FILES)
+            .map(|i| json!({ "key": format!("f{i}"), "type": "file", "label": "A", "accepts": "sound" }))
+            .collect();
         controls.extend((0..MOST_CONTROLS).map(|i| json!({ "key": format!("k{i}"), "type": "switch", "label": "A" })));
         manifest["controls"] = json!(controls);
         let package = read_package(&pack(&manifest, &[(MODULE, module.as_slice())])).unwrap();
         let PluginControl::File { control } = &package.manifest.controls[0] else { panic!() };
-        assert_eq!((control.key.as_str(), control.accepts, control.chosen.as_deref()), ("org.example.sounds.f0", PluginFileKind::Sound, None));
+        assert_eq!(
+            (control.key.as_str(), control.accepts, control.chosen.as_deref()),
+            ("org.example.sounds.f0", PluginFileKind::Sound, None)
+        );
         let mut more = manifest.clone();
-        more["controls"].as_array_mut().unwrap().push(json!({ "key": "f9", "type": "file", "label": "A", "accepts": "sound" }));
+        more["controls"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "key": "f9", "type": "file", "label": "A", "accepts": "sound" }));
         assert_eq!(refusal(&pack(&more, &[(MODULE, module.as_slice())])), Refusal::Described);
         // a kind it doesn't take is a newer app's; none said, or taking an old setting, is wrong
         for (accepts, why) in [(json!("picture"), Refusal::Newer), (Value::Null, Refusal::Described)] {

@@ -503,7 +503,9 @@ impl Voice {
         if let Some(kind) = kind {
             // the recording picked for it, else its own loop
             let own = self.playing.as_ref().and_then(|playing| {
-                self.recorded.iter().position(|(k, r, s, samples)| *k == kind && *r == rate && s == playing && !samples.is_empty())
+                self.recorded
+                    .iter()
+                    .position(|(k, r, s, samples)| *k == kind && *r == rate && s == playing && !samples.is_empty())
             });
             let looped = if own.is_none() { Some(self.looped(kind, rate)) } else { None };
             let samples = match (own, looped) {
@@ -696,7 +698,8 @@ impl CanvasSession {
             let recording = kind.and_then(|kind| KINDS.iter().position(|k| *k == kind)).and_then(|i| recordings.get(i));
             let playing = recording.and_then(|path| path.as_deref()).and_then(Source::of);
             let lacking = kind.filter(|&kind| st.voice.lacks(kind, rate));
-            let lacking_recorded = kind.zip(playing.clone()).filter(|(kind, source)| st.voice.lacks_recorded(*kind, rate, source));
+            let lacking_recorded =
+                kind.zip(playing.clone()).filter(|(kind, source)| st.voice.lacks_recorded(*kind, rate, source));
             (playing, lacking, lacking_recorded)
         };
         if let Some((kind, source)) = lacking_recorded {
@@ -847,7 +850,8 @@ mod tests {
         let pen = Settings { chosen: Some(Kind::Pen), ..all };
         assert_eq!(st.sound_kind(pen), Some(Kind::Pen));
         // its own over the one for every brush, or none
-        let own = |st: &mut crate::State, tool, value| st.brush_mut(tool).expect("a brush").set_setting(BRUSH_SOUND, value);
+        let own =
+            |st: &mut crate::State, tool, value| st.brush_mut(tool).expect("a brush").set_setting(BRUSH_SOUND, value);
         own(&mut st, ToolKind::Paint, 5.0);
         assert_eq!(st.sound_kind(pen), Some(Kind::Airbrush));
         own(&mut st, ToolKind::Paint, 7.0);

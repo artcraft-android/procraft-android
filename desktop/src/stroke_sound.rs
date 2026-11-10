@@ -223,8 +223,12 @@ mod mac {
             queue: *mut Queue,
         ) -> i32;
         fn AudioQueueAllocateBuffer(queue: Queue, bytes: u32, buffer: *mut *mut QueueBuffer) -> i32;
-        fn AudioQueueEnqueueBuffer(queue: Queue, buffer: *mut QueueBuffer, packets: u32, descriptions: *const c_void)
-        -> i32;
+        fn AudioQueueEnqueueBuffer(
+            queue: Queue,
+            buffer: *mut QueueBuffer,
+            packets: u32,
+            descriptions: *const c_void,
+        ) -> i32;
         fn AudioQueueStart(queue: Queue, at: *const c_void) -> i32;
         fn AudioQueueDispose(queue: Queue, immediate: u8) -> i32;
     }

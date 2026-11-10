@@ -113,7 +113,8 @@ struct Section {
 /// A brush's own sound, shown while a plugin makes strokes' sounds: as the plugin sets, one of six,
 /// or none.
 const BRUSH_SOUND: &str = "brush_sound";
-const BRUSH_SOUNDS: &[&str] = &["Default", "Eraser", "Pencil", "Pen", "Paintbrush", "Airbrush", "Spray can", "No sound"];
+const BRUSH_SOUNDS: &[&str] =
+    &["Default", "Eraser", "Pencil", "Pen", "Paintbrush", "Airbrush", "Spray can", "No sound"];
 
 /// A page: its name, its icon (shown this wide) and its sections.
 struct Page {

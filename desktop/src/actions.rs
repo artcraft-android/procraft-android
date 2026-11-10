@@ -1100,7 +1100,8 @@ fn plugin_card(
                 text(&painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
                 let right = pos2(cell.right() - 16.0, cell.center().y);
                 let clear = control.chosen.as_ref().map(|chosen| {
-                    let clear = text(&painter, right, Align2::RIGHT_CENTER, "Clear", 17.0, Weight::Regular, argb(pc::ACCENT));
+                    let clear =
+                        text(&painter, right, Align2::RIGHT_CENTER, "Clear", 17.0, Weight::Regular, argb(pc::ACCENT));
                     let shown: String = if chosen.chars().count() > 28 {
                         chosen.chars().take(27).chain(['\u{2026}']).collect()
                     } else {
@@ -1115,7 +1116,8 @@ fn plugin_card(
                 }
                 let response = ui.interact(cell, ui.scope_id().with(("plugin file", g, i)), Sense::click());
                 if response.clicked() {
-                    let on_clear = clear.zip(response.interact_pointer_pos()).is_some_and(|(c, at)| c.expand(8.0).contains(at));
+                    let on_clear =
+                        clear.zip(response.interact_pointer_pos()).is_some_and(|(c, at)| c.expand(8.0).contains(at));
                     if on_clear {
                         changed |= plugins.clear_file(control.key.clone());
                     } else if let Some((bytes, name)) = crate::files::pick_sound(&control.label) {
