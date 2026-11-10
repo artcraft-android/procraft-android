@@ -4952,7 +4952,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** A picture from elsewhere as a source image; none if it can't be read. */
-    suspend fun decodeSource(uri: android.net.Uri): ByteArray? {
+    suspend fun decodeSource(uri: android.net.Uri): ByteArray? = sourceOrSay("importing a picture into a source editor") { decodedSource(uri) }
+
+    /**
+     * What [make] gives, or none if it fails in any way (running out of memory too): the editor
+     * says so and stays open rather than the app closing.
+     */
+    private suspend fun sourceOrSay(doing: String, make: suspend () -> ByteArray?): ByteArray? = try {
+        make()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        Log.e(TAG, doing, e)
+        message = "This picture couldn't be used."
+        null
+    }
+
+    private suspend fun decodedSource(uri: android.net.Uri): ByteArray? {
         val bitmap = withContext(Dispatchers.IO) {
             runCatching {
                 val resolver = getApplication<Application>().contentResolver
@@ -4971,7 +4987,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** A picture on the clipboard as a source image; none if there isn't one. */
-    suspend fun pastedSource(): ByteArray? {
+    suspend fun pastedSource(): ByteArray? = sourceOrSay("pasting into a source editor") { clipboardSource() }
+
+    private suspend fun clipboardSource(): ByteArray? {
         val clip = systemClipboard?.primaryClip?.takeIf { it.itemCount > 0 }
         val uri = clip?.getItemAt(0)?.uri
         // what was cut or copied here, unless another app's picture went on the clipboard since
@@ -4984,7 +5002,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = "There's no picture to paste."
             return null
         }
-        return decodeSource(uri)
+        return decodedSource(uri)
     }
 
     /** The editor's tick: the studio brush's [kind] of source becomes [pixels], or shipped image [shipped]. */
