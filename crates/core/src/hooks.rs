@@ -144,6 +144,13 @@ impl Hooks {
         })
     }
 
+    /// The curves hook: whether QuickShape snaps a stroke that bends more than once to a curve
+    /// (its polyline still there to be shown instead).
+    pub(crate) fn quickshape_curves(&self) -> bool {
+        self.has(Hook::QuickshapeCurves)
+            && self.through(Hook::QuickshapeCurves, false, |running, said| Ok(said | running.quickshape_curves()?))
+    }
+
     /// The triangle hook: whether the colour panel's Classic shows a triangle in place of its
     /// square.
     pub(crate) fn colour_triangle(&self) -> bool {
@@ -582,6 +589,58 @@ pub(crate) mod tests {
         assert!(card(&plugins).problem.is_some());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn a_stroke_bending_twice_snaps_to_a_curve_while_a_plugin_says_so() {
+        use crate::{QuickShapeAnchor, QuickShapeKind};
+        let Some(s) = session() else { return };
+        let dir = store("curves");
+        let module =
+            wat::parse_str(r#"(module (func (export "procraft_quickshape_curves") (result i32) (i32.const 1)))"#)
+                .unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["quickshape_curves"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        s.use_plugins(Arc::clone(&plugins));
+        // a zigzag: across, back and across again, as a hand draws one
+        let zigzag = |s: &CanvasSession, t0: f64| {
+            let points = [(20.0, 20.0), (180.0, 30.0), (30.0, 100.0), (180.0, 170.0)];
+            let mut samples = Vec::new();
+            for (k, pair) in points.windows(2).enumerate() {
+                let (a, b) = (pair[0], pair[1]);
+                for i in 0..20 {
+                    let f = i as f32 / 20.0;
+                    let at = (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f);
+                    samples.push(sample(at.0, at.1, t0 + ((k * 20 + i) * 8) as f64));
+                }
+            }
+            s.stroke_begin(PointerKind::Finger, samples[..1].to_vec());
+            s.stroke_add(samples[1..].to_vec());
+            s.quickshape_hold()
+        };
+        // off: a polyline, as the app is
+        let shape = zigzag(&s, 0.0).expect("it snaps");
+        assert_eq!(shape.kind, QuickShapeKind::Polyline);
+        s.quickshape_done();
+        s.stroke_end(vec![]);
+        // on: a curve, the polyline to be shown instead
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let shape = zigzag(&s, 1000.0).expect("it snaps");
+        assert_eq!(shape.kind, QuickShapeKind::Curve, "{shape:?}");
+        assert!(shape.choices.contains(&QuickShapeKind::Polyline));
+        assert!(shape.anchors.len() >= 3 && shape.anchors.iter().all(|a| *a == QuickShapeAnchor::Smooth));
+        // a tap on an anchor in the middle steps it on: broken, then a corner
+        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Broken);
+        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Corner);
+        // a control is no anchor
+        assert!(s.quickshape_cycle_anchor(1).is_none());
+        s.quickshape_done();
+        s.stroke_end(vec![]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

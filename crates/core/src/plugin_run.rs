@@ -40,6 +40,8 @@
 //!   (0 to 1), or below 0 to leave it; `seed` is the same for every setting of one press.
 //! - `procraft_colour_triangle() -> i32`: for the hook `colour_triangle`, whether the colour
 //!   panel's Classic shows a triangle in place of its square (not 0).
+//! - `procraft_quickshape_curves() -> i32`: for the hook `quickshape_curves`, whether a stroke that
+//!   bends more than once snaps to a curve (not 0).
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
 
@@ -104,6 +106,7 @@ const PIN_PANELS: &str = "procraft_pin_panels";
 const OPACITY_TOGETHER: &str = "procraft_opacity_together";
 const RANDOMISE: &str = "procraft_randomise";
 const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
+const QUICKSHAPE_CURVES: &str = "procraft_quickshape_curves";
 /// How many parts radial symmetry may be asked to make.
 const RADIAL_PARTS: std::ops::RangeInclusive<i32> = 2..=64;
 const MEMORY: &str = "memory";
@@ -125,6 +128,7 @@ pub(crate) enum Hook {
     OpacityTogether,
     RandomiseBrush,
     ColourTriangle,
+    QuickshapeCurves,
 }
 
 impl Hook {
@@ -143,6 +147,7 @@ impl Hook {
             "opacity_together" => Some(Hook::OpacityTogether),
             "randomise_brush" => Some(Hook::RandomiseBrush),
             "colour_triangle" => Some(Hook::ColourTriangle),
+            "quickshape_curves" => Some(Hook::QuickshapeCurves),
             _ => None,
         }
     }
@@ -163,6 +168,7 @@ impl Hook {
             Hook::OpacityTogether => "This plugin can change the opacity of all the layers you've picked at once.",
             Hook::RandomiseBrush => "This plugin can set a brush's settings at random in the brush studio.",
             Hook::ColourTriangle => "This plugin can change how the colour panel's Classic picker looks.",
+            Hook::QuickshapeCurves => "This plugin can make QuickShape snap strokes to curves.",
         }
     }
 
@@ -184,6 +190,7 @@ impl Hook {
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
+            Hook::QuickshapeCurves => exports(module, QUICKSHAPE_CURVES, &[], &[ValType::I32]),
             Hook::InterfaceScale => exports(module, INTERFACE_SCALE, &[ValType::F32, ValType::F32], &[ValType::F32]),
             Hook::PasteMask => {
                 exports(module, PASTE_MASK, &[], &[ValType::I32])
@@ -364,6 +371,7 @@ pub(crate) struct Running {
     opacity_together: Option<TypedFunc<(), i32>>,
     randomise: Option<TypedFunc<(i32, i32), f32>>,
     colour_triangle: Option<TypedFunc<(), i32>>,
+    quickshape_curves: Option<TypedFunc<(), i32>>,
     memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
 }
@@ -427,6 +435,7 @@ impl Running {
             let opacity_together = instance.get_typed_func(&store, OPACITY_TOGETHER).ok();
             let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
+            let quickshape_curves = instance.get_typed_func(&store, QUICKSHAPE_CURVES).ok();
             let memory = instance.get_memory(&store, MEMORY);
             let control = instance.get_typed_func(&store, CONTROL).ok();
             Ok(Running {
@@ -446,6 +455,7 @@ impl Running {
                 opacity_together,
                 randomise,
                 colour_triangle,
+                quickshape_curves,
                 memory,
                 control,
             })
@@ -501,6 +511,17 @@ impl Running {
             0..=0xFF_FFFF => Ok(u32::try_from(said).ok()),
             _ => Err(Stop::Nonsense),
         }
+    }
+
+    /// Whether it says QuickShape snaps a stroke that bends more than once to a curve.
+    pub(crate) fn quickshape_curves(&mut self) -> Result<bool, Stop> {
+        let Running { store, quickshape_curves, .. } = self;
+        let Some(quickshape_curves) = quickshape_curves else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            quickshape_curves.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
     }
 
     /// Whether it says Classic shows a triangle.

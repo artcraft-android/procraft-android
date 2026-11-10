@@ -20,6 +20,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("paste-into-masks", include_bytes!("../bundled-plugins/paste-into-masks.procraft-plugin")),
     ("pin-panels", include_bytes!("../bundled-plugins/pin-panels.procraft-plugin")),
     ("posterise", include_bytes!("../bundled-plugins/posterise.procraft-plugin")),
+    ("quickshape-curves", include_bytes!("../bundled-plugins/quickshape-curves.procraft-plugin")),
     ("radial-segments", include_bytes!("../bundled-plugins/radial-segments.procraft-plugin")),
     ("randomise-brush", include_bytes!("../bundled-plugins/randomise-brush.procraft-plugin")),
     ("touch-offset", include_bytes!("../bundled-plugins/touch-offset.procraft-plugin")),

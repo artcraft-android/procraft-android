@@ -8,7 +8,9 @@ use procraft_engine::brush::Brush;
 use procraft_engine::document::LayerId;
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::Sample;
-use procraft_engine::quickshape::{Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, without_end_hook};
+use procraft_engine::quickshape::{
+    Anchor, Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, with_curve, without_end_hook,
+};
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_gpu::{Canvas, StrokeStyle};
 
@@ -19,6 +21,7 @@ pub enum QuickShapeKind {
     Line,
     Polyline,
     Arc,
+    Curve,
     Ellipse,
     Circle,
     Triangle,
@@ -34,6 +37,7 @@ impl From<ShapeKind> for QuickShapeKind {
             ShapeKind::Line => QuickShapeKind::Line,
             ShapeKind::Polyline => QuickShapeKind::Polyline,
             ShapeKind::Arc => QuickShapeKind::Arc,
+            ShapeKind::Curve => QuickShapeKind::Curve,
             ShapeKind::Ellipse => QuickShapeKind::Ellipse,
             ShapeKind::Circle => QuickShapeKind::Circle,
             ShapeKind::Triangle => QuickShapeKind::Triangle,
@@ -51,6 +55,7 @@ impl From<QuickShapeKind> for ShapeKind {
             QuickShapeKind::Line => ShapeKind::Line,
             QuickShapeKind::Polyline => ShapeKind::Polyline,
             QuickShapeKind::Arc => ShapeKind::Arc,
+            QuickShapeKind::Curve => ShapeKind::Curve,
             QuickShapeKind::Ellipse => ShapeKind::Ellipse,
             QuickShapeKind::Circle => ShapeKind::Circle,
             QuickShapeKind::Triangle => ShapeKind::Triangle,
@@ -62,13 +67,23 @@ impl From<QuickShapeKind> for ShapeKind {
     }
 }
 
+/// How a curve's anchor sits: its controls mirrored either side of it, free of each other, or
+/// turned along their own spans as a corner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum QuickShapeAnchor {
+    Smooth,
+    Broken,
+    Corner,
+}
+
 /// The shape a stroke snapped to: its kind, the kinds it can be shown as instead (its own first),
-/// and its editing handles (window points, x and y in turn).
+/// its editing handles (window points, x and y in turn), and how each of a curve's anchors sits.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct QuickShapeInfo {
     pub kind: QuickShapeKind,
     pub choices: Vec<QuickShapeKind>,
     pub handles: Vec<f32>,
+    pub anchors: Vec<QuickShapeAnchor>,
 }
 
 /// A snapped stroke being shown and edited.
@@ -84,6 +99,9 @@ pub(crate) struct ShapeEdit {
     drawn: Vec<Vec2>,
     /// What the pen did along it.
     along: StrokeAlong,
+    /// How each of a curve's anchors sits, by anchor: kept rather than read off the shape, as a
+    /// broken pair can look like a corner.
+    modes: Vec<Anchor>,
     /// While the pen that drew it is still down.
     held: Option<Held>,
     /// The stroke it was made of, for undo to go back to.
@@ -100,7 +118,18 @@ impl ShapeEdit {
         stroke: Option<DrawnStroke>,
     ) -> ShapeEdit {
         let first = shape.clone();
-        ShapeEdit { shape, first, earlier: Vec::new(), later: Vec::new(), choices, drawn, along, held, stroke }
+        ShapeEdit {
+            shape,
+            first,
+            earlier: Vec::new(),
+            later: Vec::new(),
+            choices,
+            drawn,
+            along,
+            modes: Vec::new(),
+            held,
+            stroke,
+        }
     }
 
     /// A drag undone can be done again.
@@ -365,7 +394,42 @@ impl State {
                     [w.x, w.y]
                 })
                 .collect(),
+            anchors: anchor_list(&edit.shape, &edit.modes),
         })
+    }
+
+    /// What a stroke snapped to: the shapes it looks like, a curve first where a plugin asks for
+    /// one and it bends more than once.
+    fn recognised(&self, line: &[Vec2]) -> Vec<Shape> {
+        let found = recognise(line);
+        if self.hooks.as_ref().is_some_and(|hooks| hooks.quickshape_curves()) { with_curve(found, line) } else { found }
+    }
+}
+
+/// How each of a curve's anchors sits, for its handles to be drawn as.
+fn anchor_list(shape: &Shape, modes: &[Anchor]) -> Vec<QuickShapeAnchor> {
+    if shape.kind != ShapeKind::Curve {
+        return Vec::new();
+    }
+    (0..shape.nodes.len().saturating_sub(1) / 3 + 1)
+        .map(|k| match modes.get(k).copied().unwrap_or(Anchor::Smooth) {
+            Anchor::Smooth => QuickShapeAnchor::Smooth,
+            Anchor::Broken => QuickShapeAnchor::Broken,
+            Anchor::Corner => QuickShapeAnchor::Corner,
+        })
+        .collect()
+}
+
+/// Every corner's controls put back, pointing at the anchors either side: the shape around them
+/// may have moved, and a corner's controls are worked out rather than dragged.
+fn refresh_corners(shape: &mut Shape, modes: &[Anchor]) {
+    if shape.kind != ShapeKind::Curve {
+        return;
+    }
+    for (k, mode) in modes.iter().enumerate() {
+        if *mode == Anchor::Corner {
+            shape.set_anchor(3 * k, Anchor::Corner);
+        }
     }
 }
 
@@ -538,7 +602,7 @@ impl CanvasSession {
         // fitted to the stroke's line as stabilisation and motion filtering smoothed it
         let line = st.began.as_ref().map_or_else(|| st.drawn.clone(), |b| b.shape_line(&st.drawn_samples, &st.drawn));
         let line = st.without_end_hook(line);
-        let found = recognise(&line);
+        let found = st.recognised(&line);
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
         let held = st.drawn.last().map(|&at| Held { snapped: first.clone(), from: at, at, finger: false });
@@ -566,9 +630,10 @@ impl CanvasSession {
         if canvas.steps_made() != last.steps || canvas.can_redo() {
             return None;
         }
-        let found = recognise(&line);
+        let found = st.recognised(&line);
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
+        let canvas = st.canvas.as_mut()?;
         canvas.undo();
         canvas.begin_stroke(last.layer, last.style);
         let scale = st.brush_scale();
@@ -604,6 +669,8 @@ impl CanvasSession {
         }
         edit.earlier.push(before);
         edit.later.clear();
+        // fitted afresh: the anchors it had are no guide
+        edit.modes.clear();
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -675,7 +742,52 @@ impl CanvasSession {
         let to = st.view?.screen_to_canvas(Vec2::new(x, y))?;
         let edit = st.shape.as_mut()?;
         edit.held = None;
-        edit.shape.move_handle(index as usize, to);
+        let index = index as usize;
+        // a control of an anchor set broken moves on its own; otherwise its pair follows it
+        let anchor = match index % 3 {
+            1 => (index - 1) / 3,
+            2 => (index + 1) / 3,
+            _ => usize::MAX,
+        };
+        if edit.shape.kind == ShapeKind::Curve && edit.modes.get(anchor) == Some(&Anchor::Broken) {
+            edit.shape.move_handle_free(index, to);
+        } else {
+            edit.shape.move_handle(index, to);
+        }
+        refresh_corners(&mut edit.shape, &edit.modes);
+        st.draw_shape();
+        self.shared.frame(st);
+        st.shape_info()
+    }
+
+    /// The curve's anchor at handle `index` tapped on to its next state: smooth, then broken (its
+    /// controls free of each other), then a corner. A step of undo, as a drag is. None for what
+    /// is no curve's anchor.
+    pub fn quickshape_cycle_anchor(&self, index: u32) -> Option<QuickShapeInfo> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let edit = st.shape.as_mut()?;
+        let at = index as usize;
+        if edit.shape.kind != ShapeKind::Curve || !at.is_multiple_of(3) || at >= edit.shape.nodes.len() {
+            return None;
+        }
+        let k = at / 3;
+        edit.held = None;
+        edit.earlier.push(edit.shape.clone());
+        edit.later.clear();
+        if edit.modes.len() <= k {
+            edit.modes.resize(k + 1, Anchor::Smooth);
+        }
+        let next = match edit.modes.get(k).copied().unwrap_or(Anchor::Smooth) {
+            Anchor::Smooth => Anchor::Broken,
+            Anchor::Broken => Anchor::Corner,
+            Anchor::Corner => Anchor::Smooth,
+        };
+        if let Some(mode) = edit.modes.get_mut(k) {
+            *mode = next;
+        }
+        edit.shape.set_anchor(at, next);
+        refresh_corners(&mut edit.shape, &edit.modes);
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()

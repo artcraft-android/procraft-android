@@ -1503,6 +1503,7 @@ private fun QuickShapeKind.label() = when (this) {
     QuickShapeKind.LINE -> "Line"
     QuickShapeKind.POLYLINE -> "Polyline"
     QuickShapeKind.ARC -> "Arc"
+    QuickShapeKind.CURVE -> "Curve"
     QuickShapeKind.ELLIPSE -> "Ellipse"
     QuickShapeKind.CIRCLE -> "Circle"
     QuickShapeKind.TRIANGLE -> "Triangle"
@@ -1516,6 +1517,7 @@ private fun QuickShapeKind.icon() = when (this) {
     QuickShapeKind.LINE -> PcIcons.ShapeLine
     QuickShapeKind.POLYLINE -> PcIcons.ShapePolyline
     QuickShapeKind.ARC -> PcIcons.ShapeArc
+    QuickShapeKind.CURVE -> PcIcons.ShapeArc
     QuickShapeKind.ELLIPSE -> PcIcons.ShapeEllipse
     QuickShapeKind.CIRCLE -> PcIcons.ShapeCircle
     QuickShapeKind.TRIANGLE -> PcIcons.ShapeTriangle
@@ -1584,10 +1586,45 @@ fun QuickShapeHandles(vm: CanvasViewModel) {
     if (!vm.quickShapeEditing) return
     androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
         val h = info.handles
-        for (i in 0 until h.size / 2) {
-            val at = Offset(h[i * 2], h[i * 2 + 1])
-            drawCircle(Color.White, 6.5.dp.toPx(), at)
-            drawCircle(Pc.Accent, 5.dp.toPx(), at)
+        val points = List(h.size / 2) { i -> Offset(h[i * 2], h[i * 2 + 1]) }
+        // a curve's (a plugin's): each control on a line to its anchor, each anchor as it sits
+        // (round smooth, a triangle free, a square a corner, whose controls aren't shown)
+        val curve = info.kind == io.github.artcraftandroid.procraft.core.QuickShapeKind.CURVE
+        val control = Color(0xFF60E078)
+        fun owner(i: Int): Int? = when (i % 3) { 1 -> i - 1; 2 -> i + 1; else -> null }
+        fun folded(i: Int) = curve && owner(i)?.let { info.anchors.getOrNull(it / 3) == io.github.artcraftandroid.procraft.core.QuickShapeAnchor.CORNER } == true
+        if (curve) {
+            points.forEachIndexed { i, at ->
+                val anchor = owner(i)?.takeIf { !folded(i) }?.let { points.getOrNull(it) } ?: return@forEachIndexed
+                drawLine(control, anchor, at, 1.5.dp.toPx())
+            }
+        }
+        points.forEachIndexed { i, at ->
+            if (folded(i)) return@forEachIndexed
+            val ink = if (curve && i % 3 != 0) control else Pc.Accent
+            when (if (curve && i % 3 == 0) info.anchors.getOrNull(i / 3) else null) {
+                io.github.artcraftandroid.procraft.core.QuickShapeAnchor.BROKEN -> {
+                    val r = 7.5.dp.toPx()
+                    val tri = androidx.compose.ui.graphics.Path().apply {
+                        moveTo(at.x, at.y - r)
+                        lineTo(at.x - r * 0.87f, at.y + r * 0.5f)
+                        lineTo(at.x + r * 0.87f, at.y + r * 0.5f)
+                        close()
+                    }
+                    drawPath(tri, ink)
+                    drawPath(tri, Color.White, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx()))
+                }
+                io.github.artcraftandroid.procraft.core.QuickShapeAnchor.CORNER -> {
+                    val outer = 13.dp.toPx()
+                    val inner = 10.dp.toPx()
+                    drawRect(Color.White, Offset(at.x - outer / 2, at.y - outer / 2), androidx.compose.ui.geometry.Size(outer, outer))
+                    drawRect(ink, Offset(at.x - inner / 2, at.y - inner / 2), androidx.compose.ui.geometry.Size(inner, inner))
+                }
+                else -> {
+                    drawCircle(Color.White, 6.5.dp.toPx(), at)
+                    drawCircle(ink, 5.dp.toPx(), at)
+                }
+            }
         }
     }
 }

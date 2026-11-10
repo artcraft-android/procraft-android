@@ -156,7 +156,7 @@ pub use quick_menu::{
     quick_adjustments_listed, quick_menu_active_after, quick_menu_added, quick_menu_saved, quick_menu_slots,
     quick_menus, quick_menus_saved,
 };
-pub use quickshape::{QuickShapeInfo, QuickShapeKind};
+pub use quickshape::{QuickShapeAnchor, QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{
     ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect, reference_view_pinched,
 };

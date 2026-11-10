@@ -330,6 +330,18 @@ slider and the others under it stay as they are.
 procraft_colour_triangle() -> i32
 ```
 
+### `quickshape_curves`
+
+Whether a stroke that bends more than once snaps to a curve (not 0): a chain of curves through its
+bends, with an anchor at each and two controls pulling on the curve either side. The polyline it would
+have been is still among the kinds to switch to. Dragging a control moves its pair the other way, so
+the curve stays smooth there; tapping an anchor sets it free (each control on its own), then a corner,
+then smooth again.
+
+```
+procraft_quickshape_curves() -> i32
+```
+
 ### Limits
 
 | | |
