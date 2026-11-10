@@ -186,14 +186,13 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
     if (lu.stroke_mode != 0u) {
         let px = stroke_pixel(p);
         let s = px.s;
-        if (lu.stroke_mode == 1u) {
-            c = burnt(c0, stroke_into(c, s), px.burn);
-        } else if (lu.stroke_mode == 2u) {
+        if (lu.stroke_mode == 2u) {
             c = c * (1.0 - s.a);
         } else {
-            // recolour, keeping the layer's alpha
+            // painted (1), or recoloured keeping the layer's alpha (3): the blend written once, as
+            // Direct3D 12's compiler takes a long while over each copy of its modes
             let painted = burnt(c0, stroke_into(c, s), px.burn);
-            c = painted * (c.a / max(painted.a, 1e-6));
+            c = select(painted, painted * (c.a / max(painted.a, 1e-6)), lu.stroke_mode == 3u);
         }
     }
     return c;
@@ -202,15 +201,20 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
 // a layer as it composites: stroke, mask, clipping, opacity
 fn layer_color(p: vec2<i32>) -> vec4<f32> {
     var c = textureLoad(layer_tex, p, 0);
-    if (lu.stroke_on_mask < 0.5) {
-        c = with_stroke(c, p);
+    var m = vec4<f32>(1.0);
+    if (lu.masked > 0.5) {
+        m = textureLoad(mask_tex, p, 0);
+    }
+    // the stroke goes into the layer, or into its mask: one place for it (its blend written once)
+    let into_mask = lu.stroke_on_mask > 0.5;
+    let stroked = with_stroke(select(c, m, into_mask), p);
+    if (into_mask) {
+        m = stroked;
+    } else {
+        c = stroked;
     }
     if (lu.masked > 0.5) {
         // the mask shows the layer as much as it is light (and opaque)
-        var m = textureLoad(mask_tex, p, 0);
-        if (lu.stroke_on_mask > 0.5) {
-            m = with_stroke(m, p);
-        }
         c = c * clamp(dot(m.rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
     }
     if (lu.clipped != 0u) {
