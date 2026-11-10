@@ -263,9 +263,20 @@ object CanvasSpace {
         }
     }
 
-    /** [bitmap], of the canvas's colours, marked with the canvas's space. */
+    /** [bitmap], of the canvas's colours, marked with the canvas's space (on Android 9, a copy so marked). */
     fun tag(bitmap: android.graphics.Bitmap): android.graphics.Bitmap {
-        if (p3) bitmap.setColorSpace(displayP3)
-        return bitmap
+        if (!p3) return bitmap
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            bitmap.setColorSpace(displayP3)
+            return bitmap
+        }
+        // a bitmap's space can't be changed before Android 10: its pixels go into one made in it
+        val config = bitmap.config ?: android.graphics.Bitmap.Config.ARGB_8888
+        val tagged = android.graphics.Bitmap.createBitmap(bitmap.width, bitmap.height, config, true, displayP3)
+        val pixels = java.nio.ByteBuffer.allocate(bitmap.byteCount)
+        bitmap.copyPixelsToBuffer(pixels)
+        pixels.rewind()
+        tagged.copyPixelsFromBuffer(pixels)
+        return tagged
     }
 }
