@@ -156,6 +156,10 @@ sealed class StudioControl {
 
 class StudioSection(val title: String?, val controls: List<StudioControl>)
 
+/** A brush's own sound, shown while a plugin makes strokes' sounds: as the plugin sets, one of six, or none. */
+private const val BRUSH_SOUND = "brush_sound"
+private val BRUSH_SOUNDS = listOf("Default", "Eraser", "Pencil", "Pen", "Paintbrush", "Airbrush", "Spray can", "No sound")
+
 /** A page of the studio: its name, its icon (shown [iconSize] across) and its sections. */
 class StudioTab(val name: String, val icon: ImageVector, val iconSize: Dp, val sections: List<StudioSection>)
 
@@ -282,6 +286,7 @@ val STUDIO_TABS: List<StudioTab> by lazy {
                 slider("max_size", "Maximum size", Shown.SIZE), slider("min_size", "Minimum size", Shown.SIZE),
                 slider("max_opacity", "Maximum opacity"), slider("min_opacity", "Minimum opacity"),
             )),
+            StudioSection("Sound", listOf(StudioControl.Choice(BRUSH_SOUND, BRUSH_SOUNDS))),
         )),
         StudioTab("Materials", PcIcons.StudioMaterials, 29.dp, listOf(
             StudioSection("3D Materials", listOf(
@@ -720,6 +725,8 @@ private fun StudioSettings(vm: CanvasViewModel, modifier: Modifier) {
         // what the space above each thing follows: a control, a title, or the top
         var above: Any = Edge.TOP
         tab.sections.forEachIndexed { k, section ->
+            // a brush's own sound only while a plugin makes the sound
+            if (!vm.strokeSoundOn && (section.controls.firstOrNull() as? StudioControl.Choice)?.key == BRUSH_SOUND) return@forEachIndexed
             // the About page is headed by the brush's name
             val about = section.controls.firstOrNull() == StudioControl.About
             val title = section.title ?: vm.studioName.takeIf { about }

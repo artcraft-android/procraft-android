@@ -61,7 +61,8 @@ starts off, until someone taps Turn on. One the app adds by itself starts off, w
 
 ## Controls
 
-A plugin can have up to eight, each a `slider` or a `switch`.
+A plugin can have up to eight, each a `slider` or a `switch`; a plugin with code can have up to eight
+`file` controls besides.
 
 | Field | Means |
 |---|---|
@@ -71,7 +72,12 @@ A plugin can have up to eight, each a `slider` or a `switch`.
 | `unit` | Written after the value, such as `" px"` |
 | `shown_times` | The value is shown multiplied by this: 100 shows .5 as 50 |
 | `at_least` | Shown in place of the number at the slider's lowest, such as `"Off"` |
+| `names` | A name for each of a slider's steps from its lowest, shown in place of the number |
 | `live` | The value goes in as the slider moves, rather than as it lets go |
+| `accepts` | What a `file` control takes: `"sound"`, a recording (the app reads it, keeps a minute of it at most with the plugin, and drops it with the plugin) |
+
+A `file` control shows Import, or the name of the file picked and Clear. The plugin is told 1 while a
+file is picked, 0 while none is; what the file is for is up to the hook that uses it.
 
 A `key` is lowercase letters, digits and `_`, starting with a letter, and can't be `on`. A filter
 reads it as a field, so there it also has to be a word WGSL allows, and not a keyword such as `loop`.
@@ -341,6 +347,35 @@ then smooth again.
 ```
 procraft_quickshape_curves() -> i32
 ```
+
+### `stroke_sound`
+
+The sound of the stroke being drawn. While a plugin on this hook is on, the app plays a sound it makes
+as you draw, behaving as Krita's Brush SFX plugin by davi133 does (github.com/davi133/brush_sfx): six
+sounds (an eraser, a pencil, a pen, a paintbrush, an airbrush and a spray can), each brush the one its
+kind takes (by its name, else its set's), louder the faster and harder the stroke goes, the pen's and the
+paintbrush's ring rising with speed, the airbrush hissing while pressed and the spray can while it
+moves, its ball rattling when the pen is shaken back and forth above the canvas. The plugin sets three
+things, each 0 to 1:
+
+```
+procraft_stroke_sound(setting: i32) -> f32
+```
+
+`setting` 0 is the master volume; 1 whether erasing makes a sound (1) or none (0); 2 one sound for
+every brush, in sixths (1/6 the eraser, 2/6 the pencil, 3/6 the pen, 4/6 the paintbrush, 5/6 the
+airbrush, 1 the spray can), or 0 for each brush's kind's; 3 the sound erasing makes, in sixths. Answer
+below 0 to leave one as the app has it (full volume, erasing heard, each brush's kind's, the eraser's).
+An answer above 1, or not a number, stops the plugin.
+
+`setting` 4 to 9 asks, for the eraser, pencil, pen, paintbrush, airbrush and spray can in turn, which
+`file` control's recording that sound plays in place of its own: the control's place in the manifest (0
+the first), a whole number, or below 0 for the app's own sound. The app plays the recording looped (its
+end eased into its start), as loud as the sound it stands in for, through the same speed, pressure and
+filtering.
+
+While such a plugin is on, the Brush Studio's Properties page has a Sound section: a brush's own sound,
+over what the plugin sets, or none. It plays on Android, Windows and Linux (through PipeWire, PulseAudio or ALSA); not yet on a Mac.
 
 ### Limits
 

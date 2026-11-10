@@ -56,6 +56,7 @@ mod shortcuts;
 mod sound;
 mod source_editor;
 mod startup;
+mod stroke_sound;
 mod studio;
 mod system_clipboard;
 mod text;
@@ -254,6 +255,7 @@ fn main() {
         last_frame: Instant::now(),
         again: None,
         finishing_since: None,
+        stroke_sound: stroke_sound::StrokeSound::default(),
         opening: None,
         importing: None,
         reading_artwork: None,
@@ -301,6 +303,8 @@ struct App {
     again: Option<Instant>,
     /// Since when a plugin has been finishing a fill.
     finishing_since: Option<Instant>,
+    /// The strokes' sound, played while a plugin makes it.
+    stroke_sound: stroke_sound::StrokeSound,
     /// An artwork's canvas being made on a thread of its own as it opens, and since when.
     opening: Option<(Instant, std::thread::JoinHandle<()>)>,
     /// Artworks being brought in, read on a thread of their own one after another.
@@ -708,6 +712,8 @@ impl App {
         // a canvas opening while the pipelines are still being made waits for them: it says so
         let opening = opening_words(self.opening.is_some() && screen.canvases_waited().is_some());
         screen.size_interface(self.ui.plugins(), Some(session.as_ref()));
+        // the strokes heard while a plugin makes their sound
+        self.stroke_sound.follow(Some(&session), self.ui.plugins().makes_stroke_sound());
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
@@ -773,6 +779,7 @@ impl App {
         let Some(screen) = self.screen.as_mut() else { return };
         self.last_frame = Instant::now();
         screen.size_interface(self.ui.plugins(), None);
+        self.stroke_sound.follow(None, false);
         let raw = screen.egui.take_egui_input(&screen.window);
         let mut asked = None;
         let (gallery, interface) = (&mut self.gallery, &mut self.ui);

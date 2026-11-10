@@ -42,6 +42,12 @@
 //!   panel's Classic shows a triangle in place of its square (not 0).
 //! - `procraft_quickshape_curves() -> i32`: for the hook `quickshape_curves`, whether a stroke that
 //!   bends more than once snaps to a curve (not 0).
+//! - `procraft_stroke_sound(setting: i32) -> f32`: for the hook `stroke_sound`, the stroke's
+//!   sound: its volume (0), whether erasing makes a sound (1, 0 or 1), which sound every brush makes
+//!   (2, in sixths, 0 each brush's kind's) and which sound erasing makes (3, in sixths), or below 0
+//!   for the app's own; and for 4 to 9 (the eraser, pencil, pen, paintbrush, airbrush, spray can),
+//!   the place in the manifest (0 the first) of the file control whose recording that sound plays,
+//!   a whole number, or below 0 for the app's own sound.
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
 
@@ -107,6 +113,7 @@ const OPACITY_TOGETHER: &str = "procraft_opacity_together";
 const RANDOMISE: &str = "procraft_randomise";
 const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
 const QUICKSHAPE_CURVES: &str = "procraft_quickshape_curves";
+const STROKE_SOUND: &str = "procraft_stroke_sound";
 /// How many parts radial symmetry may be asked to make.
 const RADIAL_PARTS: std::ops::RangeInclusive<i32> = 2..=64;
 const MEMORY: &str = "memory";
@@ -129,6 +136,7 @@ pub(crate) enum Hook {
     RandomiseBrush,
     ColourTriangle,
     QuickshapeCurves,
+    StrokeSound,
 }
 
 impl Hook {
@@ -148,6 +156,7 @@ impl Hook {
             "randomise_brush" => Some(Hook::RandomiseBrush),
             "colour_triangle" => Some(Hook::ColourTriangle),
             "quickshape_curves" => Some(Hook::QuickshapeCurves),
+            "stroke_sound" => Some(Hook::StrokeSound),
             _ => None,
         }
     }
@@ -169,6 +178,7 @@ impl Hook {
             Hook::RandomiseBrush => "This plugin can set a brush's settings at random in the brush studio.",
             Hook::ColourTriangle => "This plugin can change how the colour panel's Classic picker looks.",
             Hook::QuickshapeCurves => "This plugin can make QuickShape snap strokes to curves.",
+            Hook::StrokeSound => "This plugin can play a sound as you draw.",
         }
     }
 
@@ -191,6 +201,7 @@ impl Hook {
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
             Hook::QuickshapeCurves => exports(module, QUICKSHAPE_CURVES, &[], &[ValType::I32]),
+            Hook::StrokeSound => exports(module, STROKE_SOUND, &[ValType::I32], &[ValType::F32]),
             Hook::InterfaceScale => exports(module, INTERFACE_SCALE, &[ValType::F32, ValType::F32], &[ValType::F32]),
             Hook::PasteMask => {
                 exports(module, PASTE_MASK, &[], &[ValType::I32])
@@ -372,6 +383,7 @@ pub(crate) struct Running {
     randomise: Option<TypedFunc<(i32, i32), f32>>,
     colour_triangle: Option<TypedFunc<(), i32>>,
     quickshape_curves: Option<TypedFunc<(), i32>>,
+    stroke_sound: Option<TypedFunc<i32, f32>>,
     memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
 }
@@ -436,6 +448,7 @@ impl Running {
             let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
             let quickshape_curves = instance.get_typed_func(&store, QUICKSHAPE_CURVES).ok();
+            let stroke_sound = instance.get_typed_func(&store, STROKE_SOUND).ok();
             let memory = instance.get_memory(&store, MEMORY);
             let control = instance.get_typed_func(&store, CONTROL).ok();
             Ok(Running {
@@ -456,6 +469,7 @@ impl Running {
                 randomise,
                 colour_triangle,
                 quickshape_curves,
+                stroke_sound,
                 memory,
                 control,
             })
@@ -510,6 +524,44 @@ impl Running {
             -1 => Ok(None),
             0..=0xFF_FFFF => Ok(u32::try_from(said).ok()),
             _ => Err(Stop::Nonsense),
+        }
+    }
+
+    /// What it answers the sound hook for `setting`, as it answers; none without the hook.
+    fn stroke_sound_said(&mut self, setting: i32) -> Result<Option<f32>, Stop> {
+        let Running { store, stroke_sound, .. } = self;
+        let Some(stroke_sound) = stroke_sound else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            stroke_sound.call(&mut *store, setting).map_err(|e| stop_of(&e))
+        })?;
+        Ok(Some(said))
+    }
+
+    /// Which control's file it says sound `kind` (0 the eraser to 5 the spray can) plays, by its
+    /// place in the manifest; none for the app's own sound.
+    pub(crate) fn stroke_sound_file(&mut self, kind: usize) -> Result<Option<usize>, Stop> {
+        let setting = i32::try_from(kind).map_or(i32::MAX, |k| k.saturating_add(4));
+        let Some(said) = self.stroke_sound_said(setting)? else { return Ok(None) };
+        if said.is_nan() || said > 255.0 || (said >= 0.0 && said.fract() != 0.0) {
+            Err(Stop::Nonsense)
+        } else if said < 0.0 {
+            Ok(None)
+        } else {
+            Ok(Some(said as usize))
+        }
+    }
+
+    /// What it says the stroke's sound's `setting` is (0 volume, 1 whether erasing sounds, 2 which
+    /// sound, 3 erasing's sound), 0 to 1; none for the app's own.
+    pub(crate) fn stroke_sound(&mut self, setting: i32) -> Result<Option<f32>, Stop> {
+        let Some(said) = self.stroke_sound_said(setting)? else { return Ok(None) };
+        if said.is_nan() || said > 1.0 {
+            Err(Stop::Nonsense)
+        } else if said < 0.0 {
+            Ok(None)
+        } else {
+            Ok(Some(said))
         }
     }
 

@@ -102,12 +102,14 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         vm.readAppSettings()
         vm.resumeTracking()
+        vm.appInFront(true)
         displays.registerDisplayListener(displayListener, null)
         showProjection()
     }
 
     override fun onStop() {
         super.onStop()
+        vm.appInFront(false)
         vm.saveNow()
         displays.unregisterDisplayListener(displayListener)
         projection?.dismiss()

@@ -346,6 +346,11 @@ impl Brush {
             "shape_filtering" | "grain_filtering" | "cursor_outline" | "hover_fill" | "relative_to_stroke" => {
                 self.extra.insert(key.to_owned(), value.round().clamp(0.0, 2.0));
             }
+            // its sound while a plugin makes strokes' sounds: as the plugin sets (0), one of six, or
+            // none (7)
+            "brush_sound" => {
+                self.extra.insert(key.to_owned(), value.round().clamp(0.0, 7.0));
+            }
             _ => {
                 self.extra.insert(key.to_owned(), both);
             }

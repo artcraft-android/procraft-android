@@ -111,14 +111,33 @@ pub struct PluginSlider {
     pub unit: String,
     /// What it reads at its least, if not that ("Off").
     pub at_least: Option<String>,
+    /// A name for each step from its least, read in place of the number (none: the numbers).
+    pub names: Vec<String>,
     /// Its value goes in as it moves; otherwise as it lets go, which what changes the page needs.
     pub live: bool,
+}
+
+/// What a file control takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PluginFileKind {
+    /// A sound: a recording, kept as a WAV file.
+    Sound,
+}
+
+/// A file someone picks, kept with the plugin; `chosen` is the name it was picked by, if one is.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginFile {
+    pub key: String,
+    pub label: String,
+    pub accepts: PluginFileKind,
+    pub chosen: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Enum)]
 pub enum PluginControl {
     Switch { control: PluginSwitch },
     Slider { control: PluginSlider },
+    File { control: PluginFile },
 }
 
 /// One as its page shows it.
@@ -165,6 +184,7 @@ impl PluginControl {
         match self {
             PluginControl::Switch { control } => &control.key,
             PluginControl::Slider { control } => &control.key,
+            PluginControl::File { control } => &control.key,
         }
     }
 
@@ -181,6 +201,8 @@ impl PluginControl {
                     control.value = control.stepped(read);
                 }
             }
+            // what was picked is kept with the plugin, not with the settings
+            PluginControl::File { .. } => {}
         }
     }
 
@@ -189,6 +211,7 @@ impl PluginControl {
         match self {
             PluginControl::Switch { control } => control.on = control.starts,
             PluginControl::Slider { control } => control.value = control.starts,
+            PluginControl::File { .. } => {}
         }
     }
 
@@ -197,6 +220,7 @@ impl PluginControl {
         match self {
             PluginControl::Switch { control } => f32::from(u8::from(control.on)),
             PluginControl::Slider { control } => control.value,
+            PluginControl::File { control } => f32::from(u8::from(control.chosen.is_some())),
         }
     }
 
@@ -205,6 +229,7 @@ impl PluginControl {
         match self {
             PluginControl::Switch { control } => control.on.to_string(),
             PluginControl::Slider { control } => control.value.to_string(),
+            PluginControl::File { control } => control.chosen.is_some().to_string(),
         }
     }
 
@@ -215,6 +240,7 @@ impl PluginControl {
             (PluginControl::Slider { control }, PluginControl::Slider { control: from }) => {
                 control.value = control.stepped(from.value);
             }
+            (PluginControl::File { control }, PluginControl::File { control: from }) => control.chosen.clone_from(&from.chosen),
             _ => {}
         }
     }
@@ -249,6 +275,10 @@ pub fn plugin_slider_shown(slider: PluginSlider, value: f32) -> String {
     if let Some(text) = slider.at_least.as_ref().filter(|_| value <= slider.least) {
         return text.clone();
     }
+    let place = ((value - slider.least) / slider.step).round();
+    if let Some(name) = (place >= 0.0).then_some(place as usize).and_then(|i| slider.names.get(i)) {
+        return name.clone();
+    }
     let step = slider.step * slider.shown_times;
     let whole = |v: f32| (v - v.round()).abs() < 1e-3;
     let places = if whole(step) {
@@ -275,6 +305,30 @@ pub fn plugin_file_most_bytes() -> u64 {
 
 /// `manifest` as a list entry. One that only adds a filter starts on, as that changes nothing
 /// already there; any other starts off, for someone to turn on.
+/// The names of the files picked for `plugin`'s file controls, as kept in `store`.
+fn read_chosen(store: &std::path::Path, plugin: &mut PluginInfo) {
+    let id = plugin.id.clone();
+    for control in &mut plugin.controls {
+        if let PluginControl::File { control } = control {
+            let (file, name) = plugin_file::chosen_paths(store, &id, &control.key);
+            let named = || std::fs::read_to_string(&name).ok().map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+            control.chosen = file.is_file().then(|| named().unwrap_or_else(|| "Recording".to_owned()));
+        }
+    }
+}
+
+/// The files picked for `plugin`'s controls in `store`, by control (none: not a file control, or
+/// none picked).
+fn chosen_files(store: Option<&std::path::Path>, plugin: &PluginInfo) -> Vec<Option<PathBuf>> {
+    let chosen = |control: &PluginControl| match (store, control) {
+        (Some(store), PluginControl::File { control }) if control.chosen.is_some() => {
+            Some(plugin_file::chosen_paths(store, &plugin.id, &control.key).0)
+        }
+        _ => None,
+    };
+    plugin.controls.iter().map(chosen).collect()
+}
+
 fn from_file(manifest: Manifest) -> PluginInfo {
     let only_filter = manifest.holds == [PluginPart::Filter];
     PluginInfo {
@@ -372,6 +426,7 @@ impl Plugins {
             for plugin in &mut files {
                 plugin.problem = plugin_file::stopped_why(store, &plugin.id);
                 plugin.on &= plugin.problem.is_none();
+                read_chosen(store, plugin);
             }
         }
         // what the app added starts off until someone turns it on, whatever it holds
@@ -457,7 +512,10 @@ impl Plugins {
             .ok_or(Stop::Damaged)
             .and_then(|(hooks, bytes)| Ok((Running::start_on(&bytes, &values, &hooks)?, hooks)));
         match started {
-            Ok((running, hooks)) => self.hooks.put_on(plugin.id.clone(), running, &hooks),
+            Ok((running, hooks)) => {
+                self.hooks.put_on(plugin.id.clone(), running, &hooks);
+                self.hooks.files(&plugin.id, chosen_files(store, plugin));
+            }
             Err(stop) => {
                 self.hooks.failed(&plugin.id, stop);
                 plugin.on = false;
@@ -498,7 +556,9 @@ impl Plugins {
     /// Each value as a line of a settings file, its key and then what [`Plugins::read_kept`] reads.
     pub fn kept_lines(&self) -> Vec<String> {
         let list = self.listed();
-        let values = list.files.iter().flat_map(|p| &p.controls).map(|c| format!("{} {}", c.key(), c.kept()));
+        // (a file picked is kept with its plugin)
+        let values = list.files.iter().flat_map(|p| &p.controls).filter(|c| !matches!(c, PluginControl::File { .. }));
+        let values = values.map(|c| format!("{} {}", c.key(), c.kept()));
         let flags = list.files.iter().map(|p| format!("{} {}", p.on_key, p.on));
         values.chain(flags).chain(list.moved.iter().map(|(key, value)| format!("{key} {value}"))).collect()
     }
@@ -513,6 +573,7 @@ impl Plugins {
         let (id, version) = (&package.manifest.id, &package.manifest.version);
         let manifest = plugin_file::read_folder(&folder, id, version).ok_or(Refusal::NotKept)?;
         let mut fresh = from_file(manifest);
+        read_chosen(store, &mut fresh);
         let mut list = self.listed();
         fresh.on &= !list.added_off(&fresh.id);
         // a moved setting read back goes to the plugin that takes it over
@@ -712,7 +773,7 @@ impl Plugins {
                 control.on = on;
                 Some(())
             }
-            PluginControl::Slider { .. } => None,
+            _ => None,
         })
         .is_some()
     }
@@ -726,6 +787,52 @@ impl Plugins {
             }
             _ => None,
         })
+    }
+
+    /// The file control kept under `key` takes the sound `wav` (a WAV file's bytes) picked by `name`:
+    /// kept with its plugin (a minute of it at most, in one channel) for its plugin to play. False
+    /// if there is no such control, the plugins can't be kept, or `wav` is no sound this reads.
+    pub fn set_sound_file(&self, key: String, name: String, wav: Vec<u8>) -> bool {
+        let Some(store) = self.store.as_deref() else { return false };
+        let Some((samples, rate)) = crate::sound_file::read_wav(&wav) else { return false };
+        let name: String = name.chars().filter(|c| !c.is_control()).take(80).collect();
+        let name = if name.trim().is_empty() { "Recording".to_owned() } else { name.trim().to_owned() };
+        let mut list = self.listed();
+        let Some((plugin, at)) = list.control_mut(&key) else { return false };
+        let id = plugin.id.clone();
+        let Some(PluginControl::File { control }) = plugin.controls.get_mut(at) else { return false };
+        let (file, named) = plugin_file::chosen_paths(store, &id, &key);
+        let written = |tmp: &std::path::Path| {
+            std::fs::write(tmp, crate::sound_file::write_wav(&samples, rate)).map_err(|e| crate::project::file_error("saving", e))
+        };
+        let kept = file.parent().is_some_and(|folder| std::fs::create_dir_all(folder).is_ok())
+            && crate::project::write_atomically(&file, written).is_ok()
+            && std::fs::write(&named, &name).is_ok();
+        if !kept {
+            log::warn!("a sound for {key} couldn't be kept");
+            return false;
+        }
+        control.chosen = Some(name);
+        self.hooks.control(&id, at, 1.0);
+        self.hooks.file(&id, at, Some(file));
+        true
+    }
+
+    /// The file control kept under `key` lets its file go. False if there is no such control.
+    pub fn clear_file(&self, key: String) -> bool {
+        let mut list = self.listed();
+        let Some((plugin, at)) = list.control_mut(&key) else { return false };
+        let id = plugin.id.clone();
+        let Some(PluginControl::File { control }) = plugin.controls.get_mut(at) else { return false };
+        if let Some(store) = self.store.as_deref() {
+            let (file, named) = plugin_file::chosen_paths(store, &id, &key);
+            let _ = std::fs::remove_file(&file);
+            let _ = std::fs::remove_file(&named);
+        }
+        control.chosen = None;
+        self.hooks.control(&id, at, 0.0);
+        self.hooks.file(&id, at, None);
+        true
     }
 
     /// Turns a plugin on or off; false if no file is `id`. It goes on its hooks or off them at once,
@@ -813,6 +920,12 @@ impl Plugins {
         self.hooks().interface_scale(width, height)
     }
 
+    /// Whether a plugin makes the sound of the stroke being drawn: the app plays
+    /// [`crate::CanvasSession::stroke_sound`] while one does.
+    pub fn makes_stroke_sound(&self) -> bool {
+        self.hooks().makes_stroke_sound()
+    }
+
     /// Whether a plugin has the colour panel's Classic show a triangle (saturation and brightness
     /// between the pure hue, white and black) in place of its square.
     pub fn colour_triangle(&self) -> bool {
@@ -852,6 +965,7 @@ mod tests {
             shown_times: 100.0,
             unit: "%".to_owned(),
             at_least: None,
+            names: Vec::new(),
             live: false,
         }
     }
@@ -869,6 +983,7 @@ mod tests {
             shown_times: 1.0,
             unit: " px".to_owned(),
             at_least: Some("Off".to_owned()),
+            names: Vec::new(),
             live: false,
         }
     }
@@ -913,6 +1028,7 @@ mod tests {
                         shown_times: 1.0,
                         unit: " px".to_owned(),
                         at_least: None,
+                        names: Vec::new(),
                         live: true,
                     },
                 },
@@ -1029,6 +1145,15 @@ mod tests {
     }
 
     #[test]
+    fn a_slider_can_name_each_step() {
+        let names = ["By brush", "Eraser", "Pencil"].map(str::to_owned).to_vec();
+        let sound = PluginSlider { least: 0.0, most: 2.0, step: 1.0, at_least: None, names, ..gap_slider() };
+        assert_eq!(plugin_slider_shown(sound.clone(), 0.0), "By brush");
+        assert_eq!(plugin_slider_shown(sound.clone(), 1.2), "Eraser");
+        assert_eq!(plugin_slider_shown(sound, 2.0), "Pencil");
+    }
+
+    #[test]
     fn a_count_is_kept_as_a_whole_number() {
         assert!(plugin_slider_whole(gap_slider()));
         assert!(!plugin_slider_whole(size_slider()));
@@ -1064,6 +1189,7 @@ mod tests {
             shown_times: 1.0,
             unit: String::new(),
             at_least: None,
+            names: Vec::new(),
             live: false,
         };
         for slider in [bad(5.0, 1.0, 1.0), bad(1.0, 1.0, 0.0), bad(0.0, 1.0, -1.0), bad(f32::NAN, f32::NAN, f32::NAN)] {

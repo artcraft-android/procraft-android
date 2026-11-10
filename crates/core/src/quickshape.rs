@@ -232,6 +232,10 @@ impl State {
 
     /// Notes a stroke's input, for QuickShape.
     pub(crate) fn remember_input(&mut self, samples: &[Sample]) {
+        if !samples.is_empty() {
+            // when the stroke was last heard from, for its sound (a plugin's)
+            self.sound_heard = Some(std::time::Instant::now());
+        }
         for s in samples.iter().filter(|s| s.is_finite()) {
             if self.drawn.last().is_some_and(|last| last.distance(s.pos) >= PACE_MOVED) {
                 self.drawn_moving += (s.time_ms - self.drawn_at).clamp(0.0, PACE_MOST_MS);

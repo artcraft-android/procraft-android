@@ -1024,7 +1024,7 @@ fn plugin_height(painter: &Painter, plugin: &PluginInfo, width: f32) -> f32 {
         .iter()
         .filter(|_| controls_show(plugin))
         .map(|c| match c {
-            PluginControl::Switch { .. } => 1.0 + ROW_HEIGHT,
+            PluginControl::Switch { .. } | PluginControl::File { .. } => 1.0 + ROW_HEIGHT,
             PluginControl::Slider { .. } => 1.0 + SLIDE_HEIGHT,
         })
         .sum();
@@ -1092,6 +1092,41 @@ fn plugin_card(
                     }
                 }
                 y += SLIDE_HEIGHT;
+            }
+            PluginControl::File { control } => {
+                // its label; the name of what was picked and Clear, or Import; a click picks another
+                let cell = Rect::from_min_size(pos2(area.left(), y), vec2(width, ROW_HEIGHT));
+                let at = pos2(cell.left() + 16.0, cell.center().y);
+                text(&painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+                let right = pos2(cell.right() - 16.0, cell.center().y);
+                let clear = control.chosen.as_ref().map(|chosen| {
+                    let clear = text(&painter, right, Align2::RIGHT_CENTER, "Clear", 17.0, Weight::Regular, argb(pc::ACCENT));
+                    let shown: String = if chosen.chars().count() > 28 {
+                        chosen.chars().take(27).chain(['\u{2026}']).collect()
+                    } else {
+                        chosen.clone()
+                    };
+                    let name_at = pos2(clear.left() - 12.0, cell.center().y);
+                    text(&painter, name_at, Align2::RIGHT_CENTER, &shown, 15.0, Weight::Regular, argb(SLIDE_VALUE));
+                    clear
+                });
+                if clear.is_none() {
+                    text(&painter, right, Align2::RIGHT_CENTER, "Import", 17.0, Weight::Regular, argb(pc::ACCENT));
+                }
+                let response = ui.interact(cell, ui.scope_id().with(("plugin file", g, i)), Sense::click());
+                if response.clicked() {
+                    let on_clear = clear.zip(response.interact_pointer_pos()).is_some_and(|(c, at)| c.expand(8.0).contains(at));
+                    if on_clear {
+                        changed |= plugins.clear_file(control.key.clone());
+                    } else if let Some((bytes, name)) = crate::files::pick_sound(&control.label) {
+                        if plugins.set_sound_file(control.key.clone(), name, bytes) {
+                            changed = true;
+                        } else {
+                            crate::files::say("This sound couldn't be used. On the computer, pick a WAV file.");
+                        }
+                    }
+                }
+                y += ROW_HEIGHT;
             }
         }
     }
@@ -1678,6 +1713,7 @@ mod tests {
                         shown_times: 1.0,
                         unit: " px".to_owned(),
                         at_least: None,
+                        names: Vec::new(),
                         live: false,
                     },
                 },

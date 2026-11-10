@@ -7,6 +7,7 @@
 
 /// Each by its folder's name under `plugins/`, and the file packed from it.
 pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
+    ("brush-sounds", include_bytes!("../bundled-plugins/brush-sounds.procraft-plugin")),
     ("colour-triangle", include_bytes!("../bundled-plugins/colour-triangle.procraft-plugin")),
     ("extract-lines", include_bytes!("../bundled-plugins/extract-lines.procraft-plugin")),
     ("eyedropper-layer", include_bytes!("../bundled-plugins/eyedropper-layer.procraft-plugin")),

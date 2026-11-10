@@ -276,6 +276,19 @@ pub fn save_file(bytes: &[u8], name: &str, extension: &str, kind: &str) {
     }
 }
 
+/// A sound the user picks (titled `title`): a WAV file, read whole, with its name.
+pub fn pick_sound(title: &str) -> Option<(Vec<u8>, String)> {
+    let path = FileDialog::new().set_title(title).add_filter("Sounds", &["wav", "wave"]).pick_file()?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match std::fs::read(&path) {
+        Ok(bytes) => Some((bytes, name)),
+        Err(_) => {
+            say("This file could not be read.");
+            None
+        }
+    }
+}
+
 /// A file the user picks (titled `title`), read whole, with its name.
 pub fn pick_file(title: &str) -> Option<(Vec<u8>, String)> {
     let path = FileDialog::new().set_title(title).pick_file()?;

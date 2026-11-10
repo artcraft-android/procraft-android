@@ -450,13 +450,39 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var pluginList by mutableStateOf(plugins.plugins())
         private set
 
+    /** Whether a plugin makes strokes' sounds (the Brush Studio then shows a brush's own). */
+    var strokeSoundOn by mutableStateOf(false)
+        private set
+
     // the interface's accent as the plugins give it
     init { followPluginLooks() }
 
-    /** What the plugins change in how the interface looks: its accent, Classic's triangle. */
+    /** What the plugins change in how the interface looks: its accent, Classic's triangle; and whether strokes are heard. */
     private fun followPluginLooks() {
         io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
+        strokeSoundOn = plugins.makesStrokeSound()
+        followStrokeSound()
+    }
+
+    /** The strokes' sound (a plugin's), played while an artwork is open and the app in front. */
+    private val strokeSound = StrokeSound()
+
+    /** Whether the app is in front (started), for the strokes' sound. */
+    private var inFront = true
+
+    /** Plays the open artwork's strokes while a plugin makes their sound and the app is in front. */
+    private fun followStrokeSound() {
+        // set up before the session is, the first time
+        @Suppress("SENSELESS_COMPARISON")
+        if (strokeSound == null) return
+        strokeSound.follow(session?.takeIf { inFront && screen == Screen.CANVAS }, plugins.makesStrokeSound())
+    }
+
+    /** The app came to the front ([front]) or went behind: the strokes' sound follows. */
+    fun appInFront(front: Boolean) {
+        inFront = front
+        followStrokeSound()
     }
 
     /** How big the interface shows now, as a plugin says (1: as measured). */
@@ -577,6 +603,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (io.github.artcraftandroid.procraft.core.pluginSliderWhole(slider)) edit.putInt(slider.key, landed.roundToInt()) else edit.putFloat(slider.key, landed)
         edit.apply()
         pluginsChanged()
+    }
+
+    /** A sound picked at [uri] for a plugin's file control [key]: read in the background (any sound Android can play, a minute of it at most), then kept with the plugin; told if it can't be used. */
+    fun pickPluginSound(key: String, uri: android.net.Uri) {
+        viewModelScope.launch {
+            val kept = withContext(Dispatchers.IO) {
+                val wav = decodedSound(getApplication(), uri) ?: return@withContext false
+                plugins.setSoundFile(key, fileName(uri) ?: "Recording", wav)
+            }
+            if (kept) pluginsChanged() else message = "This sound couldn't be used."
+        }
+    }
+
+    /** A plugin's file control [key] lets its file go. */
+    fun clearPluginFile(key: String) {
+        if (plugins.clearFile(key)) pluginsChanged()
     }
 
     /** The list as it stands: a plugin may have stopped on a stroke since it was read. */
@@ -2290,6 +2332,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return
         noteTime()
         keepChoices(s)
+        strokeSound.follow(null, false)
         s.detachProjection()
         val dir = artworkDir
         // the gallery zooms out of the artwork's cell, the canvas fading away over it
@@ -2595,6 +2638,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         applyFitInsets()
         attachProjection()
         activeSince = android.os.SystemClock.elapsedRealtime()
+        followStrokeSound()
         thumbnails.clear()
         thumbnailVersions.clear()
         previews.clear()
@@ -7562,6 +7606,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        strokeSound.follow(null, false)
         saveNow()
         session?.stopAutosave()
         session = null

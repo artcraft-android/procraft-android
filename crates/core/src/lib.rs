@@ -66,6 +66,8 @@ mod render;
 mod reveal;
 mod scene3d;
 mod selection;
+mod sound_file;
+mod stroke_sound;
 mod studio;
 #[cfg(test)]
 mod tests;
@@ -404,6 +406,11 @@ pub(crate) struct State {
     pub(crate) brush_on_screen: bool,
     /// What samples go through on their way to a stroke, if anything.
     pub(crate) hooks: Option<Arc<hooks::Hooks>>,
+    /// The sound of the stroke being made (a plugin's), and when its input was last heard.
+    pub(crate) voice: stroke_sound::Voice,
+    pub(crate) sound_heard: Option<std::time::Instant>,
+    /// Where the pen last hovered (window pixels) and when, for the spray can's rattle.
+    pub(crate) sound_hover: Option<(procraft_engine::geom::Vec2, std::time::Instant)>,
     /// Crops kept for undo: the canvas and document from before; and one undone, for redo, with
     /// the steps the canvas then put back had made (redo only while that hasn't changed).
     crop_undo: Option<(Canvas, Document)>,
@@ -1275,6 +1282,9 @@ impl CanvasSession {
             selection_visibility: 0.25,
             brush_on_screen: false,
             hooks: None,
+            voice: stroke_sound::Voice::default(),
+            sound_heard: None,
+            sound_hover: None,
             input: procraft_engine::stroke::InputSettings::default(),
             crop_redo: None,
             library: shelf,

@@ -60,6 +60,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.PluginControl
+import io.github.artcraftandroid.procraft.core.PluginFile
 import io.github.artcraftandroid.procraft.core.PluginInfo
 import io.github.artcraftandroid.procraft.core.PluginSlider
 import io.github.artcraftandroid.procraft.core.PluginSource
@@ -605,6 +606,7 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
                 when (control) {
                     is PluginControl.Switch -> ActionRowView(Toggle(control.control.label, control.control.on) { vm.setPluginSwitch(control.control.key, it) })
                     is PluginControl.Slider -> PluginSliderRow(control.control, vm::setPluginSlider)
+                    is PluginControl.File -> PluginFileRow(control.control, vm)
                 }
             }
         }
@@ -613,6 +615,28 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
         if (plugin.source == PluginSource.FILE) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
             ActionRowView(Act("Remove") { vm.removePlugin(plugin) })
+        }
+    }
+}
+
+/** A file control on a card (a sound): its label, then the name of what was picked and Clear, or Import; a tap on the row picks another. */
+@Composable
+private fun PluginFileRow(file: PluginFile, vm: CanvasViewModel) {
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vm.pickPluginSound(file.key, it) }
+    }
+    Row(
+        Modifier.fillMaxWidth().height(44.dp).clickable { picker.launch(arrayOf("audio/*")) }.padding(start = 16.dp, end = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(file.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
+        Box(Modifier.weight(1f))
+        val chosen = file.chosen
+        if (chosen != null) {
+            Text(chosen, color = Pc.SlideValue, fontSize = 15.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(start = 12.dp).weight(1f, fill = false))
+            Text("Clear", color = Pc.Accent, fontSize = 17.sp, maxLines = 1, modifier = Modifier.clickable { vm.clearPluginFile(file.key) }.padding(start = 12.dp))
+        } else {
+            Text("Import", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
         }
     }
 }

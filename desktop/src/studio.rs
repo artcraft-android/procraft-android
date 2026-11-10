@@ -110,6 +110,11 @@ struct Section {
     controls: &'static [Control],
 }
 
+/// A brush's own sound, shown while a plugin makes strokes' sounds: as the plugin sets, one of six,
+/// or none.
+const BRUSH_SOUND: &str = "brush_sound";
+const BRUSH_SOUNDS: &[&str] = &["Default", "Eraser", "Pencil", "Pen", "Paintbrush", "Airbrush", "Spray can", "No sound"];
+
 /// A page: its name, its icon (shown this wide) and its sections.
 struct Page {
     name: &'static str,
@@ -472,6 +477,7 @@ const PAGES: &[Page] = &[
                     slider("min_opacity", "Minimum opacity"),
                 ],
             },
+            Section { title: Some("Sound"), controls: &[Control::Choice(BRUSH_SOUND, BRUSH_SOUNDS)] },
         ],
     },
     Page {
@@ -689,6 +695,8 @@ pub enum Asked {
 #[derive(Default)]
 pub struct Studio {
     pub open: bool,
+    /// Whether a plugin makes strokes' sounds: the Properties page shows a brush's own.
+    sound: bool,
     tab: usize,
     name: String,
     /// The name as typed in its field on the About page, and whether the field has been focused.
@@ -961,6 +969,7 @@ impl Studio {
         if !self.open {
             return None;
         }
+        self.sound = prefs.plugins.makes_stroke_sound();
         if self.preview_due.is_some_and(|due| Instant::now() >= due) {
             self.preview_due = None;
             self.preview = brush_preview(ctx, session);
@@ -1124,6 +1133,10 @@ impl Studio {
                     let width = ui.available_width();
                     let mut above = Edge::Top;
                     for (k, section) in page.sections.iter().enumerate() {
+                        // a brush's own sound only while a plugin makes the sound
+                        if !self.sound && matches!(section.controls.first(), Some(Control::Choice(BRUSH_SOUND, _))) {
+                            continue;
+                        }
                         // the About page is headed by the brush's name
                         let about = matches!(section.controls.first(), Some(Control::About));
                         let title = section.title.map(str::to_owned).or_else(|| about.then(|| self.name.clone()));

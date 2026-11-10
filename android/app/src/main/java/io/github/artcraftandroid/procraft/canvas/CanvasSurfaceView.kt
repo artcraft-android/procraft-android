@@ -372,6 +372,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
                 // (told each time: a session opened meanwhile knows it too)
                 session?.setTouchPenHovering(true)
+                // a spray can's sound (a plugin's) rattles shaken above the canvas
+                session?.soundHover(e.x, e.y)
                 penHovering = true
                 if (painting()) vm.showCursor(Offset(e.x, e.y), hovering = true)
                 // and Liquify's ring where the pen hovers

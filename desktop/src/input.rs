@@ -351,6 +351,8 @@ impl Input {
                     self.moved(session, MOUSE, p, pressure);
                     return true;
                 }
+                // a spray can's sound (a plugin's) rattles shaken above the canvas
+                session.sound_hover(p.0, p.1);
                 self.hover_shown
             }
             WindowEvent::MouseInput { state, button, .. } => {

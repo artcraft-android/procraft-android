@@ -23,6 +23,8 @@ struct OnHook {
     running: Shared,
     /// The hooks it is on, as bits.
     hooks: u32,
+    /// The files picked for its file controls, by control (none: not one, or none picked).
+    files: Vec<Option<PathBuf>>,
 }
 
 #[derive(Default)]
@@ -142,6 +144,43 @@ impl Hooks {
             Some(colour) => Ok(Some(colour)),
             None => running.interface_colour(role),
         })
+    }
+
+    /// The sound hook: what the stroke being drawn sounds like, if a plugin makes one (the first on
+    /// the hook): how loud, whether erasing makes a sound and which, one sound for every brush or
+    /// each brush's kind's, each the plugin's or the app's own; and the recording each sound plays
+    /// in place of its own, of the files picked for that plugin's controls.
+    pub(crate) fn stroke_sound(&self) -> Option<(crate::stroke_sound::Settings, crate::stroke_sound::Recordings)> {
+        if !self.has(Hook::StrokeSound) {
+            return None;
+        }
+        let settings = self.through(Hook::StrokeSound, None, |running, said| match said {
+            Some(settings) => Ok(Some(settings)),
+            None => Ok(Some(crate::stroke_sound::Settings {
+                recorded: {
+                    let mut recorded = [None; 6];
+                    for (kind, slot) in recorded.iter_mut().enumerate() {
+                        *slot = running.stroke_sound_file(kind)?;
+                    }
+                    recorded
+                },
+                volume: running.stroke_sound(0)?.unwrap_or(1.0),
+                eraser_own: running.stroke_sound(1)?.is_none_or(|on| on >= 0.5),
+                eraser: crate::stroke_sound::Settings::chosen_of(running.stroke_sound(3)?.unwrap_or(0.0))
+                    .unwrap_or(crate::stroke_sound::Kind::Eraser),
+                chosen: crate::stroke_sound::Settings::chosen_of(running.stroke_sound(2)?.unwrap_or(0.0)),
+            })),
+        })?;
+        // the files of the plugin that said so: the first on the hook
+        let working = self.working();
+        let files = working.on.iter().find(|p| p.hooks & Hook::StrokeSound.bit() != 0).map(|p| &p.files);
+        let recordings = settings.recorded.map(|index| index.and_then(|i| files?.get(i)?.clone()));
+        Some((settings, recordings))
+    }
+
+    /// Whether a plugin makes the stroke's sound: the apps play it while one does.
+    pub(crate) fn makes_stroke_sound(&self) -> bool {
+        self.has(Hook::StrokeSound)
     }
 
     /// The curves hook: whether QuickShape snaps a stroke that bends more than once to a curve
@@ -286,8 +325,27 @@ impl Hooks {
         working.on.retain(|p| p.id != id);
         let at = working.on.partition_point(|p| p.id < id);
         let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
-        working.on.insert(at, OnHook { id, running: Arc::new(Mutex::new(running)), hooks });
+        working.on.insert(at, OnHook { id, running: Arc::new(Mutex::new(running)), hooks, files: Vec::new() });
         self.rehook(&working);
+    }
+
+    /// The files picked for `id`'s file controls, by control.
+    pub(crate) fn files(&self, id: &str, files: Vec<Option<PathBuf>>) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.files = files;
+        }
+    }
+
+    /// The file picked for `id`'s control `index` (none: let go).
+    pub(crate) fn file(&self, id: &str, index: usize, file: Option<PathBuf>) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            if plugin.files.len() <= index {
+                plugin.files.resize(index + 1, None);
+            }
+            if let Some(slot) = plugin.files.get_mut(index) {
+                *slot = file;
+            }
+        }
     }
 
     /// Takes `id` off: from the next sample on, the app is as if it had never been.
@@ -589,6 +647,110 @@ pub(crate) mod tests {
         assert!(card(&plugins).problem.is_some());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn a_stroke_sounds_as_fast_as_it_moves_while_a_plugin_makes_it() {
+        let Some(s) = session() else { return };
+        let dir = store("sound");
+        let module = wat::parse_str(
+            r#"(module (func (export "procraft_stroke_sound") (param i32) (result f32) (f32.const 1)))"#,
+        )
+        .unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["stroke_sound"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        s.use_plugins(Arc::clone(&plugins));
+        let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
+        // a fast stroke under way
+        let fast: Vec<_> = (0..20).map(|i| sample(10.0 + i as f32 * 10.0, 50.0, f64::from(i) * 4.0)).collect();
+        s.stroke_begin(PointerKind::Finger, fast[..1].to_vec());
+        s.stroke_add(fast[1..].to_vec());
+        assert!(!plugins.makes_stroke_sound());
+        assert_eq!(rms(&s.stroke_sound(2_400, 48_000)), 0.0, "off: silent");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert!(plugins.makes_stroke_sound());
+        s.stroke_add(vec![sample(220.0, 50.0, 84.0)]);
+        let _ = s.stroke_sound(2_400, 48_000);
+        assert!(rms(&s.stroke_sound(2_400, 48_000)) > 0.02, "a fast stroke is heard");
+        // it ends: quiet again
+        s.stroke_end(vec![]);
+        let _ = s.stroke_sound(9_600, 48_000);
+        assert!(rms(&s.stroke_sound(2_400, 48_000)) < 0.002);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sound_plays_the_recording_picked_for_it() {
+        let dir = store("recording");
+        // the pencil's sound (4 + 1) plays the file of the first control
+        let module = wat::parse_str(
+            r#"(module (func (export "procraft_control") (param i32 f32))
+                (func (export "procraft_stroke_sound") (param i32) (result f32)
+                (if (result f32) (i32.eq (local.get 0) (i32.const 5)) (then (f32.const 0)) (else (f32.const -1)))))"#,
+        )
+        .unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["stroke_sound"]);
+        manifest["controls"] = json!([{ "key": "pencil", "type": "file", "label": "Pencil recording", "accepts": "sound" }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let key = format!("{ID}.pencil");
+        let recordings = || plugins.hooks().stroke_sound().map(|(_, recordings)| recordings).unwrap();
+        assert_eq!(recordings(), [None, None, None, None, None, None], "none picked");
+        let wav = crate::sound_file::write_wav(&vec![0.25; 4_800], 48_000);
+        assert!(!plugins.set_sound_file(key.clone(), "x".to_owned(), b"not a sound".to_vec()));
+        assert!(plugins.set_sound_file(key.clone(), "My pencil.wav".to_owned(), wav));
+        let picked = recordings()[1].clone().expect("the pencil's");
+        assert!(picked.is_file());
+        assert_eq!(recordings().iter().flatten().count(), 1);
+        // kept with the plugin, read back as it was
+        let again = Plugins::with_store(dir.clone());
+        let chosen = again.plugins().into_iter().flat_map(|p| p.controls).find_map(|c| match c {
+            crate::plugins::PluginControl::File { control } => control.chosen,
+            _ => None,
+        });
+        assert_eq!(chosen.as_deref(), Some("My pencil.wav"));
+        assert!(again.kept_lines().iter().all(|line| !line.starts_with(&key)));
+        // let go: the app's own again, and the file gone
+        assert!(plugins.clear_file(key));
+        assert_eq!(recordings()[1], None);
+        assert!(!picked.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_brush_sounds_plugin_answers_as_its_controls_say() {
+        use crate::stroke_sound::Kind;
+        let dir = store("brush-sounds");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "brush-sounds").unwrap();
+        assert_eq!(plugins.install(bytes.to_vec()), None);
+        const ID: &str = "io.github.artcraftandroid.brush-sounds";
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let said = || plugins.hooks().stroke_sound().unwrap();
+        // as it starts: full volume, erasing heard as the eraser, each brush its kind's, no recordings
+        let (settings, recordings) = said();
+        assert_eq!((settings.volume, settings.eraser_own, settings.eraser, settings.chosen), (1.0, true, Kind::Eraser, None));
+        assert_eq!(recordings, [None, None, None, None, None, None]);
+        // the controls moved
+        assert!(plugins.set_slider(format!("{ID}.sound"), 3.0).is_some());
+        assert!(plugins.set_switch(format!("{ID}.eraser"), false));
+        assert!(plugins.set_slider(format!("{ID}.eraser_sound"), 2.0).is_some());
+        let (settings, _) = said();
+        assert_eq!((settings.eraser_own, settings.eraser, settings.chosen), (false, Kind::Pencil, Some(Kind::Pen)));
+        // a recording for the pen and one for the spray can
+        let wav = crate::sound_file::write_wav(&vec![0.1; 4_800], 48_000);
+        assert!(plugins.set_sound_file(format!("{ID}.pen_recording"), "pen.wav".to_owned(), wav.clone()));
+        assert!(plugins.set_sound_file(format!("{ID}.spray_recording"), "can.wav".to_owned(), wav));
+        let (_, recordings) = said();
+        let heard: Vec<bool> = recordings.iter().map(Option::is_some).collect();
+        assert_eq!(heard, [false, false, true, false, false, true]);
+        assert!(plugins.clear_file(format!("{ID}.pen_recording")));
+        assert_eq!(said().1.iter().flatten().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
