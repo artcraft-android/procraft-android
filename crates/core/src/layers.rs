@@ -911,10 +911,30 @@ impl CanvasSession {
 
     /// The layer scaled to fit `max_side` pixels, or none before the canvas exists.
     pub fn layer_thumbnail(&self, id: u64, max_side: u32) -> Option<ThumbnailImage> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
-        match canvas.layer_thumbnail(gpu, &mut st.doc, LayerId(id), max_side) {
+        // each read started under the lock and waited for once it is let go, so touches and
+        // frames go on meanwhile (thumbnails are read after every change while Layers is open)
+        let id = LayerId(id);
+        let no_canvas = || procraft_gpu::GpuError::Readback("no canvas".into());
+        let read = || -> Result<procraft_gpu::Thumbnail, procraft_gpu::GpuError> {
+            let first = {
+                let mut guard = self.shared.lock();
+                let st = &mut *guard;
+                let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Err(no_canvas()) };
+                canvas.start_layer_thumbnail(gpu, &mut st.doc, id, max_side)?
+            };
+            let (coarse, mask) = match first {
+                procraft_gpu::LayerThumbnailStep::Ready(t) => return Ok(t),
+                procraft_gpu::LayerThumbnailStep::Coarse { pending, mask } => (pending.pixels()?, mask),
+            };
+            let fine = {
+                let mut guard = self.shared.lock();
+                let st = &mut *guard;
+                let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Err(no_canvas()) };
+                canvas.start_layer_thumbnail_fine(gpu, id, &coarse, mask, max_side)?
+            };
+            fine.pixels()
+        };
+        match read() {
             Ok(t) => Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba }),
             Err(e) => {
                 log::warn!("thumbnail: {e}");

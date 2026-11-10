@@ -574,6 +574,33 @@ impl PendingThumbnail {
     }
 }
 
+/// A layer thumbnail begun ([`Canvas::start_layer_thumbnail`]): the picture already, or the coarse
+/// copy it is found in on its way back.
+pub enum LayerThumbnailStep {
+    Ready(Thumbnail),
+    Coarse { pending: PendingThumbnail, mask: bool },
+}
+
+/// A layer thumbnail's region on its way back ([`Canvas::start_layer_thumbnail_fine`]), and what
+/// to cut it to once it is.
+pub struct FineThumbnail {
+    pending: PendingThumbnail,
+    /// Cut to what is painted once back (a mask's ink, else coverage), or left whole.
+    cut_mask: Option<bool>,
+}
+
+impl FineThumbnail {
+    /// The thumbnail, once the GPU has copied its region: cut to what is painted in it.
+    pub fn pixels(self) -> Result<Thumbnail, GpuError> {
+        let fine = self.pending.pixels()?;
+        let painted = self.cut_mask.and_then(|mask| if mask { ink_bounds(&fine) } else { alpha_bounds(&fine) });
+        Ok(match painted {
+            Some(b) => crop(&fine, b),
+            None => fine,
+        })
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct StampInstance {
@@ -7378,7 +7405,8 @@ impl Canvas {
     }
 
     /// A layer scaled to fit `max_side` pixels (premultiplied). Runs what is queued first, then
-    /// waits for the GPU.
+    /// waits for the GPU (see [`Canvas::start_layer_thumbnail`] for the same with the waits left
+    /// to the caller).
     pub fn layer_thumbnail(
         &mut self,
         gpu: &Gpu,
@@ -7386,20 +7414,62 @@ impl Canvas {
         id: LayerId,
         max_side: u32,
     ) -> Result<Thumbnail, GpuError> {
+        match self.start_layer_thumbnail(gpu, doc, id, max_side)? {
+            LayerThumbnailStep::Ready(t) => Ok(t),
+            LayerThumbnailStep::Coarse { pending, mask } => {
+                let coarse = pending.pixels()?;
+                self.start_layer_thumbnail_fine(gpu, id, &coarse, mask, max_side)?.pixels()
+            }
+        }
+    }
+
+    /// [`Canvas::layer_thumbnail`]'s first step: the picture already (a parked layer's), or a
+    /// coarse copy of the layer on its way back (8 pixels to one, fine enough not to miss a dot),
+    /// for the caller to wait for with whatever guards the canvas let go, then hand to
+    /// [`Canvas::start_layer_thumbnail_fine`].
+    pub fn start_layer_thumbnail(
+        &mut self,
+        gpu: &Gpu,
+        doc: &mut Document,
+        id: LayerId,
+        max_side: u32,
+    ) -> Result<LayerThumbnailStep, GpuError> {
         self.render(gpu, doc, None);
         let mask = doc.layer(id).is_some_and(|l| l.kind == LayerKind::Mask);
         if let Some(p) = self.parked_pictures(id, max_side).filter(|_| !mask) {
-            return Ok(shrink(p.drawn.as_ref().unwrap_or(&p.whole), max_side));
+            return Ok(LayerThumbnailStep::Ready(shrink(p.drawn.as_ref().unwrap_or(&p.whole), max_side)));
         }
         self.restore_all(gpu, [id], false);
+        let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
+        let side = (self.width.max(self.height) / 8).clamp(64, 2048);
+        Ok(LayerThumbnailStep::Coarse { pending: self.start_sample_view(gpu, &layer.view, self.full(), side), mask })
+    }
+
+    /// [`Canvas::layer_thumbnail`]'s second step, with the coarse copy back: the read of the
+    /// region it is painted in (or all of it, if nothing showed), cut to what is painted there
+    /// once it is back.
+    pub fn start_layer_thumbnail_fine(
+        &mut self,
+        gpu: &Gpu,
+        id: LayerId,
+        coarse: &Thumbnail,
+        mask: bool,
+        max_side: u32,
+    ) -> Result<FineThumbnail, GpuError> {
+        // parked again meanwhile, perhaps
+        self.restore_all(gpu, [id], false);
         let full = self.full();
+        let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
         // a mask is white where nothing is painted on it
-        let bounds = if doc.layer(id).is_some_and(|l| l.kind == LayerKind::Mask) { ink_bounds } else { alpha_bounds };
-        // where its pixels are: roughly, on a copy small enough to read back quickly but fine
-        // enough (8 pixels to one) not to miss a dot, then exactly, on the region drawn
-        let coarse = self.sample_layer(gpu, id, full, (self.width.max(self.height) / 8).clamp(64, 2048))?;
-        let Some([x0, y0, x1, y1]) = bounds(&coarse) else { return self.sample_layer(gpu, id, full, max_side) };
-        let (sx, sy) = (self.width as f32 / coarse.width as f32, self.height as f32 / coarse.height as f32);
+        let bounds: fn(&Thumbnail) -> Option<[u32; 4]> = if mask { ink_bounds } else { alpha_bounds };
+        let Some([x0, y0, x1, y1]) = bounds(coarse) else {
+            return Ok(FineThumbnail {
+                pending: self.start_sample_view(gpu, &layer.view, full, max_side),
+                cut_mask: None,
+            });
+        };
+        let (sx, sy) =
+            (self.width as f32 / coarse.width.max(1) as f32, self.height as f32 / coarse.height.max(1) as f32);
         let rect = IRect {
             x0: ((x0 as f32 - 1.0) * sx).floor() as i32,
             y0: ((y0 as f32 - 1.0) * sy).floor() as i32,
@@ -7407,11 +7477,7 @@ impl Canvas {
             y1: ((y1 as f32 + 1.0) * sy).ceil() as i32,
         }
         .intersect(full);
-        let fine = self.sample_layer(gpu, id, rect, max_side)?;
-        Ok(match bounds(&fine) {
-            Some(b) => crop(&fine, b),
-            None => fine,
-        })
+        Ok(FineThumbnail { pending: self.start_sample_view(gpu, &layer.view, rect, max_side), cut_mask: Some(mask) })
     }
 
     /// `rect` of a layer box-filtered to fit `max_side` pixels (never enlarged), read back.
