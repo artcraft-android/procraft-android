@@ -1697,7 +1697,7 @@ mod tests {
                 assert!(plugins.hooks().is_on(&card.id), "{}", card.name);
             }
         }
-        assert_eq!(plugins.filters().len(), 3);
+        assert_eq!(plugins.filters().len(), 4);
         // each does what it says, by its controls
         assert_eq!(plugins.set_slider(format!("{TOUCH}.x"), 10.0), Some(10.0));
         assert_eq!(landing(&plugins), (UNTOUCHED.0 + 10.0, UNTOUCHED.1));
@@ -1721,7 +1721,7 @@ mod tests {
         read_lines(&next, &plugins.kept_lines());
         assert_eq!(next.plugins(), plugins.plugins());
         assert_eq!(landing(&next), (UNTOUCHED.0 + 10.0, UNTOUCHED.1));
-        assert_eq!(next.filters().len(), 3);
+        assert_eq!(next.filters().len(), 4);
         // and off again, none does
         for card in plugins.plugins() {
             assert!(plugins.set_on(card.id, false));

@@ -18,6 +18,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("interface-size", include_bytes!("../bundled-plugins/interface-size.procraft-plugin")),
     ("opacity-together", include_bytes!("../bundled-plugins/opacity-together.procraft-plugin")),
     ("outline", include_bytes!("../bundled-plugins/outline.procraft-plugin")),
+    ("paper-texture", include_bytes!("../bundled-plugins/paper-texture.procraft-plugin")),
     ("paste-into-masks", include_bytes!("../bundled-plugins/paste-into-masks.procraft-plugin")),
     ("pin-panels", include_bytes!("../bundled-plugins/pin-panels.procraft-plugin")),
     ("posterise", include_bytes!("../bundled-plugins/posterise.procraft-plugin")),
