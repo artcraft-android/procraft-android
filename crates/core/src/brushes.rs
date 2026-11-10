@@ -359,9 +359,13 @@ impl CanvasSession {
     fn drawn_preview(&self, brush: procraft_engine::brush::Brush, width: u32, height: u32) -> Option<ThumbnailImage> {
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
         let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
-        // the preview it came with, while it is as it came
+        // the preview it came with, while it is as it came: a blank file preview (some imported
+        // brushes ship one) is no preview, so the brush draws its own
         if let Some((tw, th, rgba)) = brush.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
-            return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
+            let (pixels, _) = rgba.as_chunks::<4>();
+            if pixels.iter().any(|p| p[3] > 0) {
+                return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
+            }
         }
         // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
         let (gpu, kept) = {
@@ -429,5 +433,30 @@ impl CanvasSession {
         // kept for the next (one drawn meanwhile elsewhere already is)
         self.shared.lock().preview.get_or_insert((canvas, doc));
         Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use procraft_engine::brush::Brush;
+
+    use crate::CanvasSession;
+
+    /// A brush file whose own preview is blank (a brush imported from another app can bring one):
+    /// the library draws the brush instead of showing nothing.
+    #[test]
+    fn a_blank_brush_file_preview_is_drawn_from_the_brush() {
+        let s = CanvasSession::new(64, 64);
+        if !s.prepare_offscreen() {
+            return;
+        }
+        let mut brush = Brush::round_pen();
+        let blank = crate::project::rgba_png(8, 8, &[0u8; 8 * 8 * 4]);
+        brush.thumbnail = Some(Arc::from(blank));
+        let preview = s.drawn_preview(brush, 240, 60).expect("a preview");
+        let painted = preview.rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+        assert!(painted > 100, "{painted} pixels");
     }
 }
