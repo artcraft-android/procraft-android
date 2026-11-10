@@ -74,6 +74,9 @@
                 <data android:pathSuffix=".sut" />
                 <data android:pathPattern=".*\\.sut" />
                 <data android:pathPattern=".*\\..*\\.sut" />
+                <data android:pathSuffix=".sutg" />
+                <data android:pathPattern=".*\\.sutg" />
+                <data android:pathPattern=".*\\..*\\.sutg" />
                 <data android:pathSuffix=".kpp" />
                 <data android:pathPattern=".*\\.kpp" />
                 <data android:pathPattern=".*\\..*\\.kpp" />
@@ -131,6 +134,9 @@
                 <data android:pathSuffix=".sut" />
                 <data android:pathPattern=".*\\.sut" />
                 <data android:pathPattern=".*\\..*\\.sut" />
+                <data android:pathSuffix=".sutg" />
+                <data android:pathPattern=".*\\.sutg" />
+                <data android:pathPattern=".*\\..*\\.sutg" />
                 <data android:pathSuffix=".kpp" />
                 <data android:pathPattern=".*\\.kpp" />
                 <data android:pathPattern=".*\\..*\\.kpp" />
