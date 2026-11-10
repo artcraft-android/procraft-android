@@ -881,11 +881,16 @@ impl CanvasSession {
     /// [`Self::canvas_thumbnail`], but without the private layers, so a private insert or paste
     /// never shows in the replay or its video. None before the canvas exists.
     pub fn time_lapse_frame(&self, max_side: u32) -> Option<ThumbnailImage> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
-        let private = st.doc.private_layers();
-        let t = canvas.composite_thumbnail_without(gpu, &mut st.doc, max_side, &private).ok()?;
+        // the copy started under the lock, waited for once it is let go: touches and frames go
+        // on while the GPU copies it
+        let pending = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
+            let private = st.doc.private_layers();
+            canvas.start_composite_thumbnail_without(gpu, &mut st.doc, max_side, &private)
+        };
+        let t = pending.pixels().ok()?;
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 

@@ -559,6 +559,21 @@ pub struct Thumbnail {
     pub rgba: Vec<u8>,
 }
 
+/// A [`Thumbnail`] on its way back from the GPU: its copy is queued (under whatever lock guards
+/// the canvas), its pixels waited for later, the lock let go ([`PendingThumbnail::pixels`]).
+pub struct PendingThumbnail {
+    width: u32,
+    height: u32,
+    read: Readback,
+}
+
+impl PendingThumbnail {
+    /// The picture, once the GPU has copied it.
+    pub fn pixels(self) -> Result<Thumbnail, GpuError> {
+        Ok(Thumbnail { width: self.width, height: self.height, rgba: self.read.pixels()? })
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct StampInstance {
@@ -7520,7 +7535,36 @@ impl Canvas {
         }
         self.invalidate();
         self.render_finished(gpu, &mut shown);
-        let thumbnail = self.sample_view(gpu, &self.composite_view, self.full(), max_side);
+        let thumbnail = self.start_sample_view(gpu, &self.composite_view, self.full(), max_side);
+        self.invalidate();
+        self.render_finished(gpu, doc);
+        thumbnail.pixels()
+    }
+
+    /// [`Canvas::composite_thumbnail_without`] started: the picture's copy queued, its pixels to be
+    /// waited for once whatever guards the canvas is let go (a time-lapse frame, taken after each
+    /// change, would otherwise hold the next touches up while the GPU copies it).
+    pub fn start_composite_thumbnail_without(
+        &mut self,
+        gpu: &Gpu,
+        doc: &mut Document,
+        max_side: u32,
+        left_out: &[LayerId],
+    ) -> PendingThumbnail {
+        if left_out.is_empty() {
+            if !self.busy() {
+                self.render(gpu, doc, None);
+            }
+            return self.start_sample_view(gpu, &self.composite_view, self.full(), max_side);
+        }
+        self.render(gpu, doc, None);
+        let mut shown = doc.clone();
+        for &id in left_out {
+            shown.set_visible(id, false);
+        }
+        self.invalidate();
+        self.render_finished(gpu, &mut shown);
+        let thumbnail = self.start_sample_view(gpu, &self.composite_view, self.full(), max_side);
         self.invalidate();
         self.render_finished(gpu, doc);
         thumbnail
@@ -7534,6 +7578,11 @@ impl Canvas {
         rect: IRect,
         max_side: u32,
     ) -> Result<Thumbnail, GpuError> {
+        self.start_sample_view(gpu, source, rect, max_side).pixels()
+    }
+
+    /// [`Canvas::sample_view`] started: the copy back queued, the pixels waited for later.
+    fn start_sample_view(&self, gpu: &Gpu, source: &wgpu::TextureView, rect: IRect, max_side: u32) -> PendingThumbnail {
         let side = max_side.clamp(1, 2048) as f32;
         let (rw, rh) = (rect.width().max(1) as f32, rect.height().max(1) as f32);
         let scale = (side / rw).min(side / rh).min(1.0);
@@ -7561,8 +7610,7 @@ impl Canvas {
         }
         self.write_uniforms(gpu, &data);
         gpu.queue.submit([encoder.finish()]);
-        let rgba = read_texture(gpu, &small, w, h)?;
-        Ok(Thumbnail { width: w, height: h, rgba })
+        PendingThumbnail { width: w, height: h, read: start_reading(gpu, &small, w, h) }
     }
 
     /// Layer `id` of canvas `from` (on the same device) as this canvas's, its pixels moved by
