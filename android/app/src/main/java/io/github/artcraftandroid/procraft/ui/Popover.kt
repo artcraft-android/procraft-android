@@ -173,10 +173,14 @@ fun Popover(
             val half = arrowH
             val tip = 2.dp.toPx()
             val radius = CornerRadius(corner.toPx())
+            // a corner the arrow comes near is rounded less, so that the arrow rises from a
+            // straight edge rather than hanging over the curve (at a small interface size, or a
+            // button near the screen's edge)
+            val near = { from: Float -> CornerRadius((from - half - tip).coerceIn(0f, corner.toPx())) }
             val outline = Path().apply {
                 when (side) {
                     ArrowSide.TOP -> {
-                        addRoundRect(RoundRect(0f, arrowH, size.width, size.height, radius))
+                        addRoundRect(RoundRect(0f, arrowH, size.width, size.height, near(at), near(size.width - at), radius, radius))
                         moveTo(at - half - tip, arrowH + 0.5f)
                         lineTo(at - tip, tip)
                         quadraticTo(at, 0f, at + tip, tip)
@@ -185,7 +189,7 @@ fun Popover(
                     }
                     ArrowSide.BOTTOM -> {
                         val h = size.height
-                        addRoundRect(RoundRect(0f, 0f, size.width, h - arrowH, radius))
+                        addRoundRect(RoundRect(0f, 0f, size.width, h - arrowH, radius, radius, near(size.width - at), near(at)))
                         moveTo(at - half - tip, h - arrowH - 0.5f)
                         lineTo(at - tip, h - tip)
                         quadraticTo(at, h, at + tip, h - tip)
@@ -193,7 +197,7 @@ fun Popover(
                         close()
                     }
                     ArrowSide.LEFT -> {
-                        addRoundRect(RoundRect(arrowH, 0f, size.width, size.height, radius))
+                        addRoundRect(RoundRect(arrowH, 0f, size.width, size.height, near(at), radius, radius, near(size.height - at)))
                         moveTo(arrowH + 0.5f, at - half - tip)
                         lineTo(tip, at - tip)
                         quadraticTo(0f, at, tip, at + tip)
@@ -202,7 +206,7 @@ fun Popover(
                     }
                     ArrowSide.RIGHT -> {
                         val w = size.width
-                        addRoundRect(RoundRect(0f, 0f, w - arrowH, size.height, radius))
+                        addRoundRect(RoundRect(0f, 0f, w - arrowH, size.height, radius, near(at), near(size.height - at), radius))
                         moveTo(w - arrowH - 0.5f, at - half - tip)
                         lineTo(w - tip, at - tip)
                         quadraticTo(w, at, w - tip, at + tip)

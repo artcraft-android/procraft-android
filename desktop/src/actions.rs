@@ -14,7 +14,7 @@ use procraft_core::{
 use crate::animated_export::Animated;
 use crate::files::Format;
 use crate::icons;
-use crate::look::{Look, Themed, Weight, argb, cubic_bezier, highlight, mix, pc, text, text_width, wrapped};
+use crate::look::{Look, Themed, Weight, argb, cubic_bezier, highlight, mix, pc, text, wrapped};
 use crate::menu::{Glass, Menu};
 use crate::panel::{self, PANEL_TITLE};
 use crate::prefs::{CursorShows, CursorStyle, Prefs, RAPID_UNDO_MAX_S, RAPID_UNDO_MIN_S};
@@ -47,7 +47,6 @@ const PLUGIN_PROBLEM: f32 = 22.0;
 const PLUGIN_FOOT: f32 = 12.0;
 const PLUGINS_EMPTY: f32 = 60.0;
 const PLUGIN_INSET: f32 = 16.0;
-const PLUGIN_TAG: Themed = Themed(0x1FFFFFFF, 0x14000000);
 /// The panel ends this far above the window's bottom edge, and its rows scroll past this tall.
 const BOTTOM_MARGIN: f32 = 25.0;
 const MOST_ROWS: f32 = 760.0;
@@ -1050,15 +1049,6 @@ fn plugin_card(
     painter.rect_filled(area, 22, argb(ACTIONS_GROUP));
     let (left, name_y) = (area.left() + PLUGIN_INSET, area.top() + 12.0);
     text(&painter, pos2(left, name_y), Align2::LEFT_TOP, &plugin.name, 17.0, Weight::SemiBold, argb(PANEL_TITLE));
-    // the tag after the name
-    if plugin.experimental {
-        let tag = "experimental";
-        let tag_left = left + text_width(&painter, &plugin.name, 17.0, Weight::SemiBold) + 8.0;
-        let tag_width = text_width(&painter, tag, 12.0, Weight::Medium) + 14.0;
-        let pill = Rect::from_min_size(pos2(tag_left, name_y + 1.0), vec2(tag_width, 19.0));
-        painter.rect_filled(pill, 9, argb(PLUGIN_TAG));
-        text(&painter, pill.center(), Align2::CENTER_CENTER, tag, 12.0, Weight::Medium, argb(ACTIONS_ROW));
-    }
     let inside = width - 2.0 * PLUGIN_INSET;
     let said = wrapped(&painter, &plugin.description, 14.0, Weight::Regular, argb(ACTIONS_ROW), inside);
     let said_height = said.size().y;

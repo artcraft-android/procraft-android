@@ -588,26 +588,13 @@ private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
     }
 }
 
-/** The tag on a card. */
-private val PluginTag get() = if (Pc.light) Color(0x14000000) else Color(0x1FFFFFFF)
-
-/** A plugin: its name and tag, what it does, what is the matter with it, its controls whatever they are, and the rows that turn it on or off and remove it. */
+/** A plugin: its name, what it does, what is the matter with it, its controls whatever they are, and the rows that turn it on or off and remove it. */
 @Composable
 private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
         Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(plugin.name, color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                if (plugin.experimental) {
-                    Text(
-                        "experimental",
-                        color = Pc.ActionsRow,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        modifier = Modifier.padding(start = 8.dp).clip(RoundedCornerShape(9.dp)).background(PluginTag).padding(horizontal = 7.dp, vertical = 2.dp),
-                    )
-                }
             }
             Text(plugin.description, color = Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
             plugin.problem?.let { Text(it, color = Pc.SlideValue, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp)) }

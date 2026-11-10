@@ -79,8 +79,13 @@ pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: 
     let size = rect.size();
     look.shape(ui, slot, (arrow_x * 100.0).round() as i32, rect, |pixmap, t| {
         let mut pb = tiny_skia::PathBuilder::new();
-        round_rect(&mut pb, Rect::from_min_max(pos2(0.0, ARROW_HEIGHT), size.to_pos2()), [POPOVER_CORNER; 4]);
         let (half, tip) = (ARROW_HEIGHT, 2.0);
+        // a corner the arrow comes near is rounded less, so that the arrow rises from a straight
+        // edge rather than hanging over the curve (at a small interface size, or a button near
+        // the window's edge)
+        let near = |from: f32| (from - half - tip).clamp(0.0, POPOVER_CORNER);
+        let corners = [near(arrow_x), near(size.x - arrow_x), POPOVER_CORNER, POPOVER_CORNER];
+        round_rect(&mut pb, Rect::from_min_max(pos2(0.0, ARROW_HEIGHT), size.to_pos2()), corners);
         pb.move_to(arrow_x - half - tip, ARROW_HEIGHT + 0.5);
         pb.line_to(arrow_x - tip, tip);
         pb.quad_to(arrow_x, 0.0, arrow_x + tip, tip);
