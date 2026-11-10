@@ -10811,3 +10811,32 @@ fn a_copied_drawing_becomes_a_shape_source_filling_it_as_drawn() {
     let empty = crate::layers::ThumbnailImage { width: 4, height: 4, rgba: vec![0; 64] };
     assert!(crate::studio::source_from_copy(empty).is_empty());
 }
+
+#[test]
+fn smudging_moves_paint_only_inside_the_selection() {
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.6);
+    s.set_color(0.0, 0.0, 1.0);
+    for y in [40.0f32, 80.0, 120.0, 160.0] {
+        s.stroke_begin(PointerKind::Finger, vec![sample(10.0, y, 0.0)]);
+        s.stroke_add((1..20).map(|k| sample(10.0 + k as f32 * 9.5, y, k as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    let layer = s.layers()[0].id;
+    let before = s.copy_layer_contents(layer).unwrap().rgba;
+    // the left half selected; a smudge from inside it out across the middle
+    s.select_shape(false, 0.0, 0.0, 100.0, 200.0, crate::SelectionJoin::Add);
+    s.set_tool(ToolKind::Smudge);
+    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 20.0, 0.0)]);
+    s.stroke_add((1..40).map(|k| sample(60.0 + k as f32 * 3.0, 20.0 + k as f32 * 4.0, k as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let after = s.copy_layer_contents(layer).unwrap().rgba;
+    let changed = |xs: std::ops::Range<usize>| {
+        (0..200usize)
+            .flat_map(|y| xs.clone().map(move |x| (y * 200 + x) * 4))
+            .filter(|&i| before[i..i + 4] != after[i..i + 4])
+            .count()
+    };
+    assert!(changed(0..95) > 100, "smudged inside");
+    assert_eq!(changed(102..200), 0, "nothing moved outside");
+}

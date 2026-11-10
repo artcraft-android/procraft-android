@@ -130,6 +130,13 @@ struct WetPass {
 @group(1) @binding(1) var grains: texture_2d_array<f32>;
 @group(1) @binding(2) var shape_smp: sampler;
 @group(1) @binding(3) var grain_smp: sampler;
+// how much of each canvas pixel is selected (all of it without a selection): paint is moved only
+// as far as that, as a brush lays it
+@group(1) @binding(4) var selected: texture_2d<f32>;
+
+fn selected_at(p: vec2<i32>) -> f32 {
+    return textureSampleLevel(selected, shape_smp, (vec2<f32>(p) + 0.5) / vec2<f32>(st.size), 0.0).r;
+}
 
 fn pixel(x: i32, y: i32) -> vec4<f32> {
     let cx = clamp(x, 0, i32(st.size.x) - 1);
@@ -402,6 +409,8 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.preserve_alpha == 1u) {
         out = out * (w.a / max(out.a, 1e-6));
     }
+    // outside the selection the layer stays as it is
+    out = mix(w, out, selected_at(p));
     // rounded to 8 bits up or down at random, in proportion to the remainder, so that faint stamps
     // add up as they should instead of rounding away
     let h = dither(u32(p.x), u32(p.y), bitcast<u32>(st.center.x) ^ (bitcast<u32>(st.center.y) * 2654435761u));
@@ -464,6 +473,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.preserve_alpha == 1u) {
         out = out * (was.a / max(out.a, 1e-6));
     }
+    out = mix(was, out, selected_at(p));
     // dithered the same each time it is put together again
     let h = dither(u32(p.x), u32(p.y), 0u);
     work[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));

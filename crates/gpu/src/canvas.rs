@@ -8171,10 +8171,10 @@ impl Pipelines {
                 array_entry(1),
                 sampler_entry(2),
                 sampler_entry(3),
-                // the selection, filtered where the stamp samples it
+                // the selection, filtered where the stamp samples it (and where a smudge moves paint)
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
