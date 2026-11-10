@@ -5908,18 +5908,23 @@ fn a_layer_shown_alone_hides_the_others_until_solo_ends() {
     assert_eq!(s.solo(), Some(top));
     assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
     assert_eq!(pixel(&s, 80, 50), [0, 0, 0, 255]);
-    // undo changes the artwork, not how it is looked at
-    s.undo();
-    assert_eq!(s.solo(), Some(top));
-    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
-    assert!(s.set_solo(None));
-    assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
-    assert!(!s.set_solo(Some(999)));
-    // the layer shown alone undone away: every layer shows again
-    assert!(s.set_solo(Some(top)));
+    // a step of its own: undone, every layer shows again; redone, the layer alone again
     s.undo();
     assert_eq!(s.solo(), None);
     assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
+    s.redo();
+    assert_eq!(s.solo(), Some(top));
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    // ended, a step too: undone, the layer alone again
+    assert!(s.set_solo(None));
+    assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
+    s.undo();
+    assert_eq!((s.solo(), pixel(&s, 20, 50)), (Some(top), [255, 255, 255, 255]));
+    // asked for again as it is, or for no layer: no step
+    assert!(s.set_solo(Some(top)));
+    assert!(!s.set_solo(Some(999)));
+    s.undo();
+    assert_eq!(s.solo(), None, "the undo took back the solo, not a step that changed nothing");
 }
 
 #[test]

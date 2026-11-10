@@ -743,20 +743,14 @@ impl CanvasSession {
     }
 
     /// Shows layer `id` alone, the others left out of the picture (solo visibility), or with
-    /// none every layer as it is set again. Not an undo step; false if `id` isn't a layer.
+    /// none every layer as it is set again: an undo step, as the reference's is. False if `id`
+    /// isn't a layer.
     pub fn set_solo(&self, id: Option<u64>) -> bool {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
         let solo = id.map(LayerId);
-        if solo.is_some_and(|s| st.doc.layer(s).is_none()) {
+        if solo.is_some_and(|s| self.shared.lock().doc.layer(s).is_none()) {
             return false;
         }
-        st.doc.solo = solo;
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.invalidate();
-        }
-        st.revision += 1;
-        self.shared.frame(st);
+        self.change("Solo visibility", |d| (d.solo != solo).then(|| d.solo = solo));
         true
     }
 

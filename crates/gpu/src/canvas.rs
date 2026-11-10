@@ -5707,13 +5707,13 @@ impl Canvas {
             }
             self.dirty = self.dirty.union(rect);
         }
-        let solo = doc.solo;
         let replaced = step.doc.map(|before| Box::new(std::mem::replace(doc, *before)));
         if let Some(replaced) = &replaced {
             // no layer it numbered numbered again: its pixels may still be held for redo
             doc.keep_ids_from(replaced);
-            // a layer shown alone is how the artwork is looked at, not a change to undo
-            doc.solo = solo.filter(|s| doc.layer(*s).is_some());
+            // the layer shown alone as it was (showing one alone is a step of its own), if it
+            // is still there
+            doc.solo = doc.solo.filter(|s| doc.layer(*s).is_some());
             self.dirty = self.full();
         }
         let selection = step.selection.map(|before| {
