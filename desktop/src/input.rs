@@ -29,6 +29,54 @@ const R_TAP: Duration = Duration::from_millis(300);
 /// The mouse's pointer id: touches have the platform's.
 const MOUSE: u64 = u64::MAX;
 
+/// Which touch the interface follows as its pointer. egui follows the first touch down and no other
+/// until it lifts, so a hand resting on the canvas would keep a finger off the panels and the side
+/// bar. A touch landing on the interface while the pointer's touch rests on the canvas takes the
+/// pointer over; the resting one is cancelled for the interface and unheard by it from then on
+/// (the canvas goes on hearing it as before).
+#[derive(Default)]
+pub struct InterfaceTouches {
+    /// The pointer's touch as it last came, and whether it landed on the canvas.
+    pointer: Option<(Touch, bool)>,
+    set_aside: Vec<u64>,
+}
+
+impl InterfaceTouches {
+    /// What of `event` the interface hears, in order (`on_interface`: whether a point is on the
+    /// interface rather than the canvas): nothing, the event, or the resting touch cancelled and then
+    /// the event.
+    pub fn route(&mut self, event: WindowEvent, on_interface: impl Fn((f32, f32)) -> bool) -> Vec<WindowEvent> {
+        let WindowEvent::Touch(touch) = event else { return vec![event] };
+        if self.set_aside.contains(&touch.id) {
+            if matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                self.set_aside.retain(|id| *id != touch.id);
+            }
+            return Vec::new();
+        }
+        let following = self.pointer.is_some_and(|(p, _)| p.id == touch.id);
+        let mut heard = Vec::new();
+        match touch.phase {
+            TouchPhase::Started => {
+                let on_canvas = !on_interface((touch.location.x as f32, touch.location.y as f32));
+                match self.pointer {
+                    None => self.pointer = Some((touch, on_canvas)),
+                    Some((resting, true)) if !on_canvas => {
+                        heard.push(WindowEvent::Touch(Touch { phase: TouchPhase::Cancelled, ..resting }));
+                        self.set_aside.push(resting.id);
+                        self.pointer = Some((touch, false));
+                    }
+                    Some(_) => {}
+                }
+            }
+            TouchPhase::Moved if following => self.pointer = self.pointer.map(|(_, on)| (touch, on)),
+            TouchPhase::Ended | TouchPhase::Cancelled if following => self.pointer = None,
+            _ => {}
+        }
+        heard.push(WindowEvent::Touch(touch));
+        heard
+    }
+}
+
 pub struct Input {
     clock: Instant,
     /// What the touches asked, for the app to do at the next frame.
@@ -515,9 +563,10 @@ impl Input {
         let known = self.down.contains(&touch.id);
         match phase {
             TouchPhase::Started => {
-                // the first touch must land on the canvas; more may land anywhere (one that didn't
-                // is kept, so no outline hovers while it is down)
-                if self.down.is_empty() && over(p) {
+                // a touch on the interface is the interface's, as on the tablet: a finger working
+                // the side bar beside a hand resting on the canvas is no gesture with it (one kept
+                // aside, so no outline hovers while it is down)
+                if over(p) {
                     self.ignored.retain(|i| *i != touch.id);
                     self.ignored.push(touch.id);
                     return true;
@@ -618,6 +667,56 @@ mod tests {
     fn view(session: &CanvasSession) -> (f32, f32, (f32, f32)) {
         let m = session.view_matrix();
         (m[0].hypot(m[1]), m[1].atan2(m[0]), (m[4], m[5]))
+    }
+
+    #[test]
+    fn a_finger_on_the_interface_takes_its_pointer_from_a_hand_resting_on_the_canvas() {
+        let mut touches = InterfaceTouches::default();
+        // the interface is left of x = 100
+        let on_interface = |p: (f32, f32)| p.0 < 100.0;
+        let phases = |heard: &[WindowEvent]| -> Vec<(u64, TouchPhase)> {
+            heard
+                .iter()
+                .filter_map(|e| match e {
+                    WindowEvent::Touch(t) => Some((t.id, t.phase)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut route = |event| phases(&touches.route(event, on_interface));
+        // the hand rests on the canvas and moves a little
+        assert_eq!(route(finger(1, TouchPhase::Started, 400.0, 300.0)), [(1, TouchPhase::Started)]);
+        assert_eq!(route(finger(1, TouchPhase::Moved, 402.0, 301.0)), [(1, TouchPhase::Moved)]);
+        // a finger lands on the side bar: the hand is cancelled for the interface first
+        let landed = route(finger(2, TouchPhase::Started, 40.0, 300.0));
+        assert_eq!(landed, [(1, TouchPhase::Cancelled), (2, TouchPhase::Started)]);
+        // the finger drags a slider and lifts; the hand isn't heard from then on
+        assert_eq!(route(finger(2, TouchPhase::Moved, 40.0, 250.0)), [(2, TouchPhase::Moved)]);
+        assert_eq!(route(finger(1, TouchPhase::Moved, 404.0, 302.0)), []);
+        assert_eq!(route(finger(2, TouchPhase::Ended, 40.0, 250.0)), [(2, TouchPhase::Ended)]);
+        assert_eq!(route(finger(1, TouchPhase::Ended, 404.0, 302.0)), []);
+        // a pinch on the canvas is as it was: its second finger goes on
+        assert_eq!(route(finger(3, TouchPhase::Started, 400.0, 300.0)), [(3, TouchPhase::Started)]);
+        assert_eq!(route(finger(4, TouchPhase::Started, 500.0, 300.0)), [(4, TouchPhase::Started)]);
+        assert_eq!(route(finger(4, TouchPhase::Ended, 500.0, 300.0)), [(4, TouchPhase::Ended)]);
+        assert_eq!(route(finger(3, TouchPhase::Ended, 400.0, 300.0)), [(3, TouchPhase::Ended)]);
+        // and a finger on the interface first keeps it
+        assert_eq!(route(finger(5, TouchPhase::Started, 40.0, 300.0)), [(5, TouchPhase::Started)]);
+        assert_eq!(route(finger(6, TouchPhase::Started, 60.0, 300.0)), [(6, TouchPhase::Started)]);
+    }
+
+    #[test]
+    fn a_finger_on_the_interface_beside_a_resting_hand_is_no_gesture_on_the_canvas() {
+        let (session, mut input) = (shown(), Input::default());
+        session.set_touch_settings(procraft_core::TouchSettings::default());
+        let on_interface = |p: (f32, f32)| p.0 < 100.0;
+        let mut send = |event: WindowEvent| input.on_event(&session, &event, false, on_interface);
+        send(finger(1, TouchPhase::Started, 400.0, 300.0));
+        // a quick tap on the side bar: no two-finger tap (an undo) with the hand
+        assert!(send(finger(2, TouchPhase::Started, 40.0, 300.0)));
+        assert!(send(finger(2, TouchPhase::Ended, 40.0, 300.0)));
+        send(finger(1, TouchPhase::Ended, 400.0, 300.0));
+        assert!(!input.commands.iter().any(|c| matches!(c, TouchCommand::Undo)), "{:?}", input.commands);
     }
 
     #[test]

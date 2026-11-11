@@ -275,6 +275,7 @@ fn main() {
         // the gallery does
         dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
+        interface_touches: input::InterfaceTouches::default(),
         closed: false,
     };
     // a panic on the window's thread ends the app: said, rather than the window just vanishing
@@ -337,6 +338,8 @@ struct App {
     dropped: Vec<std::path::PathBuf>,
     /// Tap Assistance: a lone finger's touch, where it landed and when, while it is held there.
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
+    /// Which touch the interface follows: a finger on it beside a hand resting on the canvas.
+    interface_touches: input::InterfaceTouches,
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
     closed: bool,
 }
@@ -436,7 +439,15 @@ impl ApplicationHandler for App {
         // the system's clipboard
         let canvas_keys = session.is_some() && !screen.egui.egui_ctx().egui_wants_keyboard_input();
         screen.egui.set_clipboard_shortcuts(!canvas_keys);
-        let response = screen.egui.on_window_event(&screen.window, &event);
+        // a finger landing on the interface while a hand rests on the canvas takes the pointer over
+        let canvas = self.ui.canvas_rect;
+        let heard = self.interface_touches.route(event.clone(), |p| screen.over_interface(p, canvas));
+        let mut response = egui_winit::EventResponse { consumed: false, repaint: false };
+        for each in &heard {
+            let one = screen.egui.on_window_event(&screen.window, each);
+            response.consumed |= one.consumed;
+            response.repaint |= one.repaint;
+        }
         // egui counts every redraw as wanting another; the frames it does want come from its
         // repaint delay, paced in `about_to_wait`
         if response.repaint && event != WindowEvent::RedrawRequested {
