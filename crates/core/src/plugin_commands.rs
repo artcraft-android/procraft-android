@@ -175,7 +175,10 @@ impl CanvasSession {
     pub(crate) fn plugin_step(&self) -> PluginStep<'_> {
         let mut st = self.shared.lock();
         st.finish_stroke();
-        if let Some(canvas) = st.canvas.as_mut() {
+        // (one inside another, an event told during an action, joins its step)
+        if st.plugin_stepping == 0
+            && let Some(canvas) = st.canvas.as_mut()
+        {
             canvas.mark_steps();
         }
         st.plugin_stepping += 1;
@@ -188,7 +191,9 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.plugin_stepping = st.plugin_stepping.saturating_sub(1);
-        if let Some(canvas) = st.canvas.as_mut() {
+        if st.plugin_stepping == 0
+            && let Some(canvas) = st.canvas.as_mut()
+        {
             canvas.collapse_steps();
         }
         self.shared.frame(st);
@@ -247,7 +252,7 @@ pub(crate) fn link(linker: &mut Linker<Host>, granted: &[PluginPermission]) -> R
     }
     if write {
         linker.func_wrap(FROM, "add_layer", |caller: Caller<'_, Host>| -> i64 {
-            session(&caller).map_or(0, |s| s.add_layer() as i64)
+            session(&caller).map_or(0, |s| s.add_layer_quietly() as i64)
         })?;
         linker.func_wrap(
             FROM,

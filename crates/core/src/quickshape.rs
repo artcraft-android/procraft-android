@@ -912,6 +912,9 @@ impl CanvasSession {
         if st.shape.is_some() {
             st.finish_stroke();
             self.shared.frame(st);
+            drop(guard);
+            // the shape's stroke kept: plugins told
+            self.tell_plugins(crate::plugin_run::Hook::StrokeKept);
         }
     }
 }

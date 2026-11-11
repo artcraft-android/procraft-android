@@ -27,12 +27,36 @@ struct OnHook {
     brush_keys: Vec<String>,
     /// On the picker hook: its picture's code.
     picture: Option<Arc<str>>,
+    /// On an event's hook: a copy of its code of its own for them, so that what an event calls in
+    /// the app never waits on this one (its other hooks' copy).
+    events: Option<Shared>,
+}
+
+/// A plugin of switches that is on: no code, its hooks each answered from its controls (yes while on,
+/// or the control at that place's value), whose values it is told as they change.
+struct Switched {
+    id: String,
+    hooks: u32,
+    answers: plugin_file::Answers,
+    values: Vec<f32>,
+}
+
+impl Switched {
+    /// What it answers at `hook`, as a number (yes is 1).
+    fn answer(&self, hook: Hook) -> f32 {
+        match self.answers.iter().find(|(h, _)| *h == hook).and_then(|(_, at)| *at) {
+            None => 1.0,
+            Some(at) => self.values.get(at).copied().unwrap_or(0.0),
+        }
+    }
 }
 
 #[derive(Default)]
 struct Working {
     /// In id order, so plugins go in the same order however they were turned on.
     on: Vec<OnHook>,
+    /// The plugins of switches on, in id order.
+    switched: Vec<Switched>,
     /// What stopped since the list last asked, and why.
     stopped: Vec<(String, Stop)>,
     /// What the app hasn't told yet: whoever is drawing sees the stroke change, not the list.
@@ -84,7 +108,32 @@ impl Hooks {
     /// The bits go by what is on now.
     fn rehook(&self, working: &Working) {
         let hooked = working.on.iter().fold(0, |bits, plugin| bits | plugin.hooks);
+        let hooked = working.switched.iter().fold(hooked, |bits, plugin| bits | plugin.hooks);
         self.hooked.store(hooked, Ordering::Relaxed);
+    }
+
+    /// Whether a plugin of switches on `hook` says yes.
+    fn switched_yes(&self, hook: Hook) -> bool {
+        let working = self.working();
+        working.switched.iter().any(|p| p.hooks & hook.bit() != 0 && p.answer(hook) != 0.0)
+    }
+
+    /// The number the first plugin of switches on `hook` answers, if one is on it.
+    fn switched_number(&self, hook: Hook) -> Option<f32> {
+        let working = self.working();
+        working.switched.iter().find(|p| p.hooks & hook.bit() != 0).map(|p| p.answer(hook))
+    }
+
+    /// Puts the plugin of switches `id` on `hooks`, each answered as `answers` says from `values`
+    /// (its controls').
+    pub(crate) fn put_switches(&self, id: String, hooks: &[Hook], answers: plugin_file::Answers, values: Vec<f32>) {
+        let mut working = self.working();
+        working.on.retain(|p| p.id != id);
+        working.switched.retain(|p| p.id != id);
+        let at = working.switched.partition_point(|p| p.id < id);
+        let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
+        working.switched.insert(at, Switched { id, hooks, answers, values });
+        self.rehook(&working);
     }
 
     /// `start` through each plugin on `hook`, in turn. One that stops is off the hooks there and then,
@@ -128,14 +177,16 @@ impl Hooks {
     /// composited. It only asks: reading either is the app's, and it is a read like any other.
     pub(crate) fn pick_layer(&self) -> bool {
         self.has(Hook::PickLayer)
-            && self.through(Hook::PickLayer, false, |running, said| Ok(said | running.pick_layer()?))
+            && (self.switched_yes(Hook::PickLayer)
+                || self.through(Hook::PickLayer, false, |running, said| Ok(said | running.pick_layer()?)))
     }
 
     /// The fill-by-all hook: whether ColorDrop measures what it fills on the canvas as composited
     /// (every layer seen) rather than on the current layer or the reference layer. It only asks.
     pub(crate) fn fill_all_layers(&self) -> bool {
         self.has(Hook::FillAllLayers)
-            && self.through(Hook::FillAllLayers, false, |running, said| Ok(said | running.fill_all_layers()?))
+            && (self.switched_yes(Hook::FillAllLayers)
+                || self.through(Hook::FillAllLayers, false, |running, said| Ok(said | running.fill_all_layers()?)))
     }
 
     /// The colour hook: the colour (0xRRGGBB) the interface draws `role` in, if a plugin says (the
@@ -193,6 +244,35 @@ impl Hooks {
         }
     }
 
+    /// Whether a plugin is on `hook`, an event's (see [`Hooks::tell`]).
+    pub(crate) fn listens(&self, hook: Hook) -> bool {
+        self.has(hook)
+    }
+
+    /// Tells the plugins on `hook` (`stroke_kept` or `layer_added`) that it happened, on the artwork
+    /// `session`: each acts as an action does, briefly. One that goes wrong comes off and says why.
+    pub(crate) fn tell(&self, hook: Hook, session: Arc<CanvasSession>) {
+        let kind = match hook {
+            Hook::StrokeKept => 1,
+            Hook::LayerAdded => 2,
+            _ => return,
+        };
+        if !self.has(hook) {
+            return;
+        }
+        let told: Vec<(String, Shared)> = {
+            let working = self.working();
+            let on = working.on.iter().filter(|plugin| plugin.hooks & hook.bit() != 0);
+            on.map(|p| (p.id.clone(), Arc::clone(p.events.as_ref().unwrap_or(&p.running)))).collect()
+        };
+        for (id, running) in told {
+            let answer = at_work(&running).event(kind, Arc::clone(&session));
+            if let Err(stop) = answer {
+                self.stopped(&id, stop);
+            }
+        }
+    }
+
     /// Whether a plugin draws in-betweens: the frame options then offer In-between.
     pub(crate) fn tweens(&self) -> bool {
         self.has(Hook::Inbetween)
@@ -222,7 +302,8 @@ impl Hooks {
     /// square.
     pub(crate) fn colour_triangle(&self) -> bool {
         self.has(Hook::ColourTriangle)
-            && self.through(Hook::ColourTriangle, false, |running, said| Ok(said | running.colour_triangle()?))
+            && (self.switched_yes(Hook::ColourTriangle)
+                || self.through(Hook::ColourTriangle, false, |running, said| Ok(said | running.colour_triangle()?)))
     }
 
     /// Whether a plugin sets brushes' settings at random (the brush studio shows Randomise).
@@ -246,21 +327,24 @@ impl Hooks {
     /// every picked layer's.
     pub(crate) fn opacity_together(&self) -> bool {
         self.has(Hook::OpacityTogether)
-            && self.through(Hook::OpacityTogether, false, |running, said| Ok(said | running.opacity_together()?))
+            && (self.switched_yes(Hook::OpacityTogether)
+                || self.through(Hook::OpacityTogether, false, |running, said| Ok(said | running.opacity_together()?)))
     }
 
     /// The pin hook: whether a touch on the canvas with a panel open paints at once and leaves the
     /// panel up, rather than closing it (a tap) or fading it (a drag).
     pub(crate) fn pin_panels(&self) -> bool {
         self.has(Hook::PinPanels)
-            && self.through(Hook::PinPanels, false, |running, said| Ok(said | running.pin_panels()?))
+            && (self.switched_yes(Hook::PinPanels)
+                || self.through(Hook::PinPanels, false, |running, said| Ok(said | running.pin_panels()?)))
     }
 
     /// The undo notice hook: whether undo and redo go by without the notice naming what they took
     /// back or brought back.
     pub(crate) fn hide_undo_notice(&self) -> bool {
         self.has(Hook::HideUndoNotice)
-            && self.through(Hook::HideUndoNotice, false, |running, said| Ok(said | running.hide_undo_notice()?))
+            && (self.switched_yes(Hook::HideUndoNotice)
+                || self.through(Hook::HideUndoNotice, false, |running, said| Ok(said | running.hide_undo_notice()?)))
     }
 
     /// The radial hook: how many parts radial symmetry makes, if a plugin says (the first that
@@ -268,6 +352,10 @@ impl Hooks {
     pub(crate) fn radial_segments(&self) -> Option<u32> {
         if !self.has(Hook::RadialSegments) {
             return None;
+        }
+        // a plugin of switches' slider, held to what the hook takes
+        if let Some(n) = self.switched_number(Hook::RadialSegments) {
+            return Some((n.round().max(0.0) as u32).clamp(2, 64));
         }
         self.through(Hook::RadialSegments, None, |running, said| match said {
             Some(n) => Ok(Some(n)),
@@ -345,7 +433,8 @@ impl Hooks {
     }
 
     pub(crate) fn is_on(&self, id: &str) -> bool {
-        self.working().on.iter().any(|p| p.id == id)
+        let working = self.working();
+        working.on.iter().any(|p| p.id == id) || working.switched.iter().any(|p| p.id == id)
     }
 
     pub(crate) fn put_on(&self, id: String, running: Running, hooks: &[Hook]) {
@@ -354,8 +443,15 @@ impl Hooks {
         let at = working.on.partition_point(|p| p.id < id);
         let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
         let running = Arc::new(Mutex::new(running));
-        working.on.insert(at, OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None });
+        working.on.insert(at, OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None });
         self.rehook(&working);
+    }
+
+    /// `id`'s copy of its code for its events (see [`OnHook::events`]).
+    pub(crate) fn give_events(&self, id: &str, running: Running) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.events = Some(Arc::new(Mutex::new(running)));
+        }
     }
 
     /// `id`'s picture's code, for the picker hook.
@@ -417,6 +513,7 @@ impl Hooks {
     pub(crate) fn take_off(&self, id: &str) {
         let mut working = self.working();
         working.on.retain(|p| p.id != id);
+        working.switched.retain(|p| p.id != id);
         self.rehook(&working);
     }
 
@@ -424,7 +521,17 @@ impl Hooks {
     pub(crate) fn control(&self, id: &str, index: usize, value: f32) {
         {
             let mut working = self.working();
+            // a plugin of switches keeps the value, to answer from
+            if let Some(value_at) =
+                working.switched.iter_mut().find(|p| p.id == id).and_then(|p| p.values.get_mut(index))
+            {
+                *value_at = value;
+            }
             if let Some(at) = working.on.iter().position(|p| p.id == id) {
+                // its events' copy too
+                if let Some(events) = working.on.get(at).and_then(|p| p.events.as_ref()) {
+                    let _ = at_work(events).control(index, value);
+                }
                 let told = working.on.get(at).map(|p| at_work(&p.running).control(index, value));
                 if let Some(Err(stop)) = told {
                     let gone = working.on.remove(at);
@@ -709,6 +816,128 @@ pub(crate) mod tests {
         assert!(plugins.set_on(ID.to_owned(), false));
         assert!(!plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
         assert_eq!(s.layers().len(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugin_of_switches_answers_from_its_controls_while_on() {
+        let dir = store("switches");
+        let plugins = Plugins::with_store(dir.clone());
+        let hooks = plugins.hooks();
+        let mut manifest = crate::plugin_file::tests::switches(ID, json!(["radial_segments", "hide_undo_notice"]));
+        manifest["controls"] = json!([
+            { "key": "parts", "type": "slider", "label": "Segments", "least": 2, "most": 32, "step": 1, "starts": 8 },
+        ]);
+        manifest["answers"] = json!({ "radial_segments": "parts" });
+        assert_eq!(plugins.install(pack(&manifest, &[])), None);
+        assert_eq!((hooks.radial_segments(), hooks.hide_undo_notice()), (None, false), "imported, it says nothing");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!((hooks.radial_segments(), hooks.hide_undo_notice()), (Some(8), true));
+        // its slider moved: the answer follows
+        assert!(plugins.set_slider(format!("{ID}.parts"), 12.0).is_some());
+        assert_eq!(hooks.radial_segments(), Some(12));
+        // read back as the next start reads it, still on and as it was left
+        let next = restarted(&dir, &plugins);
+        assert_eq!(next.hooks().radial_segments(), Some(12));
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert_eq!((hooks.radial_segments(), hooks.hide_undo_notice()), (None, false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Told an event, adds a layer named "After".
+    const TOLD: &str = r#"(module
+        (import "procraft" "add_layer" (func $add (result i64)))
+        (import "procraft" "set_layer_name" (func $name (param i64 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "After")
+        (func (export "procraft_event") (param i32) (result i32)
+            (drop (call $name (call $add) (i32.const 0) (i32.const 5)))
+            (i32.const 0)))"#;
+
+    #[test]
+    fn a_plugin_is_told_a_stroke_was_kept_and_a_layer_added_and_acts_as_one_step() {
+        let Some(s) = session() else { return };
+        let dir = store("events");
+        let module = wat::parse_str(TOLD).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        manifest["hooks"] = json!(["stroke_kept", "layer_added"]);
+        manifest["permissions"] = json!(["artwork.write"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        let afters = |s: &CanvasSession| s.layers().iter().filter(|l| l.name == "After").count();
+        let before = s.layers().len();
+        // a stroke kept: told once
+        draw(&s);
+        assert_eq!(afters(&s), 1);
+        assert_eq!(s.layers().len(), before + 1);
+        // a layer added from the panel: told, and the layer the plugin adds itself tells nothing
+        s.add_layer();
+        assert_eq!(afters(&s), 2);
+        assert_eq!(s.layers().len(), before + 3);
+        // undo takes the plugin's step back first, then the layer added
+        s.undo();
+        assert_eq!((afters(&s), s.layers().len()), (1, before + 2));
+        s.undo();
+        assert_eq!((afters(&s), s.layers().len()), (1, before + 1));
+        // off: told nothing
+        assert!(plugins.set_on(ID.to_owned(), false));
+        s.add_layer();
+        assert_eq!(afters(&s), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// On `stroke_kept` and `opacity_together`: told a stroke, it sets the current layer's opacity
+    /// to a half, which asks its own `opacity_together`.
+    const HALVES: &str = r#"(module
+        (import "procraft" "current_layer" (func $current (result i64)))
+        (import "procraft" "set_layer_opacity" (func $opacity (param i64 f32) (result i32)))
+        (func (export "procraft_opacity_together") (result i32) (i32.const 1))
+        (func (export "procraft_event") (param i32) (result i32)
+            (drop (call $opacity (call $current) (f32.const 0.5)))
+            (i32.const 0)))"#;
+
+    #[test]
+    fn an_event_that_calls_into_its_own_other_hook_doesn_t_wait_on_itself() {
+        let Some(s) = session() else { return };
+        let dir = store("events-own-hook");
+        let module = wat::parse_str(HALVES).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        manifest["hooks"] = json!(["stroke_kept", "opacity_together"]);
+        manifest["permissions"] = json!(["artwork.read", "artwork.write"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        // (on one copy of its code this waited on itself for good)
+        draw(&s);
+        let current = s.layers().into_iter().find(|l| l.current).unwrap();
+        assert!((current.opacity - 0.5).abs() < 1e-3, "{}", current.opacity);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_layer_the_app_adds_for_its_own_work_tells_no_plugin() {
+        let Some(s) = session() else { return };
+        let dir = store("events-quiet");
+        let module = wat::parse_str(TOLD).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        manifest["hooks"] = json!(["layer_added"]);
+        manifest["permissions"] = json!(["artwork.write"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        draw(&s);
+        s.select_shape(false, 0.0, 0.0, 100.0, 100.0, crate::SelectionJoin::Add);
+        let before = s.layers().len();
+        assert!(s.copy_selection_to_layer().is_some());
+        assert_eq!(s.layers().len(), before + 1, "a selection copied to a layer: no plugin told");
+        assert!(s.layers().iter().all(|l| l.name != "After"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

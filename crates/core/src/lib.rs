@@ -1248,6 +1248,28 @@ impl Shared {
 #[derive(uniffi::Object)]
 pub struct CanvasSession {
     pub(crate) shared: Arc<Shared>,
+    /// Itself, for what it hands plugins told of an event.
+    me: std::sync::Weak<CanvasSession>,
+}
+
+impl CanvasSession {
+    /// Tells the plugins on `hook` (an event's) that it happened: each acts at once, as one step
+    /// of its own. Not while a plugin is changing the artwork itself: its changes tell nothing.
+    pub(crate) fn tell_plugins(&self, hook: plugin_run::Hook) {
+        let hooks = {
+            let st = self.shared.lock();
+            if st.plugin_stepping > 0 {
+                return;
+            }
+            st.hooks.clone()
+        };
+        let (Some(hooks), Some(me)) = (hooks, self.me.upgrade()) else { return };
+        if !hooks.listens(hook) {
+            return;
+        }
+        let _step = self.plugin_step();
+        hooks.tell(hook, me);
+    }
 }
 
 #[uniffi::export]
@@ -1411,7 +1433,8 @@ impl CanvasSession {
             reference_window: Default::default(),
             reference_picture: None,
         };
-        Arc::new(CanvasSession {
+        Arc::new_cyclic(|me| CanvasSession {
+            me: me.clone(),
             shared: Arc::new(Shared {
                 state: parking_lot::Mutex::new(state),
                 wake: parking_lot::Condvar::new(),
@@ -1713,6 +1736,8 @@ impl CanvasSession {
             self.shared.frame(st);
             return;
         }
+        // (painted into an open adjustment, it tells no plugin: what one did would end it)
+        let tells = !st.adjusting;
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let stamps = builder.add(&canvas_samples);
         // (a stroke shown with a tip lays them with the rest of it, as it ends)
@@ -1728,6 +1753,11 @@ impl CanvasSession {
         st.bake_painted_on();
         st.remember_last_stroke();
         self.shared.frame(st);
+        drop(guard);
+        // plugins told it was kept, before the next touch is taken
+        if tells {
+            self.tell_plugins(plugin_run::Hook::StrokeKept);
+        }
     }
 
     /// Drops the stroke (a second finger turned it into a gesture).
@@ -2012,7 +2042,7 @@ impl CanvasSession {
 
     /// Undoes the last step; returns what it was called, if it was named.
     pub fn undo(&self) -> Option<String> {
-        // (not while a plugin changes the artwork: its step isn't one yet)
+        // (nothing while a plugin changes the artwork: its step isn't one yet)
         if self.shared.lock().plugin_stepping > 0 {
             return None;
         }

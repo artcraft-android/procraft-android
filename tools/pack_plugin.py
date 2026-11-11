@@ -90,7 +90,8 @@ def pack(name, out):
     with open(os.path.join(folder, MANIFEST), encoding='utf-8') as f:
         manifest = json.load(f)
     files = {}
-    if 'hooks' in manifest['holds']:
+    # hooks with code built from its crate; a plugin of switches (no crate) has none
+    if 'hooks' in manifest['holds'] and os.path.isfile(os.path.join(folder, 'Cargo.toml')):
         files[MODULE] = built(name, folder)
     if 'filter' in manifest['holds']:
         with open(os.path.join(folder, FILTER), 'rb') as f:

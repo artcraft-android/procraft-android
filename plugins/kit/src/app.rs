@@ -310,6 +310,33 @@ macro_rules! actions {
     };
 }
 
+/// What a plugin on the `stroke_kept` or `layer_added` hook is told of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Event {
+    /// A stroke was kept.
+    StrokeKept,
+    /// A layer was added from the Layers panel.
+    LayerAdded,
+}
+
+/// Exports `procraft_event`: each event the plugin's hooks tell of calls `$told` (a `fn(Event)`),
+/// which acts on the artwork as an action does (and should be quick).
+#[macro_export]
+macro_rules! events {
+    ($told:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn procraft_event(kind: i32) -> i32 {
+            let told: fn($crate::app::Event) = $told;
+            match kind {
+                1 => told($crate::app::Event::StrokeKept),
+                2 => told($crate::app::Event::LayerAdded),
+                _ => {}
+            }
+            0
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

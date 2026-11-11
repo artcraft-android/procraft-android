@@ -177,6 +177,9 @@ const RADIAL_PARTS: std::ops::RangeInclusive<i32> = 2..=64;
 const MEMORY: &str = "memory";
 const CONTROL: &str = "procraft_control";
 const ACTION: &str = "procraft_action";
+/// What a plugin on the `stroke_kept` or `layer_added` hook is told through (1 a stroke kept, 2 a
+/// layer added).
+const EVENT: &str = "procraft_event";
 const PANEL_EVENT: &str = "procraft_panel_event";
 const CANVAS_NEW: &str = "procraft_canvas_new";
 const CANVAS_TOUCH: &str = "procraft_canvas_touch";
@@ -216,6 +219,10 @@ pub(crate) enum Hook {
     StrokeSound,
     Inbetween,
     Picker,
+    /// Told each time a stroke is kept, acting on the artwork as an action does.
+    StrokeKept,
+    /// Told each time a layer is added from the Layers panel, acting as an action does.
+    LayerAdded,
 }
 
 impl Hook {
@@ -238,6 +245,8 @@ impl Hook {
             "stroke_sound" => Some(Hook::StrokeSound),
             "inbetween" => Some(Hook::Inbetween),
             "picker" => Some(Hook::Picker),
+            "stroke_kept" => Some(Hook::StrokeKept),
+            "layer_added" => Some(Hook::LayerAdded),
             _ => None,
         }
     }
@@ -262,7 +271,24 @@ impl Hook {
             Hook::StrokeSound => "This plugin can play a sound as you draw.",
             Hook::Inbetween => "This plugin can draw frames between your animation's frames.",
             Hook::Picker => "This plugin can draw the colour panel's Classic picker its own way.",
+            Hook::StrokeKept => "This plugin can act on your artwork each time you finish a stroke.",
+            Hook::LayerAdded => "This plugin can act on your artwork each time you add a layer.",
         }
+    }
+
+    /// Whether it only asks yes or a number, handing nothing over: a plugin with no code can answer
+    /// it from its controls.
+    pub(crate) fn answers_alone(self) -> bool {
+        matches!(
+            self,
+            Hook::PickLayer
+                | Hook::FillAllLayers
+                | Hook::RadialSegments
+                | Hook::HideUndoNotice
+                | Hook::PinPanels
+                | Hook::OpacityTogether
+                | Hook::ColourTriangle
+        )
     }
 
     /// It as a bit, in a set of hooks.
@@ -283,6 +309,7 @@ impl Hook {
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
+            Hook::StrokeKept | Hook::LayerAdded => exports(module, EVENT, &[ValType::I32], &[ValType::I32]),
             Hook::Picker => {
                 exports(module, PICKER_PICK, &[ValType::F32, ValType::F32], &[ValType::I64])
                     && exports(module, PICKER_POINT, &[ValType::F32, ValType::F32], &[ValType::I64])
@@ -581,6 +608,7 @@ pub(crate) struct Running {
     control: Option<TypedFunc<(i32, f32), ()>>,
     action: Option<TypedFunc<i32, i32>>,
     panel_event: Option<TypedFunc<(i32, f32), i32>>,
+    event: Option<TypedFunc<i32, i32>>,
     canvas: Option<CanvasCalls>,
 }
 
@@ -691,6 +719,7 @@ impl Running {
             let control = instance.get_typed_func(&store, CONTROL).ok();
             let action = instance.get_typed_func(&store, ACTION).ok();
             let panel_event = instance.get_typed_func(&store, PANEL_EVENT).ok();
+            let event = instance.get_typed_func(&store, EVENT).ok();
             let canvas = (|| {
                 Some(CanvasCalls {
                     new: instance.get_typed_func(&store, CANVAS_NEW).ok()?,
@@ -737,6 +766,7 @@ impl Running {
                 control,
                 action,
                 panel_event,
+                event,
                 canvas,
             })
         })?;
@@ -756,6 +786,22 @@ impl Running {
         let (mut left, until) = (ACTION_FUEL, Instant::now() + MOST_ACTION_TIME);
         let ran = guarded(|| long_call(store, action, index, &mut left, until).map(|_| ()));
         store.data_mut().session = None;
+        ran
+    }
+
+    /// Tells it event `kind` happened (1 a stroke kept, 2 a layer added), on the artwork `session`,
+    /// to act on as an action does, on a touch's budget: the canvas waits for it.
+    pub(crate) fn event(&mut self, kind: i32, session: std::sync::Arc<crate::CanvasSession>) -> Result<(), Stop> {
+        let Running { store, event, .. } = self;
+        let Some(event) = event.as_ref() else { return Ok(()) };
+        store.data_mut().session = Some(session as std::sync::Arc<dyn std::any::Any + Send + Sync>);
+        let (mut left, until) = (TOUCH_FUEL, Instant::now() + MOST_TOUCH_TIME);
+        let ran = guarded(|| long_call(store, event, kind, &mut left, until).map(|_| ()));
+        store.data_mut().session = None;
+        // an event shows no panel: one it began is dropped whole
+        let host = store.data_mut();
+        host.panel = None;
+        host.close_panel = false;
         ran
     }
 

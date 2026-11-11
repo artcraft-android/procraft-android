@@ -400,7 +400,7 @@ impl CanvasSession {
                 None => None,
             }
         };
-        let id = self.add_layer();
+        let id = self.add_layer_quietly();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if let (Some(canvas), Some(gpu), Some((rect, pixels))) = (st.canvas.as_mut(), st.gpu.as_ref(), part) {

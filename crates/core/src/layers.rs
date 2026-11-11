@@ -396,7 +396,12 @@ impl CanvasSession {
     /// A new empty layer above the current one, made current; 0 when the canvas has no room for
     /// another (see [`Document::layer_cap`]).
     pub fn add_layer(&self) -> u64 {
-        self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
+        let id = self.add_layer_quietly();
+        // a layer added by hand: plugins told
+        if id != 0 {
+            self.tell_plugins(crate::plugin_run::Hook::LayerAdded);
+        }
+        id
     }
 
     /// Add Frame (New Page with Page Assist): a new empty layer above the current one, as
@@ -1181,6 +1186,15 @@ fn unit_of(layers: &[LayerInfo], l: &LayerInfo) -> std::collections::HashSet<u64
         })
         .map(|o| o.id)
         .collect()
+}
+
+impl CanvasSession {
+    /// A new empty layer above the current one, as [`CanvasSession::add_layer`] adds, telling no
+    /// plugin: for the core's own work that makes one (a picture of a model, a selection copied to a
+    /// layer, a plugin's own).
+    pub(crate) fn add_layer_quietly(&self) -> u64 {
+        self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
