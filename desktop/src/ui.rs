@@ -152,6 +152,8 @@ pub struct Interface {
     /// Layer Select's list: where (points) and the layers drawn there, top first.
     layer_choice: Option<(egui::Pos2, Vec<u64>)>,
     actions_panel: Actions,
+    /// A plugin's panel's slider being moved: its row, and where it is.
+    plugin_panel_held: Option<(usize, f32)>,
     layers: Layers,
     pub look: Look,
     side_bar: SideBar,
@@ -265,6 +267,7 @@ impl Default for Interface {
             copy_paste: false,
             layer_choice: None,
             actions_panel: Actions::default(),
+            plugin_panel_held: None,
             layers: Layers::default(),
             look: Look::default(),
             side_bar: SideBar::default(),
@@ -375,6 +378,9 @@ impl Interface {
     /// The artwork is put away (to the gallery, for another, or with the window): brushes coming
     /// in from files are waited for, Recolor ends keeping what it filled, and Layer Opacity ends.
     pub fn closing(&mut self, session: &CanvasSession) {
+        // a plugin's panel goes with the artwork it was open over
+        self.prefs.plugins.close_panel();
+        self.plugin_panel_held = None;
         self.reference.keep(session);
         self.end_background_pick(session);
         self.library.finish_importing(session);
@@ -785,6 +791,7 @@ impl Interface {
             self.actions_panel.closed();
         }
         self.transform.show(&ctx, &mut self.look, session, &mut backdrops);
+        self.plugin_panel(&ctx, session, &mut backdrops);
         crate::model_picture::show(&ctx, &mut self.look, session);
         if let Some(on) = self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT, self.model) {
             self.prefs.selection_x_ray = on;
@@ -1692,6 +1699,40 @@ impl Interface {
 
     /// Opens the plugin's filter `id` on the current layer, as [`Self::start_adjustment`] does. The
     /// artwork is saved first, the first time in a session.
+    /// The panel a plugin's action showed, while it is open: a touch on it told to the plugin on a
+    /// thread of its own (it may take seconds), Done closing it.
+    fn plugin_panel(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, backdrops: &mut Vec<f32>) {
+        let Some(panel) = self.prefs.plugins.panel() else {
+            self.plugin_panel_held = None;
+            return;
+        };
+        let asked = crate::actions::plugin_panel(ctx, &mut self.look, &panel, &mut self.plugin_panel_held, backdrops);
+        match asked {
+            Some(crate::actions::PanelTouch::Touch(row, value)) => {
+                let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
+                std::thread::spawn(move || {
+                    plugins.panel_touched(row, value, session);
+                    ctx.request_repaint();
+                });
+            }
+            Some(crate::actions::PanelTouch::Close) => self.prefs.plugins.close_panel(),
+            None => {}
+        }
+    }
+
+    /// A plugin's action `key` run on the artwork, on a thread of its own (it may take seconds): the
+    /// panel closes so what it does shows; anything it says, or its stopping, is told as a failure
+    /// is.
+    fn run_plugin_action(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, key: String) {
+        // (what it may paint on, it checks: not a locked layer)
+        self.open = None;
+        let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
+        std::thread::spawn(move || {
+            plugins.run_action(key, session);
+            ctx.request_repaint();
+        });
+    }
+
     fn start_plugin_filter(&mut self, session: &CanvasSession, id: String) {
         if !self.takes_changes(session) {
             return;
@@ -2284,9 +2325,10 @@ impl Interface {
             Popover::Adjustments => {
                 use crate::adjustments::MenuRow;
                 let filters = self.prefs.plugins.filters();
-                let turned = self.adjustments.showing_filters && !filters.is_empty();
+                let actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Adjustments);
+                let turned = self.adjustments.showing_filters && (!filters.is_empty() || !actions.is_empty());
                 let (shown, tapped) =
-                    crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, turned);
+                    crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, &actions, turned);
                 match tapped {
                     Some(MenuRow::Open(a)) => self.start_adjustment(session, a),
                     Some(MenuRow::Plugins) => self.adjustments.showing_filters = true,
@@ -2294,6 +2336,10 @@ impl Interface {
                     Some(MenuRow::Filter(id)) => {
                         self.adjustments.showing_filters = false;
                         self.start_plugin_filter(session, id);
+                    }
+                    Some(MenuRow::Action(key)) => {
+                        self.adjustments.showing_filters = false;
+                        self.run_plugin_action(ctx, session, key);
                     }
                     None => {}
                 }
@@ -2320,6 +2366,11 @@ impl Interface {
                     Some(Act::ImportPlugin) => {
                         if let Some(path) = crate::files::pick_plugin() {
                             self.offer_plugin_file(&path);
+                        }
+                    }
+                    Some(Act::PluginAction) => {
+                        if let Some(key) = self.actions_panel.take_plugin_action() {
+                            self.run_plugin_action(ctx, session, key);
                         }
                     }
                     Some(Act::Prefs) => {

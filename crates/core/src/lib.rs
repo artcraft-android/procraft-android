@@ -48,8 +48,10 @@ mod modes;
 mod palettes;
 mod pick;
 mod pickers;
+mod plugin_commands;
 mod plugin_file;
 mod plugin_filter;
+mod plugin_panel;
 mod plugin_run;
 mod plugins;
 mod pour;
@@ -143,9 +145,11 @@ pub use pickers::{
 };
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
+pub use plugin_panel::{PanelRow, PluginPanel};
 pub use plugins::{
-    PluginControl, PluginInfo, PluginOffer, PluginPart, PluginSlider, PluginSource, PluginSwitch, Plugins,
-    plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown, plugin_slider_whole,
+    PluginAction, PluginControl, PluginInfo, PluginOffer, PluginPart, PluginPlace, PluginSlider, PluginSource,
+    PluginSwitch, Plugins, plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown,
+    plugin_slider_whole,
 };
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,

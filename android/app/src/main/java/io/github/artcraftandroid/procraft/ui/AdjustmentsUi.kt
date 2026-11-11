@@ -96,11 +96,13 @@ private fun MenuRow(label: String, onTap: () -> Unit) {
 
 /**
  * The adjustments menu hanging from its button, in groups: colour, blurs, effects, painting. With a
- * filter imported, a group more: a row that turns the menu to the filters. With none, it isn't there.
+ * filter imported, or a plugin's action listed there, a group more: a row that turns the menu to
+ * them (the filters, then the actions). With none, it isn't there.
  */
 @Composable
 fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
     val filters = remember { vm.plugins.filters() }
+    val actions = remember { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.ADJUSTMENTS) }
     var showFilters by remember { mutableStateOf(false) }
     androidx.activity.compose.BackHandler(enabled = showFilters) { showFilters = false }
     Popover(330.dp, arrowX, modifier) {
@@ -124,12 +126,13 @@ fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modif
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (showFilters) {
-                MenuGroup(filters) { filter -> MenuRow(filter.name) { vm.startPluginFilter(filter) } }
+                if (filters.isNotEmpty()) MenuGroup(filters) { filter -> MenuRow(filter.name) { vm.startPluginFilter(filter) } }
+                if (actions.isNotEmpty()) MenuGroup(actions) { action -> MenuRow(action.label) { vm.runPluginAction(action.key) } }
             } else {
                 for (group in Adjustment.groups) {
                     MenuGroup(group) { a -> MenuRow(a.label) { vm.startAdjustment(a) } }
                 }
-                if (filters.isNotEmpty()) {
+                if (filters.isNotEmpty() || actions.isNotEmpty()) {
                     MenuGroup(listOf("Plugins")) { label -> MenuRow(label) { showFilters = true } }
                 }
             }

@@ -197,7 +197,14 @@ pub fn between_begin(width: i32, height: i32) -> i32 {
     let (width, height) = (width.max(0) as usize, height.max(0) as usize);
     let size = width * height * 4;
     let mut job = lock(&BETWEEN);
-    let job = job.insert(Between { width, height, this: vec![0; size], next: vec![0; size], made: Vec::new(), row: vec![0; width * 4] });
+    let job = job.insert(Between {
+        width,
+        height,
+        this: vec![0; size],
+        next: vec![0; size],
+        made: Vec::new(),
+        row: vec![0; width * 4],
+    });
     job.row.as_mut_ptr() as usize as i32
 }
 
@@ -212,8 +219,11 @@ pub fn between_row(frame: i32, y: i32) {
     }
 }
 
+/// What draws the frame between two (this, next, width, height), premultiplied RGBA8 rows.
+pub type DrawBetween = fn(&[u8], &[u8], usize, usize) -> Option<Vec<u8>>;
+
 /// Draws the frame between by `draw`: whether there is one.
-pub fn between_run(draw: fn(&[u8], &[u8], usize, usize) -> Option<Vec<u8>>) -> i32 {
+pub fn between_run(draw: DrawBetween) -> i32 {
     let mut guard = lock(&BETWEEN);
     let Some(job) = guard.as_mut() else { return 0 };
     match draw(&job.this, &job.next, job.width, job.height) {
@@ -326,7 +336,8 @@ macro_rules! quickshape_curve {
             match fit(&points, best) {
                 Some(nodes) if nodes.len() >= 4 && nodes.len() % 3 == 1 => {
                     let count = nodes.len() as i32;
-                    $crate::CURVE.put(nodes.iter().flat_map(|(x, y)| [x.to_le_bytes(), y.to_le_bytes()]).flatten().collect());
+                    $crate::CURVE
+                        .put(nodes.iter().flat_map(|(x, y)| [x.to_le_bytes(), y.to_le_bytes()]).flatten().collect());
                     count
                 }
                 _ => 0,

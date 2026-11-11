@@ -295,8 +295,8 @@ impl Hooks {
         on.map(|plugin| (plugin.id.clone(), Arc::clone(&plugin.running))).collect()
     }
 
-    /// `id` comes off the hooks, having stopped in a long call.
-    fn stopped(&self, id: &str, stop: Stop) {
+    /// `id` comes off the hooks, having stopped in a long call (or an action).
+    pub(crate) fn stopped(&self, id: &str, stop: Stop) {
         let mut working = self.working();
         working.on.retain(|p| p.id != id);
         self.note_stop(&mut working, id.to_owned(), stop);
@@ -436,7 +436,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::plugin_file::tests::{coded, pack};
-    use crate::plugin_run::tests::{FILL_AT, OFFSET, TAKES_MOST, fill_module, position_module};
+    use crate::plugin_run::tests::{ACTS, FILL_AT, OFFSET, TAKES_MOST, fill_module, position_module};
     use crate::plugin_run::{MODULE, Running};
     use crate::{PenSample, PointerKind};
 
@@ -577,6 +577,146 @@ pub(crate) mod tests {
     }
 
     /// A plugin that says ColorDrop fills by every layer, in a store at `dir`.
+    /// A plugin on whose action is `module`'s, reaching what `permissions` give.
+    fn acting(dir: &str, module: &[u8], permissions: Value) -> Arc<Plugins> {
+        let plugins = Plugins::with_store(dir.to_owned());
+        let mut manifest = coded(ID, module);
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        manifest["hooks"] = json!([]);
+        manifest["permissions"] = permissions;
+        manifest["actions"] = json!([{ "key": "paint", "label": "Paint a square" }]);
+        assert_eq!(plugins.install(file(&manifest, module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        plugins
+    }
+
+    #[test]
+    fn an_action_paints_a_layer_of_its_own_and_one_undo_takes_it_back() {
+        let Some(s) = session() else { return };
+        let dir = store("action-session");
+        let plugins = acting(&dir, &wat::parse_str(ACTS).unwrap(), json!(["artwork.write"]));
+        let before = s.layers().len();
+        assert!(plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
+        let layers = s.layers();
+        assert_eq!(layers.len(), before + 1);
+        let grid = layers.iter().find(|l| l.name == "Grid").expect("named");
+        assert!(grid.current, "the layer added is the current one");
+        let rgba = picture(&s);
+        let at = |x: usize, y: usize| rgba[(y * 200 + x) * 4..(y * 200 + x) * 4 + 4].to_vec();
+        assert_eq!(at(25, 35), [255, 0, 0, 255], "painted inside the square");
+        assert_eq!(at(19, 35)[3], 0, "and nowhere else");
+        assert_eq!(at(30, 35)[3], 0);
+        // one undo takes the layer, its name and its paint back together
+        s.undo();
+        assert_eq!(s.layers().len(), before);
+        assert!(s.layers().iter().all(|l| l.name != "Grid"));
+        // a key it doesn't have does nothing, and nor does it off
+        assert!(!plugins.run_action(format!("{ID}.other"), Arc::clone(&s)));
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert!(!plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
+        assert_eq!(s.layers().len(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_grid_plugin_adds_a_grid_layer_in_the_brush_colour() {
+        let Some(s) = session() else { return };
+        let dir = store("grid-layer");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "grid-layer").unwrap();
+        assert_eq!(plugins.install(file.to_vec()), None);
+        let id = "io.github.artcraftandroid.grid-layer";
+        assert!(plugins.set_on(id.to_owned(), true));
+        // lines 50 apart, 3 wide, in blue
+        let card = plugins.plugins().into_iter().find(|p| p.id == id).unwrap();
+        assert_eq!(card.actions.len(), 1);
+        // on its card only
+        assert!(plugins.actions_in(crate::plugins::PluginPlace::Adjustments).is_empty());
+        assert_eq!(plugins.actions_in(crate::plugins::PluginPlace::Card), card.actions);
+        assert!(plugins.set_slider(format!("{id}.spacing"), 50.0).is_some());
+        assert!(plugins.set_slider(format!("{id}.line"), 3.0).is_some());
+        s.set_color(0.0, 0.0, 1.0);
+        assert!(plugins.run_action(card.actions[0].key.clone(), Arc::clone(&s)));
+        assert!(s.layers().iter().any(|l| l.name == "Grid" && l.current));
+        let rgba = picture(&s);
+        let at = |x: usize, y: usize| rgba[(y * 200 + x) * 4..(y * 200 + x) * 4 + 4].to_vec();
+        for (x, y) in [(0, 10), (2, 10), (50, 77), (152, 199), (10, 0), (77, 102), (199, 150)] {
+            assert_eq!(at(x, y), [0, 0, 255, 255], "a line through ({x}, {y})");
+        }
+        for (x, y) in [(3, 10), (49, 77), (53, 77), (25, 25), (175, 175)] {
+            assert_eq!(at(x, y)[3], 0, "between lines at ({x}, {y})");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_action_s_panel_stays_open_its_touches_told_to_the_same_code() {
+        let Some(s) = session() else { return };
+        let dir = store("action-panel");
+        let json =
+            r#"{"title":"Squares","rows":[{"type":"button","label":"Add a layer"},{"type":"button","label":"Done"}]}"#;
+        let text = format!(
+            r#"(module
+                (import "procraft" "show_panel" (func $show (param i32 i32) (result i32)))
+                (import "procraft" "close_panel" (func $close))
+                (import "procraft" "add_layer" (func $add (result i64)))
+                (memory (export "memory") 1)
+                (data (i32.const 0) "{}")
+                (func (export "procraft_action") (param i32) (result i32)
+                    (drop (call $show (i32.const 0) (i32.const {}))) (i32.const 0))
+                (func (export "procraft_panel_event") (param $row i32) (param f32) (result i32)
+                    (if (i32.eqz (local.get $row)) (then (drop (call $add))) (else (call $close)))
+                    (i32.const 0)))"#,
+            json.replace('"', "\\\""),
+            json.len()
+        );
+        let plugins = acting(&dir, &wat::parse_str(text).unwrap(), json!(["artwork.write", "panel"]));
+        assert_eq!(plugins.panel(), None);
+        assert!(plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
+        let panel = plugins.panel().expect("shown");
+        assert_eq!(panel.title, "Squares");
+        assert_eq!(panel.rows.len(), 2);
+        // its first row adds a layer, one step to undo; the panel stays
+        let before = s.layers().len();
+        assert!(plugins.panel_touched(0, 1.0, Arc::clone(&s)));
+        assert_eq!(s.layers().len(), before + 1);
+        s.undo();
+        assert_eq!(s.layers().len(), before);
+        assert!(plugins.panel().is_some());
+        // its second closes it
+        assert!(!plugins.panel_touched(1, 1.0, Arc::clone(&s)));
+        assert_eq!(plugins.panel(), None);
+        assert!(!plugins.panel_touched(0, 1.0, Arc::clone(&s)));
+        assert_eq!(s.layers().len(), before);
+        // turned off, its panel goes with it
+        assert!(plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
+        assert!(plugins.panel().is_some());
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert_eq!(plugins.panel(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_action_that_crashes_goes_off_and_leaves_one_step_to_undo() {
+        let Some(s) = session() else { return };
+        let dir = store("action-crash");
+        let crashes = r#"(module
+            (import "procraft" "add_layer" (func $add (result i64)))
+            (func (export "procraft_action") (param i32) (result i32)
+                (drop (call $add)) (unreachable)))"#;
+        let plugins = acting(&dir, &wat::parse_str(crashes).unwrap(), json!(["artwork.write"]));
+        let before = s.layers().len();
+        assert!(!plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
+        let plugin = plugins.plugins().into_iter().find(|p| p.id == ID).unwrap();
+        assert!(!plugin.on);
+        assert_eq!(plugin.problem.as_deref(), Some("Switched off: it crashed."));
+        // what it did before is still one step
+        assert_eq!(s.layers().len(), before + 1);
+        s.undo();
+        assert_eq!(s.layers().len(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn filling_by_all(dir: &str) -> Arc<Plugins> {
         let module =
             wat::parse_str(r#"(module (func (export "procraft_fill_all_layers") (result i32) (i32.const 1)))"#)

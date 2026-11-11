@@ -51,10 +51,12 @@ A folder under `plugins/` holding a `craft-extension.json`, and for each thing i
 or both. The file has to hold exactly that. The import screen tells people what each one lets the
 plugin do.
 
-`hooks` lists the hooks the code uses, and only a plugin that holds `"hooks"` may have it.
+`hooks` lists the hooks the code uses, and only a plugin that holds `"hooks"` may have it. Code
+needs at least one hook or one action (see [Actions](#actions)).
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
-`permissions` has to be empty, as there are none to give.
+`permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
+the plugin has actions. Only code may ask, and a permission this app doesn't give is refused.
 
 A plugin that only holds a filter starts on, as that changes nothing already in the app. Any other
 starts off, until someone taps Turn on. One the app adds by itself starts off, whatever it holds.
@@ -125,9 +127,10 @@ answer, and the app checks that answer before using it.
 
 ### What code can reach
 
-Nothing but the numbers a hook hands it. A module gets no imports at all, so it has no files, no
-network, no clock and no layers. A module that asks for an import is refused. A function it exports
-for a hook it didn't list is never called.
+At a hook, nothing but the numbers the hook hands it. A module imports only the app's functions its
+`permissions` give (see [Actions](#actions)), so it has no files, no network and no clock. A module
+that imports anything else is refused. A function it exports for a hook it didn't list is never
+called.
 
 ### The crate
 
@@ -474,6 +477,112 @@ A fill too big for the limit stays as it was, and the app says so.
 Code keeps its memory while the plugin is on, between calls. It starts afresh when the plugin is
 turned on, and on each start of the app, so anything it remembers lasts only that long.
 
+## Actions
+
+An action is something code does when tapped: a row on its card, under its controls, once it's on.
+While it runs, it can call the app's functions its `permissions` give: read the artwork, add layers
+and paint on them, set the brush, show a short message. Everything one action changes is one step
+undo takes back.
+
+```json
+  "compat": { "procraft": { "interface": 2 } },
+  "permissions": ["artwork.read", "artwork.write", "brush"],
+  "hooks": [],
+  "actions": [
+    { "key": "add", "label": "Add a grid layer" }
+  ]
+```
+
+A plugin can have up to eight actions. Each `key` is used once, and each `label` is the row's words.
+Its card lists them all; `"place": "adjustments"` lists one in the Adjustments menu's Plugins list
+too, after the filters, for something done to the artwork as an adjustment is. A place this app
+doesn't have makes the file one for a newer ProCraft. Actions need interface 2. The import screen
+says what each permission lets the plugin do.
+
+| Permission | The functions it gives |
+|---|---|
+| `artwork.read` | `canvas_size`, `layer_count`, `layer_at`, `current_layer`, `read_pixels` |
+| `artwork.write` | `add_layer`, `write_pixels`, `set_layer_name`, `set_layer_opacity`, `set_layer_visible` |
+| `brush` | `brush_colour`, `set_brush_colour`, `brush_size`, `set_brush_size`, `brush_opacity`, `set_brush_opacity` |
+| `notice` | `notice` |
+| `panel` | `show_panel`, `close_panel` (see [Panels](#panels)) |
+
+The module imports them from `"procraft"`, and the app checks each one's types. It exports
+`procraft_action(index: i32) -> i32`, called with the action's place in `actions`; it returns 0.
+The kit writes all of this:
+
+```rust
+use kit::app;
+
+kit::actions!(|_| {
+    let (width, height) = app::canvas_size();
+    if let Some(layer) = app::add_layer() {
+        app::name_layer(layer, "Frame");
+        let ink = [0, 0, 0, 255].repeat(width as usize * 4);
+        app::paint(layer, 0, 0, width, 4, &ink);
+        app::paint(layer, 0, height as i32 - 4, width, 4, &ink);
+    }
+});
+```
+
+- Layers go by the id the app gives each one, never 0. 0 means none.
+- Pixels are premultiplied RGBA8, rows from the top. A rectangle has to be wholly on the canvas, at
+  most 4,096 × 4,096 pixels. A write goes over what was there.
+- Code can paint only on a pixel layer that isn't locked.
+- Sizes and opacities are 0 to 1, as the sliders show them. A colour is `0xRRGGBB`.
+- A name or a message is UTF-8 text, at most 200 characters.
+
+An action runs in a copy of the code of its own, told the controls as they are, so its hooks go on
+meanwhile. It may take 4,000,000,000 steps, for at most 20 seconds. Calls to the app's functions
+answer only while an action runs. At a hook they do nothing.
+
+`plugins/grid-layer` is one to start from.
+
+### Panels
+
+With the `panel` permission, an action can show a panel of the plugin's own. Each app draws it the
+way its own cards are drawn: a title and Done, then rows. The rows are a slider, a switch, a choice,
+some words, or a button. The plugin describes the panel as JSON text and hands it to
+`show_panel(at, len)`, which answers 1 if the panel holds up and 0 if not:
+
+```json
+{ "title": "Halftone", "rows": [
+  { "type": "slider", "label": "Dot size", "least": 1, "most": 50, "step": 1, "value": 8, "unit": " px" },
+  { "type": "switch", "label": "Round dots", "on": true },
+  { "type": "choice", "label": "Shape", "options": ["Dots", "Lines"], "chosen": 0 },
+  { "type": "text", "text": "Works on the current layer." },
+  { "type": "button", "label": "Apply" }
+] }
+```
+
+- A panel has 1 to 16 rows, and a choice has 1 to 8 options.
+- Labels and the title are at most 40 characters, an option at most 24, and words at most 400.
+- A field the app doesn't know, or a kind of row it doesn't have, makes the panel not hold up.
+- The panel shows once the action ends, and stays open in the same copy of the code.
+- Each touch calls the module's `procraft_panel_event(row: i32, value: f32) -> i32`, so a module
+  with the `panel` permission has to export it. `row` is the row's place, from 0. The value is the
+  slider's (on its steps), 1 or 0 for a switch, the option's place for a choice, or 1 for a button.
+  A slider is told when it's let go.
+- A touch can do what an action can, and what it changes is one step to undo. It can show the panel
+  again, changed, or close it with `close_panel()`.
+- Done closes the panel. So does another action, or the plugin being turned off.
+
+The kit writes the JSON for you:
+
+```rust
+use kit::app::{self, Panel};
+
+kit::actions!(|_| {
+    Panel::new("Halftone").slider("Dot size", 1.0, 50.0, 1.0, 8.0, " px").button("Apply").show();
+});
+kit::panel!(|row, value| {
+    if row == 1 {
+        apply_halftone();
+        app::close_panel();
+    }
+});
+```
+
 ## Filters
 
 A filter shows under Adjustments in a Plugins row while its plugin is on. It redraws the current layer
@@ -550,7 +659,7 @@ redraw as it lets go. If it takes more than 4 seconds, the filter is closed and 
 ## When a plugin stops
 
 It's switched off at once, all of it, and its card says why. It stays off through a restart until
-someone taps Turn on.
+someone taps Turn on. An action that stops partway leaves what it did so far as one step to undo.
 
 Code stops if it runs out of steps, asks for too much memory, traps, or gives an answer that makes no
 sense. Whatever it was handed goes on as it came.
@@ -605,7 +714,8 @@ and have `Plugins::with_bundled` add none. What was added stays, as if imported.
 ## When the app changes
 
 `interface` in `compat` is the version of all this: the hooks and what they call, the template around
-a filter's function, what a filter is given, and the kinds of control. What a hook calls stays as it's
+a filter's function, what a filter is given, the kinds of control, and the app's functions. Interface
+2 added actions and permissions. What a hook calls stays as it's
 written here, and the app keeps every interface's template, so a plugin goes on working as it was
 written.
 

@@ -260,6 +260,14 @@ fun AppRoot(vm: CanvasViewModel) {
                     enter = androidx.compose.animation.slideInVertically(Motion.studioIn()) { it },
                     exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
                 ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
+                // a plugin's own panel, while its action keeps it open
+                if (vm.pluginPanel != null) {
+                    Box(Modifier.fillMaxSize()) {
+                        // what its rows don't take stays on the panel, never reaching the canvas under it
+                        val swallows = Modifier.pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } } }
+                        PluginPanelView(vm, Modifier.align(Alignment.TopEnd).padding(top = Pc.BarHeight + 12.dp, end = 12.dp).then(swallows))
+                    }
+                }
                 ModelPicture(vm)
                 BlockedDialog(vm)
                 ModelWarningsAlert(vm)

@@ -10,8 +10,10 @@
 //! ```
 //!
 //! Each macro exports the functions its hook asks for, with the memory handed over and back taken
-//! care of. Without the `std` feature only [`Controls`], [`controls!`], [`yes!`], [`answer!`] and
-//! [`position!`] are there, for the smallest plugins.
+//! care of. A plugin's actions (things it does when tapped, [`actions!`]) call the app's functions
+//! in [`app`]: adding a layer, painting on it, setting the brush. Without the `std` feature only
+//! [`Controls`], [`controls!`], [`yes!`], [`answer!`] and [`position!`] are there, for the smallest
+//! plugins.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -121,6 +123,8 @@ macro_rules! position {
     };
 }
 
+#[cfg(feature = "std")]
+pub mod app;
 #[cfg(feature = "std")]
 mod with_std;
 #[cfg(feature = "std")]

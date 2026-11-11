@@ -589,6 +589,40 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pluginsChanged()
     }
 
+    /** A plugin's action [key] run on the artwork, off the main thread (it may take seconds): the panel closes so what it does shows, and what it says, or its stopping, is told. */
+    fun runPluginAction(key: String) {
+        val s = session ?: return
+        closePanels()
+        viewModelScope.launch {
+            withContext(Dispatchers.Default) { plugins.runAction(key, s) }
+            pluginPanel = plugins.panel()
+            s.takeFailure()?.let { showNotice(it) }
+            readPlugins()
+            refresh()
+        }
+    }
+
+    /** The panel a plugin's action showed, while it is open. */
+    var pluginPanel by mutableStateOf<io.github.artcraftandroid.procraft.core.PluginPanel?>(null)
+        private set
+
+    /** Row [row] of the plugin's panel touched with [value]: told to the plugin off the main thread, and the panel shown as it answers (or closed). */
+    fun touchPluginPanel(row: Int, value: Float) {
+        val s = session ?: return
+        viewModelScope.launch {
+            withContext(Dispatchers.Default) { plugins.panelTouched(row.toUInt(), value, s) }
+            pluginPanel = plugins.panel()
+            s.takeFailure()?.let { showNotice(it) }
+            readPlugins()
+            refresh()
+        }
+    }
+
+    fun closePluginPanel() {
+        plugins.closePanel()
+        pluginPanel = null
+    }
+
     /** A plugin's switch flipped; a key no control has changes nothing. */
     fun setPluginSwitch(key: String, on: Boolean) {
         if (!plugins.setSwitch(key, on)) return
@@ -2346,6 +2380,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             GalleryZoom(c, canvasRect(s, s.viewMatrix()), opening = false, picture = picture)
         }
         keepColour()
+        // a plugin's panel goes with the artwork it was open over
+        closePluginPanel()
         val lapse = timeLapse
         session = null
         artworkDir = null

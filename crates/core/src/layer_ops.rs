@@ -52,7 +52,7 @@ impl State {
     }
 
     /// Replaces an unlocked layer's pixels inside `rect` with `part` (its rows), as one undo step.
-    fn rewrite_layer(&mut self, id: LayerId, rect: IRect, part: Vec<u8>) {
+    pub(crate) fn rewrite_layer(&mut self, id: LayerId, rect: IRect, part: Vec<u8>) {
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.write_layer_part(id, rect, part);
         }

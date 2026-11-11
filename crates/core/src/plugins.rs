@@ -133,6 +133,35 @@ pub struct PluginFile {
     pub chosen: Option<String>,
 }
 
+/// Something a plugin does when its row is tapped: `key` is `<id>.<key>`. Its card lists it, and
+/// `place` may list it somewhere else too.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginAction {
+    pub key: String,
+    pub label: String,
+    pub place: PluginPlace,
+}
+
+/// Where else a plugin's action is listed, beside its card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PluginPlace {
+    /// Only on its card.
+    Card,
+    /// In the Adjustments menu's Plugins list, with the filters.
+    Adjustments,
+}
+
+impl PluginPlace {
+    /// The place a manifest names; none for a name this app doesn't have.
+    pub(crate) fn named(name: &str) -> Option<PluginPlace> {
+        match name {
+            "card" => Some(PluginPlace::Card),
+            "adjustments" => Some(PluginPlace::Adjustments),
+            _ => None,
+        }
+    }
+}
+
 /// A row a plugin adds to the brush studio's Properties: a choice of a few, by their place, kept
 /// with each brush under `key` (`plugin:<id>:<key>`; 0 the first choice, as a brush starts).
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -172,6 +201,9 @@ pub struct PluginInfo {
     pub controls: Vec<PluginControl>,
     /// Rows it adds to the brush studio, while it is on.
     pub brush_controls: Vec<PluginBrushControl>,
+    /// What it does when tapped, while it is on, and what it may reach then.
+    pub actions: Vec<PluginAction>,
+    pub permissions: Vec<crate::plugin_commands::PluginPermission>,
 }
 
 impl PluginInfo {
@@ -346,6 +378,8 @@ fn from_file(manifest: Manifest) -> PluginInfo {
         problem: None,
         controls: if only_filter { Vec::new() } else { manifest.controls },
         brush_controls: manifest.brush_controls,
+        actions: manifest.actions,
+        permissions: manifest.permissions,
     }
 }
 
@@ -354,8 +388,20 @@ fn can_do(manifest: &Manifest) -> String {
     let filter = manifest.holds.contains(&PluginPart::Filter);
     let adds =
         filter.then_some("This plugin adds a filter to Adjustments, which changes only the layer you use it on.");
-    let sentences: Vec<&str> = adds.into_iter().chain(manifest.hooks.iter().map(|hook| hook.sentence())).collect();
-    let reach = if filter { "your files or the internet" } else { "your files, your layers or the internet" };
+    let sentences: Vec<&str> = adds
+        .into_iter()
+        .chain(manifest.hooks.iter().map(|hook| hook.sentence()))
+        .chain(manifest.permissions.iter().map(|permission| permission.sentence()))
+        .collect();
+    let artwork = manifest.permissions.iter().any(|p| {
+        matches!(
+            p,
+            crate::plugin_commands::PluginPermission::ArtworkRead
+                | crate::plugin_commands::PluginPermission::ArtworkWrite
+        )
+    });
+    let reach =
+        if filter || artwork { "your files or the internet" } else { "your files, your layers or the internet" };
     format!("{} It can't reach {reach}.", sentences.join(" "))
 }
 
@@ -404,6 +450,22 @@ pub struct Plugins {
     store: Option<PathBuf>,
     /// The plugins that are on, running.
     hooks: Arc<Hooks>,
+    /// A plugin's panel showing, with the copy of its code that showed it.
+    panel: Mutex<Option<OpenPanel>>,
+}
+
+/// A plugin's panel open: whose, what it shows, and the copy of its code its touches go to (under a
+/// lock of its own: what the panel shows is read on every frame, while a touch may take seconds).
+struct OpenPanel {
+    id: String,
+    shows: crate::PluginPanel,
+    running: Arc<Mutex<Running>>,
+}
+
+impl std::fmt::Debug for OpenPanel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenPanel").field("id", &self.id).field("shows", &self.shows).finish_non_exhaustive()
+    }
 }
 
 impl Plugins {
@@ -436,7 +498,8 @@ impl Plugins {
             plugin.on &= !added.iter().any(|added| added.off && added.id == plugin.id);
         }
         let list = Listed { files, moved: Vec::new(), notice_asked: false, flagged: HashSet::new(), added };
-        Arc::new(Plugins { list: Mutex::new(list), hooks: Arc::new(Hooks::kept_in(store.clone())), store })
+        let hooks = Arc::new(Hooks::kept_in(store.clone()));
+        Arc::new(Plugins { list: Mutex::new(list), hooks, store, panel: Mutex::new(None) })
     }
 
     /// Adds each of `files`, which the app comes with, the first time it comes with it: as if
@@ -501,6 +564,19 @@ impl Plugins {
         }
     }
 
+    /// `id` off its hooks, and its panel closed.
+    fn take_off(&self, id: &str) {
+        self.hooks.take_off(id);
+        let mut panel = self.open_panel();
+        if panel.as_ref().is_some_and(|open| open.id == id) {
+            *panel = None;
+        }
+    }
+
+    fn open_panel(&self) -> MutexGuard<'_, Option<OpenPanel>> {
+        self.panel.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Puts `plugin` on its hooks, if it has code, is on and isn't there yet. One that can't start
     /// goes off, and says why.
     fn start(&self, plugin: &mut PluginInfo) {
@@ -512,7 +588,7 @@ impl Plugins {
         let code = store.and_then(|store| plugin_file::read_code(store, &plugin.id, &plugin.version));
         let started = code
             .ok_or(Stop::Damaged)
-            .and_then(|(hooks, bytes)| Ok((Running::start_on(&bytes, &values, &hooks)?, hooks)));
+            .and_then(|(hooks, bytes)| Ok((Running::start_on(&bytes, &values, &hooks, &plugin.permissions)?, hooks)));
         match started {
             Ok((running, hooks)) => {
                 self.hooks.put_on(plugin.id.clone(), running, &hooks);
@@ -604,7 +680,7 @@ impl Plugins {
                 }
                 fresh.on = old.on;
                 // what stopped gets its chance with the new file
-                self.hooks.take_off(&fresh.id);
+                self.take_off(&fresh.id);
                 plugin_file::clear_stopped(store, &fresh.id);
                 self.start(&mut fresh);
                 *old = fresh;
@@ -653,7 +729,7 @@ impl Plugins {
         if let Some(store) = &self.store {
             plugin_file::note_stopped(store, id, why);
         }
-        self.hooks.take_off(id);
+        self.take_off(id);
         if let Some(filter) = self.listed().files.iter_mut().find(|p| p.id == id) {
             filter.on = false;
             filter.problem = Some(why.to_owned());
@@ -702,6 +778,13 @@ impl Plugins {
     /// What the Plugins page shows: every plugin imported.
     pub fn plugins(&self) -> Vec<PluginInfo> {
         self.listed().files.clone()
+    }
+
+    /// The actions listed in `place` now, of the plugins that are on.
+    pub fn actions_in(&self, place: PluginPlace) -> Vec<PluginAction> {
+        let list = self.listed();
+        let on = list.files.iter().filter(|p| p.on && p.problem.is_none());
+        on.flat_map(|p| p.actions.iter().filter(|a| a.place == place).cloned()).collect()
     }
 
     /// The filters that can be opened now: the Adjustments menu's, which has none to show with none
@@ -846,6 +929,106 @@ impl Plugins {
         true
     }
 
+    /// Runs the action `key` (`<id>.<key>`) of a plugin that is on, on the artwork `session`: what
+    /// it changes is one step undo takes back. It runs in a copy of the plugin of its own, told its
+    /// controls, so its hooks go on meanwhile. A long call, not for the main thread. False if no
+    /// plugin on has it, or the plugin stopped (it goes off, and says why).
+    pub fn run_action(&self, key: String, session: Arc<crate::CanvasSession>) -> bool {
+        let found = {
+            let list = self.listed();
+            list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
+                let index = p.actions.iter().position(|a| a.key == key)?;
+                let values: Vec<f32> = p.controls.iter().map(PluginControl::number).collect();
+                Some((p.id.clone(), p.version.clone(), index, values, p.permissions.clone()))
+            })
+        };
+        let Some((id, version, index, values, permissions)) = found else { return false };
+        // another action closes a panel open
+        *self.open_panel() = None;
+        let code = self.store.as_deref().and_then(|store| plugin_file::read_code(store, &id, &version));
+        let started = code
+            .ok_or(Stop::Damaged)
+            .and_then(|(hooks, bytes)| Running::start_on(&bytes, &values, &hooks, &permissions));
+        let ran = started.and_then(|mut running| {
+            session.begin_plugin_step();
+            let ran = running.action(index, Arc::clone(&session));
+            session.end_plugin_step();
+            ran.map(|()| running)
+        });
+        match ran {
+            Ok(mut running) => {
+                // a panel it showed stays open, with this copy of its code
+                if let (Some(shows), false) = running.take_panel() {
+                    let running = Arc::new(Mutex::new(running));
+                    *self.open_panel() = Some(OpenPanel { id, shows, running });
+                }
+                true
+            }
+            Err(stop) => {
+                // (the list takes it off when next read)
+                self.hooks.stopped(&id, stop);
+                false
+            }
+        }
+    }
+
+    /// The panel a plugin's action showed, while it is open.
+    pub fn panel(&self) -> Option<crate::PluginPanel> {
+        self.open_panel().as_ref().map(|open| open.shows.clone())
+    }
+
+    /// Row `row` of the panel open touched with `value` (a slider's, a switch's 1 or 0, a choice's
+    /// place, 1 for a button), on the artwork `session`: the plugin is told, and what it changes is
+    /// one step undo takes back. It may show the panel changed, or close it. A long call, not for the
+    /// main thread. False once the panel is closed (by the plugin, or as it stopped).
+    pub fn panel_touched(&self, row: u32, value: f32, session: Arc<crate::CanvasSession>) -> bool {
+        let row = row as usize;
+        // the touch shows at once, and the code is fetched to be told
+        let (id, running, value) = {
+            let mut open = self.open_panel();
+            let Some(panel) = open.as_mut() else { return false };
+            let Some(value) = crate::plugin_panel::touched(&panel.shows, row, value) else { return true };
+            panel.shows = crate::plugin_panel::with_value(panel.shows.clone(), row, value);
+            (panel.id.clone(), Arc::clone(&panel.running), value)
+        };
+        let mut code = running.lock().unwrap_or_else(|e| e.into_inner());
+        session.begin_plugin_step();
+        let ran = code.panel_event(row, value, Arc::clone(&session));
+        session.end_plugin_step();
+        let answer = ran.map(|()| code.take_panel());
+        drop(code);
+        // what it answered, unless that panel was closed meanwhile (or another took its place)
+        let mut open = self.open_panel();
+        let same = open.as_ref().is_some_and(|panel| Arc::ptr_eq(&panel.running, &running));
+        match answer {
+            Ok((shows, false)) => {
+                if let (true, Some(shows), Some(panel)) = (same, shows, open.as_mut()) {
+                    panel.shows = shows;
+                }
+                same
+            }
+            Ok((_, true)) => {
+                if same {
+                    *open = None;
+                }
+                false
+            }
+            Err(stop) => {
+                if same {
+                    *open = None;
+                }
+                drop(open);
+                self.hooks.stopped(&id, stop);
+                false
+            }
+        }
+    }
+
+    /// The panel open closed (its close button, or a tap away from it).
+    pub fn close_panel(&self) {
+        *self.open_panel() = None;
+    }
+
     /// Turns a plugin on or off; false if no file is `id`. It goes on its hooks or off them at once,
     /// no restart: off them the app is as it was, and its values wait for it. One that can't start
     /// stays off, and says why.
@@ -857,7 +1040,7 @@ impl Plugins {
         if let Some(store) = &self.store {
             plugin_file::clear_stopped(store, &id);
         }
-        self.hooks.take_off(&id);
+        self.take_off(&id);
         self.start(plugin);
         true
     }
@@ -907,7 +1090,7 @@ impl Plugins {
         {
             return None;
         }
-        self.hooks.take_off(&id);
+        self.take_off(&id);
         let gone = list.files.remove(at);
         list.flagged.remove(&id);
         // one the app added stays written down, so it isn't added again; imported again, it is as
@@ -1014,6 +1197,8 @@ mod tests {
     fn stranger() -> PluginInfo {
         PluginInfo {
             brush_controls: Vec::new(),
+            actions: Vec::new(),
+            permissions: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),

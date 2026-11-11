@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.grid-layer",
+  "name": "Grid layer",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Adds a layer with a grid on it in the brush's colour, its squares as far apart as you choose.",
+  "compat": { "procraft": { "interface": 2 } },
+  "permissions": ["artwork.read", "artwork.write", "brush", "notice"],
+  "hooks": [],
+  "actions": [
+    { "key": "add", "label": "Add a grid layer" }
+  ],
+  "controls": [
+    { "key": "spacing", "type": "slider", "label": "Spacing", "least": 10, "most": 500, "step": 10, "starts": 100, "unit": " px" },
+    { "key": "line", "type": "slider", "label": "Line width", "least": 1, "most": 10, "step": 1, "starts": 2, "unit": " px" }
+  ]
+}

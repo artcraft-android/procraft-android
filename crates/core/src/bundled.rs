@@ -13,6 +13,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("eyedropper-layer", include_bytes!("../bundled-plugins/eyedropper-layer.procraft-plugin")),
     ("fill-all-layers", include_bytes!("../bundled-plugins/fill-all-layers.procraft-plugin")),
     ("gap-closing", include_bytes!("../bundled-plugins/gap-closing.procraft-plugin")),
+    ("grid-layer", include_bytes!("../bundled-plugins/grid-layer.procraft-plugin")),
     ("hide-undo-notice", include_bytes!("../bundled-plugins/hide-undo-notice.procraft-plugin")),
     ("interface-colour", include_bytes!("../bundled-plugins/interface-colour.procraft-plugin")),
     ("interface-size", include_bytes!("../bundled-plugins/interface-size.procraft-plugin")),

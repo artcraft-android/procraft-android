@@ -70,6 +70,7 @@ import io.github.artcraftandroid.procraft.core.pluginSliderShown
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import java.io.File
+import io.github.artcraftandroid.procraft.core.PanelRow
 
 private val ActionsWidth = 390.dp
 
@@ -589,7 +590,7 @@ private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
     }
 }
 
-/** A plugin: its name, what it does, what is the matter with it, its controls whatever they are, and the rows that turn it on or off and remove it. */
+/** A plugin: its name, what it does, what is the matter with it, its controls whatever they are, what it does when tapped, and the rows that turn it on or off and remove it. */
 @Composable
 private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
@@ -609,6 +610,10 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
                     is PluginControl.File -> PluginFileRow(control.control, vm)
                 }
             }
+            for (action in plugin.actions) {
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                PluginActionRow(action.label) { vm.runPluginAction(action.key) }
+            }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
         ActionRowView(Act(if (plugin.on) "Turn off" else "Turn on") { vm.setPluginOn(plugin, !plugin.on) })
@@ -616,6 +621,83 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
             ActionRowView(Act("Remove") { vm.removePlugin(plugin) })
         }
+    }
+}
+
+/**
+ * A plugin's own panel, while its action keeps it open: floating under the bar at the right, its
+ * title and Done, then its rows on a card as the Actions panel's are. A slider is told as it lets go,
+ * anything else at once.
+ */
+@Composable
+fun PluginPanelView(vm: CanvasViewModel, modifier: Modifier = Modifier) {
+    val panel = vm.pluginPanel ?: return
+    Popover(340.dp, 0.dp, modifier, side = ArrowSide.NONE) {
+        Row(Modifier.fillMaxWidth().height(52.dp).padding(start = 24.dp, end = 24.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(panel.title, color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+            Text("Done", color = Pc.Accent, fontSize = 17.sp, maxLines = 1, modifier = Modifier.clickable { vm.closePluginPanel() })
+        }
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 10.dp)) {
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Pc.ActionsGroup)) {
+                panel.rows.forEachIndexed { i, row ->
+                    if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                    when (row) {
+                        is PanelRow.Text -> Text(row.text, color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp))
+                        is PanelRow.Slider -> PanelSliderRow(row) { vm.touchPluginPanel(i, it) }
+                        is PanelRow.Switch -> ActionRowView(Toggle(row.label, row.on) { vm.touchPluginPanel(i, if (it) 1f else 0f) })
+                        is PanelRow.Choice -> PanelChoiceRow(row) { vm.touchPluginPanel(i, it.toFloat()) }
+                        is PanelRow.Button -> PluginActionRow(row.label) { vm.touchPluginPanel(i, 1f) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A slider on a plugin's panel: its value whole with whole steps, else to two places, then its unit. */
+@Composable
+private fun PanelSliderRow(row: PanelRow.Slider, onSet: (Float) -> Unit) {
+    var moved by remember(row) { mutableStateOf<Float?>(null) }
+    val value = moved ?: row.value
+    val whole = row.step >= 1f && row.step % 1f == 0f
+    val shown = (if (whole) value.roundToInt().toString() else String.format(java.util.Locale.ROOT, "%.2f", value)) + row.unit
+    SlideRow(
+        Slide(
+            row.label,
+            shown,
+            (value - row.least) / (row.most - row.least),
+            onDone = {
+                moved?.let(onSet)
+                moved = null
+            },
+            onChange = { along ->
+                val to = row.least + along * (row.most - row.least)
+                val stepped = if (row.step > 0f) row.least + ((to - row.least) / row.step).roundToInt() * row.step else to
+                moved = stepped.coerceIn(row.least, row.most)
+            },
+        ),
+    )
+}
+
+/** A choice on a plugin's panel: its label, the one picked in blue; a tap picks the next. */
+@Composable
+private fun PanelChoiceRow(row: PanelRow.Choice, onPick: (Int) -> Unit) {
+    val count = row.options.size.coerceAtLeast(1)
+    Row(
+        Modifier.fillMaxWidth().height(44.dp).clickable { onPick((row.chosen.toInt() + 1) % count) }.padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
+        Box(Modifier.weight(1f))
+        Text(row.options.getOrElse(row.chosen.toInt()) { "" }, color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+    }
+}
+
+/** One of a plugin's actions on its card: its words in blue, run when tapped. */
+@Composable
+private fun PluginActionRow(label: String, onClick: () -> Unit) {
+    Box(Modifier.fillMaxWidth().height(44.dp).clickable(onClick = onClick).padding(horizontal = 16.dp), contentAlignment = Alignment.CenterStart) {
+        Text(label, color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
     }
 }
 

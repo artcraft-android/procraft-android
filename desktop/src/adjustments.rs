@@ -6,8 +6,8 @@
 
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
-    AdjustShown, Adjustment, CLONE_PUCK_RADIUS, CanvasSession, PerspectiveKind, PluginInfo, adjustment_groups,
-    adjustment_label,
+    AdjustShown, Adjustment, CLONE_PUCK_RADIUS, CanvasSession, PerspectiveKind, PluginAction, PluginInfo,
+    adjustment_groups, adjustment_label,
 };
 
 use crate::icons::{self, Icon};
@@ -72,18 +72,23 @@ pub enum MenuRow {
     Back,
     /// Opens the filter of this id.
     Filter(String),
+    /// Runs the plugin action of this key.
+    Action(String),
 }
 
-/// The menu's groups: the adjustments and, with a filter imported, a group more for the row that
-/// turns to them. With none, it isn't there.
-fn menu_groups(filters: &[PluginInfo], showing_filters: bool) -> Vec<Vec<(String, MenuRow)>> {
+/// The menu's groups: the adjustments and, with a filter imported or a plugin's action listed
+/// there, a group more for the row that turns to them. With none, it isn't there.
+fn menu_groups(filters: &[PluginInfo], actions: &[PluginAction], showing_filters: bool) -> Vec<Vec<(String, MenuRow)>> {
     if showing_filters {
-        return vec![filters.iter().map(|filter| (filter.name.clone(), MenuRow::Filter(filter.id.clone()))).collect()];
+        let filters = filters.iter().map(|filter| (filter.name.clone(), MenuRow::Filter(filter.id.clone())));
+        let actions = actions.iter().map(|a| (a.label.clone(), MenuRow::Action(a.key.clone())));
+        let groups = [filters.collect::<Vec<_>>(), actions.collect()];
+        return groups.into_iter().filter(|group| !group.is_empty()).collect();
     }
     let row = |a: &Adjustment| (adjustment_label(*a), MenuRow::Open(*a));
     let mut groups: Vec<Vec<(String, MenuRow)>> =
         adjustment_groups().iter().map(|group| group.iter().map(row).collect()).collect();
-    if !filters.is_empty() {
+    if !filters.is_empty() || !actions.is_empty() {
         groups.push(vec![("Plugins".to_owned(), MenuRow::Plugins)]);
     }
     groups
@@ -102,12 +107,13 @@ pub fn menu(
     button: Rect,
     backdrops: &mut Vec<f32>,
     filters: &[PluginInfo],
+    actions: &[PluginAction],
     showing_filters: bool,
 ) -> (Rect, Option<MenuRow>) {
     let screen = ctx.content_rect();
     let (left, arrow_x) = panel::place(ctx, MENU_WIDTH, button.center().x);
     let top = screen.top() + pc::BAR_HEIGHT;
-    let groups = menu_groups(filters, showing_filters);
+    let groups = menu_groups(filters, actions, showing_filters);
     let rows: f32 = groups.iter().map(|g| g.len() as f32 * 44.0 + g.len().saturating_sub(1) as f32).sum::<f32>()
         + 10.0 * groups.len().saturating_sub(1) as f32;
     let content = panel::ARROW_HEIGHT + 52.0 + 8.0 + rows + 10.0;
@@ -606,12 +612,14 @@ mod tests {
             problem: None,
             controls: Vec::new(),
             brush_controls: Vec::new(),
+            actions: Vec::new(),
+            permissions: Vec::new(),
         }
     }
 
     #[test]
     fn with_no_filter_the_menu_is_the_adjustments_alone() {
-        let groups = menu_groups(&[], false);
+        let groups = menu_groups(&[], &[], false);
         assert_eq!(groups.len(), adjustment_groups().len());
         assert!(groups.iter().flatten().all(|(_, row)| matches!(row, MenuRow::Open(_))));
     }
@@ -619,12 +627,27 @@ mod tests {
     #[test]
     fn a_filter_adds_one_row_and_that_turns_the_menu_to_them() {
         let filters = [filter()];
-        let groups = menu_groups(&filters, false);
+        let groups = menu_groups(&filters, &[], false);
         assert_eq!(groups.len(), adjustment_groups().len() + 1);
         assert_eq!(groups.last().unwrap(), &vec![("Plugins".to_owned(), MenuRow::Plugins)]);
-        let turned = menu_groups(&filters, true);
+        let turned = menu_groups(&filters, &[], true);
         let rows = [("Lines".to_owned(), MenuRow::Filter("org.example.lines".to_owned()))];
         assert_eq!(turned, vec![rows.to_vec()], "only the filters: the way back isn't a row");
+    }
+
+    #[test]
+    fn a_plugin_action_listed_there_shows_under_plugins_after_the_filters() {
+        let action = PluginAction {
+            key: "org.example.halftone.dots".to_owned(),
+            label: "Halftone".to_owned(),
+            place: procraft_core::PluginPlace::Adjustments,
+        };
+        let alone = menu_groups(&[], std::slice::from_ref(&action), false);
+        assert_eq!(alone.last().unwrap(), &vec![("Plugins".to_owned(), MenuRow::Plugins)]);
+        let turned = menu_groups(&[filter()], std::slice::from_ref(&action), true);
+        let dots = ("Halftone".to_owned(), MenuRow::Action("org.example.halftone.dots".to_owned()));
+        assert_eq!(turned.len(), 2, "the filters, then the actions, each a group");
+        assert_eq!(turned[1], vec![dots]);
     }
 
     /// What a tap at the top of the menu asks, with it turned to the filters or not.
@@ -656,7 +679,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                let (rect, row) = menu(ui.ctx(), &mut look, button, &mut Vec::new(), &filters, turned);
+                let (rect, row) = menu(ui.ctx(), &mut look, button, &mut Vec::new(), &filters, &[], turned);
                 at = menu_back(panel::body(rect)).center();
                 tapped = tapped.clone().or(row);
             });

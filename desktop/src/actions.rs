@@ -8,7 +8,8 @@ use std::time::Instant;
 
 use egui::{Align2, Color32, Id, Order, Painter, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
-    PluginControl, PluginInfo, PluginSource, Plugins, plugin_slider_along, plugin_slider_at, plugin_slider_shown,
+    PanelRow, PluginControl, PluginInfo, PluginPanel, PluginSource, Plugins, plugin_slider_along, plugin_slider_at,
+    plugin_slider_shown,
 };
 
 use crate::animated_export::Animated;
@@ -92,6 +93,8 @@ pub enum Act {
     Shortcuts,
     /// A plugin file to pick and ask about.
     ImportPlugin,
+    /// A plugin's action tapped on its card: [`ActionsPanel::take_plugin_action`] says which.
+    PluginAction,
     GestureControls,
     CanvasInfo,
     AnimationAssist,
@@ -461,6 +464,8 @@ pub struct Actions {
     swipes: Swipes,
     /// A plugin's or plugin's slider under the pointer: its key, and where it has gone.
     plugin_moved: Option<(String, f32)>,
+    /// The key of a plugin's action tapped, for the app to run.
+    plugin_action: Option<String>,
 }
 
 type Swipes = HashMap<(usize, usize), Swipe>;
@@ -496,6 +501,11 @@ impl Swipe {
 }
 
 impl Actions {
+    /// The key of the plugin action last tapped, once ([`Act::PluginAction`]).
+    pub fn take_plugin_action(&mut self) -> Option<String> {
+        self.plugin_action.take()
+    }
+
     /// Shows the panel hanging from `button`; returns where it is (points) and what a row asked. A setting changed in `prefs` returns
     /// [`Act::Prefs`].
     pub fn show(
@@ -884,7 +894,8 @@ impl Actions {
                         if g > 0 {
                             ui.add_space(GROUP_GAP);
                         }
-                        changed |= plugin_card(ui, plugin, g, &prefs.plugins, &mut self.plugin_moved);
+                        changed |=
+                            plugin_card(ui, plugin, g, &prefs.plugins, &mut self.plugin_moved, &mut self.plugin_action);
                     }
                     ui.add_space(13.0);
                 });
@@ -896,6 +907,9 @@ impl Actions {
         }
         if import {
             return Some(Tapped::Act(Act::ImportPlugin));
+        }
+        if self.plugin_action.is_some() {
+            return Some(Tapped::Act(Act::PluginAction));
         }
         changed.then_some(Tapped::Act(Act::Prefs))
     }
@@ -1000,14 +1014,19 @@ fn controls_show(plugin: &PluginInfo) -> bool {
 /// A row under a card's controls.
 #[derive(Clone, Copy)]
 enum CardRow {
+    /// Its action at this place in its list.
+    Action(usize),
     TurnOn,
     TurnOff,
     Remove,
 }
 
-/// What can be done with `plugin`: it is on or off, and what was imported can go.
+/// What can be done with `plugin`: what it does when tapped, once it's on; it is on or off; and
+/// what was imported can go.
 fn card_rows(plugin: &PluginInfo) -> Vec<CardRow> {
-    let mut rows = vec![if plugin.on { CardRow::TurnOff } else { CardRow::TurnOn }];
+    let actions = (0..plugin.actions.len()).filter(|_| controls_show(plugin)).map(CardRow::Action);
+    let mut rows: Vec<CardRow> = actions.collect();
+    rows.push(if plugin.on { CardRow::TurnOff } else { CardRow::TurnOn });
     if plugin.source == PluginSource::File {
         rows.push(CardRow::Remove);
     }
@@ -1033,15 +1052,16 @@ fn plugin_height(painter: &Painter, plugin: &PluginInfo, width: f32) -> f32 {
 }
 
 /// `plugin` as a card: its name and tag, what it does, what is the matter with it, its controls
-/// whatever they are, and the rows that apply or remove it. A switch flips at once, a live slider
-/// goes in as it moves, another leaves where it has gone in `moved`. Returns whether a value
-/// changed.
+/// whatever they are, its actions, and the rows that apply or remove it. A switch flips at once, a
+/// live slider goes in as it moves, another leaves where it has gone in `moved`; an action tapped
+/// leaves its key in `action`. Returns whether a value changed.
 fn plugin_card(
     ui: &mut Ui,
     plugin: &PluginInfo,
     g: usize,
     plugins: &Plugins,
     moved: &mut Option<(String, f32)>,
+    action: &mut Option<String>,
 ) -> bool {
     let width = ui.available_width();
     let (area, _) = ui.allocate_exact_size(vec2(width, plugin_height(ui.painter(), plugin, width)), Sense::hover());
@@ -1135,15 +1155,17 @@ fn plugin_card(
     for (r, row) in card_rows(plugin).into_iter().enumerate() {
         painter.rect_filled(line(y), 0, argb(ACTIONS_SEPARATOR));
         let cell = Rect::from_min_size(pos2(area.left(), y + 1.0), vec2(width, ROW_HEIGHT));
-        let label = match row {
-            CardRow::TurnOn => "Turn on",
-            CardRow::TurnOff => "Turn off",
-            CardRow::Remove => "Remove",
+        let (label, ink) = match row {
+            CardRow::Action(i) => (plugin.actions.get(i).map_or("", |a| a.label.as_str()), argb(pc::ACCENT)),
+            CardRow::TurnOn => ("Turn on", argb(ACTIONS_ROW)),
+            CardRow::TurnOff => ("Turn off", argb(ACTIONS_ROW)),
+            CardRow::Remove => ("Remove", argb(ACTIONS_ROW)),
         };
         let at = pos2(cell.left() + 16.0, cell.center().y);
-        text(&painter, at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+        text(&painter, at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, ink);
         if ui.interact(cell, ui.scope_id().with(("plugin action", g, r)), Sense::click()).clicked() {
             match row {
+                CardRow::Action(i) => *action = plugin.actions.get(i).map(|a| a.key.clone()),
                 CardRow::TurnOn | CardRow::TurnOff => {
                     changed |= plugins.set_on(plugin.id.clone(), !plugin.on);
                 }
@@ -1154,6 +1176,185 @@ fn plugin_card(
         y += 1.0 + ROW_HEIGHT;
     }
     changed
+}
+
+/// What a plugin's panel was asked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PanelTouch {
+    /// Row `.0` touched with `.1` (a slider's, a switch's 1 or 0, a choice's place, 1 for a button).
+    Touch(u32, f32),
+    Close,
+}
+
+/// How wide a plugin's panel is, and how far in from the window's right and below the bar.
+const PANEL_WIDTH: f32 = 340.0;
+const PANEL_MARGIN: f32 = 12.0;
+
+/// A slider value as its row shows it: whole with whole steps, else to two places, then its unit.
+fn panel_value(value: f32, step: f32, unit: &str) -> String {
+    let whole = step >= 1.0 && step.fract() == 0.0;
+    if whole { format!("{}{unit}", value.round() as i64) } else { format!("{value:.2}{unit}") }
+}
+
+/// The height of `row` in a plugin's panel, `inside` wide.
+fn panel_row_height(painter: &Painter, row: &PanelRow, inside: f32) -> f32 {
+    match row {
+        PanelRow::Text { text } => {
+            wrapped(painter, text, 15.0, Weight::Regular, Color32::WHITE, inside - 32.0).size().y + 22.0
+        }
+        PanelRow::Slider { .. } => SLIDE_HEIGHT,
+        _ => ROW_HEIGHT,
+    }
+}
+
+/// A plugin's panel, floating under the bar at the window's right: its title and Done, then its rows
+/// on a card as the Actions panel's are. A slider moved is told as it lets go (`held` keeps where it
+/// is meanwhile); anything else at once. Returns what was asked.
+pub fn plugin_panel(
+    ctx: &egui::Context,
+    look: &mut Look,
+    panel: &PluginPanel,
+    held: &mut Option<(usize, f32)>,
+    backdrops: &mut Vec<f32>,
+) -> Option<PanelTouch> {
+    let screen = ctx.content_rect();
+    let top = screen.top() + pc::BAR_HEIGHT + PANEL_MARGIN;
+    let left = screen.right() - PANEL_MARGIN - PANEL_WIDTH;
+    let inside = PANEL_WIDTH - 20.0;
+    let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, Id::unique("plugin panel measure")));
+    let rows_height: f32 = panel.rows.iter().map(|r| panel_row_height(&painter, r, inside)).sum::<f32>()
+        + panel.rows.len().saturating_sub(1) as f32;
+    let height = (52.0 + 8.0 + rows_height + 10.0).min(screen.bottom() - PANEL_MARGIN - top);
+    let rect = Rect::from_min_size(pos2(left, top), vec2(PANEL_WIDTH, height));
+    let mut asked = None;
+    egui::Area::new(Id::unique("plugin panel")).fixed_pos(rect.min).order(Order::Foreground).show(ctx, |ui| {
+        ui.allocate_rect(rect, Sense::click());
+        crate::panel::floating_frame(ui, look, "plugin panel frame", rect, backdrops);
+        let painter = ui.painter().clone();
+        let title_at = pos2(rect.left() + 24.0, rect.top() + 22.5);
+        text(&painter, title_at, Align2::LEFT_TOP, &panel.title, 22.0, Weight::Bold, argb(crate::panel::PANEL_TITLE));
+        let done_at = pos2(rect.right() - 24.0, rect.top() + 33.0);
+        let done = text(&painter, done_at, Align2::RIGHT_CENTER, "Done", 17.0, Weight::Regular, argb(pc::ACCENT));
+        if ui.interact(done.expand(8.0), ui.scope_id().with("plugin panel done"), Sense::click()).clicked() {
+            asked = Some(PanelTouch::Close);
+        }
+        let list = Rect::from_min_max(pos2(rect.left() + 10.0, rect.top() + 52.0 + 8.0), rect.max - vec2(10.0, 10.0));
+        ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+            ScrollArea::vertical()
+                .id_salt("plugin panel rows")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                    let card_height = rows_height;
+                    let (card, _) = ui.allocate_exact_size(vec2(list.width(), card_height), Sense::hover());
+                    let painter = ui.painter().clone();
+                    painter.rect_filled(card, 13, argb(ACTIONS_GROUP));
+                    let mut y = card.top();
+                    for (i, row) in panel.rows.iter().enumerate() {
+                        if i > 0 {
+                            let line = Rect::from_min_size(pos2(card.left(), y), vec2(card.width(), 1.0));
+                            painter.rect_filled(line, 0, argb(ACTIONS_SEPARATOR));
+                            y += 1.0;
+                        }
+                        let h = panel_row_height(&painter, row, inside);
+                        let cell = Rect::from_min_size(pos2(card.left(), y), vec2(card.width(), h));
+                        let label_at = pos2(cell.left() + 16.0, cell.center().y);
+                        let tapped = |ui: &Ui| {
+                            ui.interact(cell, ui.scope_id().with(("plugin row", i)), Sense::click()).clicked()
+                        };
+                        let row_at = i as u32;
+                        match row {
+                            PanelRow::Text { text: words } => {
+                                let said = wrapped(
+                                    &painter,
+                                    words,
+                                    15.0,
+                                    Weight::Regular,
+                                    argb(ACTIONS_ROW),
+                                    cell.width() - 32.0,
+                                );
+                                painter.galley(pos2(cell.left() + 16.0, cell.top() + 11.0), said, argb(ACTIONS_ROW));
+                            }
+                            PanelRow::Slider { label, least, most, step, value, unit } => {
+                                let shown = held.filter(|(at, _)| *at == i).map_or(*value, |(_, v)| v);
+                                let along = (shown - least) / (most - least);
+                                let words = panel_value(shown, *step, unit);
+                                if let Some(at) = slide_row(ui, cell, label, &words, along, (usize::MAX, i)) {
+                                    let to = least + at * (most - least);
+                                    let to =
+                                        if *step > 0.0 { least + ((to - least) / step).round() * step } else { to };
+                                    *held = Some((i, to.clamp(*least, *most)));
+                                }
+                            }
+                            PanelRow::Switch { label, on } => {
+                                text(
+                                    &painter,
+                                    label_at,
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    17.0,
+                                    Weight::Regular,
+                                    argb(ACTIONS_ROW),
+                                );
+                                let switch_at = pos2(cell.right() - 8.0 - 63.0, cell.center().y - 14.0);
+                                crate::transform::switch(ui, switch_at, *on, ("plugin panel switch", i));
+                                if tapped(ui) {
+                                    asked = Some(PanelTouch::Touch(row_at, if *on { 0.0 } else { 1.0 }));
+                                }
+                            }
+                            PanelRow::Choice { label, options, chosen } => {
+                                text(
+                                    &painter,
+                                    label_at,
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    17.0,
+                                    Weight::Regular,
+                                    argb(ACTIONS_ROW),
+                                );
+                                let picked = options.get(*chosen as usize).map_or("", String::as_str);
+                                let right = pos2(cell.right() - 16.0, cell.center().y);
+                                text(
+                                    &painter,
+                                    right,
+                                    Align2::RIGHT_CENTER,
+                                    picked,
+                                    17.0,
+                                    Weight::Regular,
+                                    argb(pc::ACCENT),
+                                );
+                                if tapped(ui) {
+                                    let next = (*chosen as usize + 1) % options.len().max(1);
+                                    asked = Some(PanelTouch::Touch(row_at, next as f32));
+                                }
+                            }
+                            PanelRow::Button { label } => {
+                                text(
+                                    &painter,
+                                    label_at,
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    17.0,
+                                    Weight::Regular,
+                                    argb(pc::ACCENT),
+                                );
+                                if tapped(ui) {
+                                    asked = Some(PanelTouch::Touch(row_at, 1.0));
+                                }
+                            }
+                        }
+                        y += h;
+                    }
+                });
+        });
+    });
+    // a slider let go is told where it went
+    if !ctx.input(|i| i.pointer.any_down())
+        && let Some((row, value)) = held.take()
+    {
+        asked = asked.or(Some(PanelTouch::Touch(row as u32, value)));
+    }
+    asked
 }
 
 /// A radio mark centred at `at`: blue with a tick when chosen, else a grey ring.
@@ -1403,6 +1604,66 @@ mod tests {
     use procraft_core::{PluginSlider, PluginSwitch};
 
     use super::*;
+
+    /// What a tap at `at` on a plugin's panel of a button, a switch and a choice asks (the window
+    /// 1200 wide).
+    fn panel_tapped(at: impl Fn(Rect) -> Pos2) -> Option<PanelTouch> {
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let panel = PluginPanel {
+            title: "Squares".to_owned(),
+            rows: vec![
+                PanelRow::Button { label: "Add a layer".to_owned() },
+                PanelRow::Switch { label: "Round".to_owned(), on: true },
+                PanelRow::Choice {
+                    label: "Shape".to_owned(),
+                    options: vec!["Dots".to_owned(), "Lines".to_owned()],
+                    chosen: 1,
+                },
+            ],
+        };
+        let top = pc::BAR_HEIGHT + PANEL_MARGIN;
+        let rect = Rect::from_min_size(pos2(1200.0 - PANEL_MARGIN - PANEL_WIDTH, top), vec2(PANEL_WIDTH, 300.0));
+        let point = at(rect);
+        let (mut time, mut asked, mut held) = (0.0, None, None);
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        for step in 0..6 {
+            time += 1.0 / 60.0;
+            let events = match step {
+                2 => vec![Event::PointerMoved(point)],
+                3 => vec![press(point, true)],
+                4 => vec![press(point, false)],
+                _ => Vec::new(),
+            };
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                time: Some(time),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                asked = asked.or(plugin_panel(ui.ctx(), &mut look, &panel, &mut held, &mut Vec::new()));
+            });
+            output.textures_delta.clear();
+        }
+        asked
+    }
+
+    #[test]
+    fn a_plugin_panel_s_rows_tell_their_touches_and_done_closes_it() {
+        // rows from 60 below the top, 44 tall with a line between
+        let row = |i: f32| move |r: Rect| pos2(r.left() + 60.0, r.top() + 60.0 + 22.0 + i * 45.0);
+        assert_eq!(panel_tapped(row(0.0)), Some(PanelTouch::Touch(0, 1.0)), "the button");
+        assert_eq!(panel_tapped(row(1.0)), Some(PanelTouch::Touch(1, 0.0)), "the switch turned off");
+        assert_eq!(panel_tapped(row(2.0)), Some(PanelTouch::Touch(2, 0.0)), "the choice to the next, round");
+        assert_eq!(panel_tapped(|r| pos2(r.right() - 40.0, r.top() + 33.0)), Some(PanelTouch::Close));
+        assert_eq!(panel_tapped(|r| pos2(r.left() + 60.0, r.top() + 20.0)), None, "the title does nothing");
+    }
 
     const SHADER: &str = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
     const SHADER_SHA: &str = "55f0107972b862c96fe458e60620daf4d655f0d1dfb7704a6358a20e6a4c5891";
@@ -1684,6 +1945,8 @@ mod tests {
     fn a_plugin_nothing_answers_to_draws_and_does_nothing() {
         let stranger = PluginInfo {
             brush_controls: Vec::new(),
+            actions: Vec::new(),
+            permissions: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),
@@ -1736,7 +1999,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved));
+                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved, &mut None));
             });
             output.textures_delta.clear();
         };

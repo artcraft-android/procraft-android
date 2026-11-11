@@ -1,6 +1,8 @@
 //! A plugin's code: a WebAssembly module, interpreted under caps on its time and memory. It gets no
-//! imports at all, no files, network or layers, so all it ever sees is the numbers a hook hands it
-//! and all it can do is hand some back.
+//! files, network or clock: at a hook all it ever sees is the numbers the hook hands it, and all it
+//! can do is hand some back. The only imports it may have are the app's functions its permissions
+//! give (`plugin_commands.rs`, interface 2), which answer only while one of its actions runs:
+//! `procraft_action(index: i32) -> i32`, called when its action at `index` is tapped (returns 0).
 //!
 //! What a module exports, interface 1, in plain numbers:
 //! - `procraft_position(x: f32, y: f32) -> i64`: for the hook `position`, where a sample in window
@@ -73,10 +75,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
+use crate::plugin_commands::{Host, PluginPermission};
 use wasmi::errors::ErrorKind;
 use wasmi::{
-    Config, EnforcedLimits, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode,
-    TypedFunc, TypedResumableCall, ValType, WasmParams, WasmResults,
+    Config, EnforcedLimits, Engine, Linker, Memory, Module, Store, StoreLimitsBuilder, TrapCode, TypedFunc,
+    TypedResumableCall, ValType, WasmParams, WasmResults,
 };
 
 /// The module's name in a plugin's folder.
@@ -167,6 +170,11 @@ const BETWEEN_OUT: &str = "procraft_between_out";
 const RADIAL_PARTS: std::ops::RangeInclusive<i32> = 2..=64;
 const MEMORY: &str = "memory";
 const CONTROL: &str = "procraft_control";
+const ACTION: &str = "procraft_action";
+const PANEL_EVENT: &str = "procraft_panel_event";
+/// What an action may spend and how long it may take: it does the plugin's work on the artwork.
+const ACTION_FUEL: u64 = 4_000_000_000;
+const MOST_ACTION_TIME: Duration = Duration::from_secs(20);
 
 /// What a plugin may step into, by the name a manifest gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,7 +322,7 @@ impl Stop {
 fn stop_of(error: &wasmi::Error) -> Stop {
     match (error.as_trap_code(), error.kind()) {
         (Some(TrapCode::OutOfFuel), _) => Stop::TooSlow,
-        // with no imports, all that can keep one from starting is the caps
+        // its imports checked before, all that can keep one from starting is the caps
         (Some(TrapCode::GrowthOperationLimited), _) | (_, ErrorKind::Instantiation(_)) => Stop::Memory,
         _ => Stop::Crashed,
     }
@@ -374,17 +382,33 @@ fn has_memory(module: &Module) -> bool {
     module.exports().any(|export| export.name() == MEMORY && export.ty().memory().is_some())
 }
 
-/// Whether `bytes` is a module a plugin on `hooks` can be: valid, wanting nothing from outside, and
-/// exporting what it must (`controls`: it has some). Nothing in it runs.
+/// [`can_act`] for a plugin with no actions that may reach nothing.
+#[cfg(test)]
 pub(crate) fn can_run(bytes: &[u8], hooks: &[Hook], controls: bool) -> bool {
+    can_act(bytes, hooks, controls, false, &[])
+}
+
+/// Whether `bytes` is a module a plugin on `hooks` can be: valid, wanting from outside only the
+/// app's functions its `permissions` give, and exporting what it must (`controls`: it has some;
+/// `actions`: it has some). Nothing in it runs.
+pub(crate) fn can_act(
+    bytes: &[u8],
+    hooks: &[Hook],
+    controls: bool,
+    actions: bool,
+    permissions: &[PluginPermission],
+) -> bool {
     if bytes.len() > MOST_MODULE || !code_counts_hold(bytes) {
         return false;
     }
     let fits = guarded(|| {
         let module = Module::new(&engine(), bytes).map_err(|_| Stop::Damaged)?;
-        Ok(module.imports().next().is_none()
+        Ok(crate::plugin_commands::imports_fit(&module, permissions)
             && hooks.iter().all(|hook| hook.fits(&module))
-            && (!controls || exports(&module, CONTROL, &[ValType::I32, ValType::F32], &[])))
+            && (!controls || exports(&module, CONTROL, &[ValType::I32, ValType::F32], &[]))
+            && (!actions || exports(&module, ACTION, &[ValType::I32], &[ValType::I32]))
+            && (!permissions.contains(&PluginPermission::Panel)
+                || exports(&module, PANEL_EVENT, &[ValType::I32, ValType::F32], &[ValType::I32])))
     });
     fits.unwrap_or(false)
 }
@@ -418,7 +442,7 @@ struct FillCalls {
 
 /// `func` called on what is `left` of a long call's fuel, in slices, until `until`.
 fn long_call<P: WasmParams, R: WasmResults>(
-    store: &mut Store<StoreLimits>,
+    store: &mut Store<Host>,
     func: &TypedFunc<P, R>,
     params: P,
     left: &mut u64,
@@ -452,7 +476,7 @@ fn long_call<P: WasmParams, R: WasmResults>(
 
 /// A plugin's module, instantiated, with what it has of ours to call.
 pub(crate) struct Running {
-    store: Store<StoreLimits>,
+    store: Store<Host>,
     position: Option<TypedFunc<(f32, f32), i64>>,
     pick_layer: Option<TypedFunc<(), i32>>,
     interface_scale: Option<TypedFunc<(f32, f32), f32>>,
@@ -482,11 +506,18 @@ pub(crate) struct Running {
     between: Option<BetweenCalls>,
     memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
+    action: Option<TypedFunc<i32, i32>>,
+    panel_event: Option<TypedFunc<(i32, f32), i32>>,
 }
 
 impl Running {
     /// `bytes` started, under the caps of a plugin on `hooks`, and told `controls`.
-    pub(crate) fn start_on(bytes: &[u8], controls: &[f32], hooks: &[Hook]) -> Result<Running, Stop> {
+    pub(crate) fn start_on(
+        bytes: &[u8],
+        controls: &[f32],
+        hooks: &[Hook],
+        permissions: &[PluginPermission],
+    ) -> Result<Running, Stop> {
         let most_memory = if hooks.contains(&Hook::Inbetween) {
             MOST_BETWEEN_MEMORY
         } else if hooks.contains(&Hook::StrokeSound) {
@@ -496,13 +527,13 @@ impl Running {
         } else {
             MOST_MEMORY
         };
-        Running::start_within(bytes, controls, most_memory)
+        Running::start_within(bytes, controls, most_memory, permissions)
     }
 
     /// `bytes` started, under its caps, and told `controls`.
     #[cfg(test)]
     pub(crate) fn start(bytes: &[u8], controls: &[f32]) -> Result<Running, Stop> {
-        Running::start_within(bytes, controls, MOST_MEMORY)
+        Running::start_within(bytes, controls, MOST_MEMORY, &[])
     }
 
     /// How much memory it has come to ask for, bytes.
@@ -511,7 +542,12 @@ impl Running {
         self.memory.as_ref().map_or(0, |memory| memory.data(&self.store).len())
     }
 
-    fn start_within(bytes: &[u8], controls: &[f32], most_memory: usize) -> Result<Running, Stop> {
+    fn start_within(
+        bytes: &[u8],
+        controls: &[f32],
+        most_memory: usize,
+        permissions: &[PluginPermission],
+    ) -> Result<Running, Stop> {
         let mut running = guarded(|| {
             let engine = engine();
             let module = Module::new(&engine, bytes).map_err(|_| Stop::Damaged)?;
@@ -523,10 +559,12 @@ impl Running {
                 .tables(1)
                 .trap_on_grow_failure(true)
                 .build();
-            let mut store = Store::new(&engine, limits);
-            store.limiter(|limits| limits);
+            let mut store = Store::new(&engine, Host::new(limits));
+            store.limiter(|host| &mut host.limits);
             store.set_fuel(START_FUEL).map_err(|_| Stop::Damaged)?;
-            let linker = Linker::new(&engine);
+            // the app's functions its permissions give, and nothing else
+            let mut linker = Linker::new(&engine);
+            crate::plugin_commands::link(&mut linker, permissions).map_err(|_| Stop::Damaged)?;
             let instance = linker.instantiate_and_start(&mut store, &module).map_err(|e| stop_of(&e))?;
             let position = instance.get_typed_func(&store, POSITION).ok();
             let pick_layer = instance.get_typed_func(&store, PICK_LAYER).ok();
@@ -575,6 +613,8 @@ impl Running {
             })();
             let memory = instance.get_memory(&store, MEMORY);
             let control = instance.get_typed_func(&store, CONTROL).ok();
+            let action = instance.get_typed_func(&store, ACTION).ok();
+            let panel_event = instance.get_typed_func(&store, PANEL_EVENT).ok();
             Ok(Running {
                 store,
                 position,
@@ -605,12 +645,52 @@ impl Running {
                 between,
                 memory,
                 control,
+                action,
+                panel_event,
             })
         })?;
         for (index, value) in controls.iter().enumerate() {
             running.control(index, *value)?;
         }
         Ok(running)
+    }
+
+    /// Runs its action `index` on the artwork `session` (what its permissions give it to reach), as a
+    /// long call.
+    pub(crate) fn action(&mut self, index: usize, session: std::sync::Arc<crate::CanvasSession>) -> Result<(), Stop> {
+        let Running { store, action, .. } = self;
+        let Some(action) = action.as_ref() else { return Ok(()) };
+        let index = i32::try_from(index).map_err(|_| Stop::Nonsense)?;
+        store.data_mut().session = Some(session as std::sync::Arc<dyn std::any::Any + Send + Sync>);
+        let (mut left, until) = (ACTION_FUEL, Instant::now() + MOST_ACTION_TIME);
+        let ran = guarded(|| long_call(store, action, index, &mut left, until).map(|_| ()));
+        store.data_mut().session = None;
+        ran
+    }
+
+    /// Tells it its panel's row `row` was touched with `value`, on the artwork `session`, as a long
+    /// call (as an action is).
+    pub(crate) fn panel_event(
+        &mut self,
+        row: usize,
+        value: f32,
+        session: std::sync::Arc<crate::CanvasSession>,
+    ) -> Result<(), Stop> {
+        let Running { store, panel_event, .. } = self;
+        let Some(panel_event) = panel_event.as_ref() else { return Ok(()) };
+        let row = i32::try_from(row).map_err(|_| Stop::Nonsense)?;
+        store.data_mut().session = Some(session as std::sync::Arc<dyn std::any::Any + Send + Sync>);
+        let (mut left, until) = (ACTION_FUEL, Instant::now() + MOST_ACTION_TIME);
+        let ran = guarded(|| long_call(store, panel_event, (row, value), &mut left, until).map(|_| ()));
+        store.data_mut().session = None;
+        ran
+    }
+
+    /// The panel it asked to show since last asked (none if it didn't), and whether it asked to
+    /// close it.
+    pub(crate) fn take_panel(&mut self) -> (Option<crate::PluginPanel>, bool) {
+        let host = self.store.data_mut();
+        (host.panel.take(), std::mem::take(&mut host.close_panel))
     }
 
     /// Tells it control `index` has `value`.
@@ -1027,6 +1107,69 @@ impl Running {
 pub(crate) mod tests {
     use super::*;
 
+    /// An action that adds a layer named "Grid" and paints a 10 x 10 red square at (20, 30) on it.
+    pub(crate) const ACTS: &str = r#"(module
+        (import "procraft" "add_layer" (func $add (result i64)))
+        (import "procraft" "write_pixels" (func $write (param i64 i32 i32 i32 i32 i32) (result i32)))
+        (import "procraft" "set_layer_name" (func $name (param i64 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "Grid")
+        (func (export "procraft_action") (param i32) (result i32)
+            (local $layer i64) (local $p i32)
+            (local.set $layer (call $add))
+            (drop (call $name (local.get $layer) (i32.const 0) (i32.const 4)))
+            (local.set $p (i32.const 1024))
+            (loop $fill
+                (i32.store (local.get $p) (i32.const 0xFF0000FF))
+                (local.set $p (i32.add (local.get $p) (i32.const 4)))
+                (br_if $fill (i32.lt_u (local.get $p) (i32.const 1424))))
+            (drop (call $write (local.get $layer) (i32.const 20) (i32.const 30) (i32.const 10) (i32.const 10) (i32.const 1024)))
+            (i32.const 0)))"#;
+
+    #[test]
+    fn a_plugin_imports_only_what_its_permissions_give() {
+        let bytes = wat::parse_str(ACTS).unwrap();
+        let write = [PluginPermission::ArtworkWrite];
+        assert!(can_act(&bytes, &[], false, true, &write));
+        // without the permission it can't run, nor with only others
+        assert!(!can_run(&bytes, &[], false));
+        assert!(!can_act(&bytes, &[], false, true, &[PluginPermission::ArtworkRead, PluginPermission::Brush]));
+        // nor what it imports from elsewhere, or with other types
+        let importing = |import: &str| {
+            let text = format!(
+                r#"(module {import} (func (export "procraft_action") (param i32) (result i32) (i32.const 0)))"#
+            );
+            wat::parse_str(text).unwrap()
+        };
+        assert!(can_act(
+            &importing(r#"(import "procraft" "add_layer" (func (result i64)))"#),
+            &[],
+            false,
+            true,
+            &write
+        ));
+        assert!(!can_act(&importing(r#"(import "env" "add_layer" (func (result i64)))"#), &[], false, true, &write));
+        assert!(!can_act(
+            &importing(r#"(import "procraft" "add_layer" (func (result i32)))"#),
+            &[],
+            false,
+            true,
+            &write
+        ));
+        assert!(!can_act(&importing(r#"(import "procraft" "memory" (memory 1))"#), &[], false, true, &write));
+        // a panel needs its touches' export
+        let panel = [PluginPermission::Panel];
+        let shows = r#"(import "procraft" "show_panel" (func (param i32 i32) (result i32)))"#;
+        assert!(!can_act(&importing(shows), &[], false, true, &panel));
+        let touches =
+            format!(r#"{shows} (func (export "procraft_panel_event") (param i32 f32) (result i32) (i32.const 0))"#);
+        assert!(can_act(&importing(&touches), &[], false, true, &panel));
+        // actions need theirs exported
+        let none = position_module("", "(i64.const 0)");
+        assert!(can_act(&none, &[Hook::Position], false, false, &write));
+        assert!(!can_act(&none, &[Hook::Position], false, true, &write));
+    }
+
     /// Moves a sample by its two controls, as a plugin of real use does.
     pub(crate) const OFFSET: &str = r#"(module
         (global $x (mut f32) (f32.const 0))
@@ -1316,7 +1459,7 @@ pub(crate) mod tests {
         let over = MOST_FILL_MEMORY / 65536;
         let run = |bytes: &[u8], hooks: &[Hook]| {
             let mut rows = vec![!0_u64];
-            Running::start_on(bytes, &[], hooks).unwrap().fill(&mut rows, 64, 1, (0, 0))
+            Running::start_on(bytes, &[], hooks, &[]).unwrap().fill(&mut rows, 64, 1, (0, 0))
         };
         assert_eq!(run(&grows(fits), &[Hook::FillMask]), Ok(false));
         assert_eq!(run(&grows(over), &[Hook::FillMask]), Err(Stop::Memory));

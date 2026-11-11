@@ -23,7 +23,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 1;
+const INTERFACE: u32 = 2;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -119,6 +119,9 @@ pub(crate) struct Manifest {
     pub controls: Vec<PluginControl>,
     /// Rows it adds to the brush studio, kept with each brush.
     pub brush_controls: Vec<PluginBrushControl>,
+    /// What it does when tapped, and what it may reach then.
+    pub actions: Vec<crate::plugins::PluginAction>,
+    pub permissions: Vec<crate::plugin_commands::PluginPermission>,
     files: Vec<Listed>,
 }
 
@@ -179,7 +182,21 @@ struct RawManifest {
     controls: Vec<RawControl>,
     #[serde(default)]
     brush_controls: Vec<RawBrushControl>,
+    #[serde(default)]
+    actions: Vec<RawAction>,
 }
+
+/// Something a plugin does when tapped: its key, the words on its row, and where else it's listed.
+#[derive(Deserialize)]
+struct RawAction {
+    key: String,
+    label: String,
+    #[serde(default)]
+    place: Option<String>,
+}
+
+/// The most actions a plugin may list.
+const MOST_ACTIONS: usize = 8;
 
 /// A row a plugin adds to the brush studio: a choice of a few, kept with each brush.
 #[derive(Deserialize)]
@@ -443,8 +460,15 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     }
     // (a field given twice is an error here, so a manifest can't say two things to two readers)
     let raw: RawManifest = serde_json::from_slice(text).map_err(|_| Refusal::Described)?;
-    if !raw.permissions.is_empty() {
-        return Err(Refusal::Permissions);
+    // what it may reach, by names this app gives; anything else it asks for is refused
+    let mut permissions = Vec::new();
+    for asked in &raw.permissions {
+        let given =
+            asked.as_str().and_then(crate::plugin_commands::PluginPermission::named).ok_or(Refusal::Permissions)?;
+        if permissions.contains(&given) {
+            return Err(Refusal::Described);
+        }
+        permissions.push(given);
     }
     let compat = raw.compat.procraft.ok_or(Refusal::OtherApp)?;
     // a part this app doesn't have is for a newer one
@@ -512,7 +536,8 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
             }
             hooks.push(hook);
         }
-        if hooks.is_empty() {
+        // code steps in somewhere, or does something when tapped
+        if hooks.is_empty() && raw.actions.is_empty() {
             return Err(Refusal::Described);
         }
     } else if !raw.hooks.is_empty() {
@@ -533,6 +558,24 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     }
     let brush_controls =
         raw.brush_controls.into_iter().map(|c| checked_brush_control(&id, c)).collect::<Result<Vec<_>, _>>()?;
+    // actions and what they reach, for code written to interface 2 or later
+    let code = has(PluginPart::Hooks) && compat.interface.is_some_and(|interface| interface >= 2);
+    let mut action_keys = HashSet::new();
+    let plain = |text: &String| !text.trim().is_empty() && shows_plainly(text, 40);
+    let actions_fit = raw.actions.len() <= MOST_ACTIONS
+        && raw.actions.iter().all(|a| valid_key(&a.key) && plain(&a.label) && action_keys.insert(a.key.clone()));
+    if !actions_fit || (!code && (!raw.actions.is_empty() || !permissions.is_empty())) {
+        return Err(Refusal::Described);
+    }
+    // a place this app doesn't have is for a newer one
+    let mut actions = Vec::new();
+    for a in raw.actions {
+        let place = match a.place.as_deref() {
+            None => crate::plugins::PluginPlace::Card,
+            Some(name) => crate::plugins::PluginPlace::named(name).ok_or(Refusal::Newer)?,
+        };
+        actions.push(crate::plugins::PluginAction { key: format!("{id}.{}", a.key), label: a.label, place });
+    }
     Ok(Manifest {
         id,
         name: raw.name,
@@ -544,6 +587,8 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         hooks,
         controls,
         brush_controls,
+        actions,
+        permissions,
         files,
     })
 }
@@ -563,8 +608,9 @@ fn code_refused(manifest: &Manifest, path: &str, data: &[u8]) -> Option<Refusal>
         return refused.then_some(Refusal::FilterCode);
     }
     let code = manifest.holds.contains(&PluginPart::Hooks) && path == MODULE;
-    let controls = !manifest.controls.is_empty();
-    (code && !plugin_run::can_run(data, &manifest.hooks, controls)).then_some(Refusal::Code)
+    let (controls, actions) = (!manifest.controls.is_empty(), !manifest.actions.is_empty());
+    (code && !plugin_run::can_act(data, &manifest.hooks, controls, actions, &manifest.permissions))
+        .then_some(Refusal::Code)
 }
 
 /// `bytes` read as a plugin file. Every entry is checked by what it claims before any is read,
@@ -1529,14 +1575,62 @@ pub(crate) mod tests {
         };
         // a hook or an interface this app doesn't have is for a newer one
         assert_eq!(of("/hooks", json!(["position", "layers"])), Refusal::Newer);
-        assert_eq!(of("/compat/procraft/interface", json!(2)), Refusal::Newer);
+        assert_eq!(of("/compat/procraft/interface", json!(3)), Refusal::Newer);
         assert_eq!(of("/hooks", json!([])), Refusal::Described);
         assert_eq!(of("/hooks", json!(["position", "position"])), Refusal::Described);
         assert_eq!(of("/compat/procraft", json!({ "min_app": "0.0.1" })), Refusal::Described);
-        // nor may it ask for anything
+        // nor ask for what this app doesn't give
         assert_eq!(of("/permissions", json!(["files"])), Refusal::Permissions);
         // and a part that isn't one yet is for a newer one too
         assert_eq!(of("/holds", json!(["module"])), Refusal::Newer);
+    }
+
+    #[test]
+    fn a_plugin_lists_what_it_does_when_tapped_and_what_that_reaches() {
+        let module = wat::parse_str(crate::plugin_run::tests::ACTS).unwrap();
+        let acting = || {
+            let mut manifest = coded("org.example.plugin", &module);
+            manifest["compat"]["procraft"]["interface"] = json!(2);
+            manifest["hooks"] = json!([]);
+            manifest["permissions"] = json!(["artwork.write"]);
+            manifest["actions"] = json!([{ "key": "grid", "label": "Add a grid layer" }]);
+            manifest
+        };
+        let package = read_package(&a_coded_file(&acting(), &module)).unwrap();
+        let grid = crate::plugins::PluginAction {
+            key: "org.example.plugin.grid".to_owned(),
+            label: "Add a grid layer".to_owned(),
+            place: crate::plugins::PluginPlace::Card,
+        };
+        assert_eq!(package.manifest.actions, [grid]);
+        assert_eq!(package.manifest.permissions, [crate::plugin_commands::PluginPermission::ArtworkWrite]);
+        let of = |path: &str, value: Value| refusal(&a_coded_file(&with(acting(), path, value), &module));
+        // what it imports needs its permission
+        assert_eq!(of("/permissions", json!([])), Refusal::Code);
+        // one this app doesn't give is refused, one asked twice isn't written right
+        assert_eq!(of("/permissions", json!(["artwork.write", "network"])), Refusal::Permissions);
+        assert_eq!(of("/permissions", json!(["artwork.write", "artwork.write"])), Refusal::Described);
+        // with no hooks and no actions it does nothing
+        assert_eq!(of("/actions", json!([])), Refusal::Described);
+        // each key once, words to show, and not too many
+        let twice = json!([{ "key": "a", "label": "A" }, { "key": "a", "label": "B" }]);
+        assert_eq!(of("/actions", twice), Refusal::Described);
+        assert_eq!(of("/actions", json!([{ "key": "a", "label": " " }])), Refusal::Described);
+        let many: Vec<Value> = (0..9).map(|i| json!({ "key": format!("a{i}"), "label": "A" })).collect();
+        assert_eq!(of("/actions", json!(many)), Refusal::Described);
+        // listed in the Adjustments menu too; a place this app doesn't have is for a newer one
+        let placed = |place: &str| {
+            let mut manifest = acting();
+            manifest["actions"][0]["place"] = json!(place);
+            read_package(&a_coded_file(&manifest, &module))
+        };
+        let package = placed("adjustments").unwrap();
+        assert_eq!(package.manifest.actions[0].place, crate::plugins::PluginPlace::Adjustments);
+        assert_eq!(placed("toolbar").err(), Some(Refusal::Newer));
+        // a filter neither acts nor reaches anything, nor code written before there were actions
+        let filter = with(a_filter(), "/permissions", json!(["brush"]));
+        assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
+        assert_eq!(of("/compat/procraft/interface", json!(1)), Refusal::Described);
     }
 
     #[test]
