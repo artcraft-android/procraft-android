@@ -1395,18 +1395,24 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
         Texture::Stock { name, inverted } => {
             let (image, source, hardness) = stock_stand_in(name, *inverted);
             // our shape with the stock one's own lights and darks and its rows' share of the ink,
-            // where they were measured
-            let retoned =
-                image.filter(|_| source.is_none()).zip(textures::stock_shape_tones(name)).and_then(|(i, tones)| {
+            // where they were measured: all of the stock one as its brush shows it (inverted, for
+            // one that inverts it: most stock tips are drawn dark on white), our shape as it is
+            let retoned = image
+                .filter(|_| source.is_none())
+                .zip(textures::stock_shape_tones(name, *inverted))
+                .and_then(|(i, tones)| {
                     let shape = textures::shapes().into_iter().nth(i as usize)?;
-                    // its streaks and gaps across the stroke first, where they were measured
-                    let striped = textures::stock_shape_rows(name).map(|rows| textures::striped(&shape.pixels, &rows));
+                    // its streaks and gaps across the stroke first (and, standing in for a tip we
+                    // know nothing else of, its outline across too)
+                    let rows = textures::stock_shape_rows(name, *inverted);
+                    let cols = textures::stock_shape_cols(name, *inverted).filter(|_| i == shape::STOCK_GRAINY_SQUARE);
+                    let striped = match (rows, cols) {
+                        (Some(rows), Some(cols)) => Some(textures::shaped(&shape.pixels, &rows, &cols)),
+                        (Some(rows), None) => Some(textures::striped(&shape.pixels, &rows)),
+                        _ => None,
+                    };
                     let pixels = striped.as_deref().unwrap_or(&shape.pixels);
-                    let mut pixels = textures::retoned_shape(pixels, &tones, &textures::SHAPE_TONE_SHARES);
-                    if *inverted {
-                        pixels.iter_mut().for_each(|v| *v = 255 - *v);
-                    }
-                    Source::new(pixels)
+                    Source::new(textures::retoned_shape(pixels, &tones, &textures::SHAPE_TONE_SHARES))
                 });
             (image, retoned.or(source), hardness)
         }
@@ -1417,7 +1423,10 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
 /// (blank) the whole square.
 fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, Option<f32>) {
     let n = name.to_lowercase();
-    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    let has = |words: &[&str]| words.iter().any(|w| names(&n, w));
+    // the round tip's words as whole words of the name ("shard" is no hard tip, nor "penguin" a pen)
+    let words: Vec<&str> = n.split(|c: char| !c.is_alphanumeric()).collect();
+    let says = |these: &[&str]| these.iter().any(|w| words.contains(w));
     if has(&["blank"]) {
         // a plain image: the stamp's whole square (nothing, inverted)
         let fill = if inverted { 0 } else { 255 };
@@ -1430,7 +1439,7 @@ fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, O
         (Some(shape::SLIM_OVAL), None, None)
     } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
         (None, None, Some(0.75))
-    } else if has(&["hard", "pen", "solid", "round"]) && !has(&["soft", "ink"]) {
+    } else if says(&["hard", "pen", "solid", "round"]) && !has(&["soft", "ink", "rect"]) {
         (None, None, Some(0.95))
     } else if has(&["medium"]) {
         (None, None, Some(0.5))
@@ -1443,9 +1452,35 @@ fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, O
     }
 }
 
+/// Whether the name `n` (lower case) says `word`: a word as the start of one of the name's words, or
+/// (five letters or more) as the end of one, so that "blotch" says blot and "wildgrass" grass but
+/// "fairy" doesn't say air nor "minke" ink; a phrase anywhere in it.
+fn names(n: &str, word: &str) -> bool {
+    if !word.chars().all(|c| c.is_ascii_alphabetic()) {
+        return n.contains(word);
+    }
+    n.split(|c: char| !c.is_alphanumeric()).any(|t| t.starts_with(word) || (word.len() >= 5 && t.ends_with(word)))
+}
+
 /// Our shape nearest a stock shape's name.
 fn stock_shape(n: &str) -> u32 {
+    // a tip named for a brush of its own ("Name_Shape", "Name_Secondary_Shape": a bird, a plant, a
+    // place) says nothing of what it is: the grainy square, taking its measured outline
+    let base = n.rsplit('/').next().unwrap_or(n);
+    let stem = base.rsplit_once('.').map_or(base, |(s, _)| s);
+    if stem.ends_with("_shape") && stem.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+        return shape::STOCK_GRAINY_SQUARE;
+    }
     let table: &[(&[&str], u32)] = &[
+        // drawn things of their own
+        (&["scribble"], shape::SCRIBBLE),
+        (&["lightning", "bolt"], shape::BOLT),
+        (&["flower", "petal", "blossom"], shape::FLOWER),
+        (&["diamond", "crystal"], shape::DIAMOND),
+        (&["reticle"], shape::RING),
+        (&["spike"], shape::STOCK_LINE),
+        (&["tendril", "tentacle"], shape::STOCK_HOOK),
+        (&["pebble", "rocks", "limestone"], shape::STONE),
         (&["square-dots", "square dots", "squaredots"], shape::STOCK_SQUARE_DOTS),
         (&["dots"], shape::STOCK_DOTS),
         (&["brick"], shape::BLOCK),
@@ -1467,14 +1502,17 @@ fn stock_shape(n: &str) -> u32 {
         (&["leaf", "foliage", "tree"], shape::LEAF),
         (&["grass", "reed"], shape::GRASS),
         (&["cloud", "fog", "smoke"], shape::CLOUD),
-        (&["wisp", "wind"], shape::WISP),
+        // one curved calligraphic stroke
+        (&["wind", "hook"], shape::STOCK_HOOK),
+        (&["wisp"], shape::WISP),
         (&["star", "sparkle", "glint", "flare", "twinkle"], shape::SPARKLE),
         (&["ring", "bokeh", "circle", "bubble"], shape::RING),
-        (&["square", "pixel", "block", "box"], shape::SQUARE),
+        (&["square", "pixel", "block", "box", "rect"], shape::SQUARE),
         (&["hatch", "line", "stripe"], shape::HATCH),
         (&["noise", "grain", "grit", "sand", "texture"], shape::STOCK_GRAINY_DISC),
     ];
-    table.iter().find(|(words, _)| words.iter().any(|w| n.contains(w))).map_or(shape::STOCK_GRAINY_DISC, |(_, s)| *s)
+    // one we have no word for: grain filling the square, taking its outline from how its ink lies
+    table.iter().find(|(words, _)| words.iter().any(|w| names(n, w))).map_or(shape::STOCK_GRAINY_SQUARE, |(_, s)| *s)
 }
 
 /// What a brush's own preview (PNG) says of a stock grain we don't have.
@@ -1787,6 +1825,26 @@ pub(crate) fn sized_gray_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stock_tip_of_one_curved_stroke_stands_in_as_our_hook() {
+        // swept along a stroke it paints a broad band, as such a tip does; a wisp stays a wisp
+        assert_eq!(stock_shape("wind.png"), shape::STOCK_HOOK);
+        assert_eq!(stock_shape("soft wisp.png"), shape::WISP);
+        assert_eq!(textures::shapes()[shape::STOCK_HOOK as usize].name, "Hook");
+    }
+
+    #[test]
+    fn a_stock_tip_named_for_a_brush_of_its_own_takes_its_outline_whatever_its_name_says() {
+        // a bird's or a place's name says nothing of the tip ("ringtail" isn't a ring, nor
+        // "starling" a star); a plain word does
+        assert_eq!(stock_shape("ringtail_shape.png"), shape::STOCK_GRAINY_SQUARE);
+        assert_eq!(stock_shape("folder/starling_secondary_shape.png"), shape::STOCK_GRAINY_SQUARE);
+        assert_eq!(stock_shape("brush-preset-scribble.jpg"), shape::SCRIBBLE);
+        assert_eq!(stock_shape("brush-preset-spike.png"), shape::STOCK_LINE);
+        assert_eq!(stock_shape("brush-artery-cloud-shape.jpg"), shape::CLOUD);
+        assert_eq!(textures::shapes()[shape::STOCK_LINE as usize].name, "Line");
+    }
 
     #[test]
     fn a_small_tip_is_drawn_up_smoothly_and_a_large_one_down_by_its_average() {

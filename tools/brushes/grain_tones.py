@@ -1,8 +1,8 @@
 """Writes the engine's tables of stock grain and shape tones (crates/engine/src/stock_tones.rs): for
 each grain image another app's brush files name instead of carrying it, the values at nine shares
 of it (none, 5%, 10%, a quarter, half, three quarters, 90%, 95%, all); for each shape image, at
-every sixteenth, and how much ink each of 64 bands of its rows holds, top to bottom (as shares of
-its fullest band). Measured as the engine reads an image (its luminance times its alpha, averaged
+every sixteenth, and each of 64 bands of its rows' mean value, top to bottom, and of its columns,
+left to right (means, so that a brush that inverts the image can have them inverted too). Measured as the engine reads an image (its luminance times its alpha, averaged
 down to 256 square). And each grain's feature size: how far it shifts before it looks only half
 like itself (its autocorrelation at half), as a share of its side, at four levels of detail (the
 image at 1024, 512, 256 and 128 a side, no finer than its own), so that our stand-in can be tiled
@@ -93,13 +93,20 @@ def tones(path, shares):
 
 
 def rows(path):
-    """How much ink each band of the image's rows holds, top to bottom, as shares of the fullest
-    band (0..255)."""
-    px = values(path).tobytes()
+    """Each band of the image's rows' mean value, top to bottom (0..255): the ink it holds, or the
+    paper it leaves for a brush that inverts it."""
+    return band_means(values(path))
+
+
+def cols(path):
+    """The same of its columns, left to right."""
+    return band_means(values(path).transpose(Image.Transpose.TRANSPOSE))
+
+
+def band_means(im):
+    px = im.tobytes()
     per = SIDE // BANDS
-    sums = [sum(px[y * SIDE:(y + per) * SIDE]) for y in range(0, SIDE, per)]
-    top = max(sums) or 1
-    return [round(255 * v / top) for v in sums]
+    return [round(sum(px[y * SIDE:(y + per) * SIDE]) / (per * SIDE)) for y in range(0, SIDE, per)]
 
 
 FEATURE_SIDES = (1024, 512, 256, 128)
@@ -161,11 +168,13 @@ def main():
     grains = table(bundle, images, "bundledGrainPath", lambda p: tones(p, SHARES))
     shapes = table(bundle, images, "bundledShapePath", lambda p: tones(p, SHAPE_SHARES))
     bands = table(bundle, images, "bundledShapePath", rows)
+    columns = table(bundle, images, "bundledShapePath", cols)
     features = table(bundle, images, "bundledGrainPath", feature)
     header = """//! Written by tools/brushes/grain_tones.py (don't edit by hand): the tones of the stock grains
 //! and shapes other apps' brush files name instead of carrying (see [`stock_grain_tones`] and
 //! [`stock_shape_tones`]), each the values at [`TONE_SHARES`] or [`SHAPE_TONE_SHARES`] of it, and
-//! how much each band of a shape's rows holds (see [`stock_shape_rows`]), and each grain's
+//! each band of a shape's rows' and columns' mean value (see [`stock_shape_rows`] and
+//! [`stock_shape_cols`]), and each grain's
 //! feature size (see [`stock_grain_feature`]), keyed by a hash of its file's name.
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
@@ -175,6 +184,7 @@ def main():
         f.write(header + f"pub(crate) const STOCK_GRAIN_TONES: &[(u64, [u8; 9])] = &[\n{body(grains)}\n];\n")
         f.write(f"\npub(crate) const STOCK_SHAPE_TONES: &[(u64, [u8; 17])] = &[\n{body(shapes)}\n];\n")
         f.write(f"\npub(crate) const STOCK_SHAPE_ROWS: &[(u64, [u8; {BANDS}])] = &[\n{body(bands)}\n];\n")
+        f.write(f"\npub(crate) const STOCK_SHAPE_COLS: &[(u64, [u8; {BANDS}])] = &[\n{body(columns)}\n];\n")
         f.write("\npub(crate) const STOCK_GRAIN_FEATURES: &[(u64, [u16; 4])] = &[\n"
                 + "\n".join(f"    (0x{h:016x}, [{', '.join(str(v) for v in t)}])," for h, t in features) + "\n];\n")
     print(f"{len(grains)} grains, {len(shapes)} shapes, {len(features)} grains' features measured")
