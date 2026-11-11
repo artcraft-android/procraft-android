@@ -5234,6 +5234,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         padMenuOpen = false
     }
 
+    /** The dual brush the studio has open parted into its two brushes: the studio closes keeping its edits, and the second follows the first in the set. */
+    fun uncombineStudio() {
+        val s = session ?: return
+        val brush = currentBrush ?: return
+        closeStudio(keep = true)
+        if (s.uncombineBrush(brush.set, brush.index)) libraryChanged()
+    }
+
     /** Closes the studio: [keep] keeps the edits, otherwise the brush goes back to how it opened. */
     fun closeStudio(keep: Boolean) {
         session?.studioEnd(keep)

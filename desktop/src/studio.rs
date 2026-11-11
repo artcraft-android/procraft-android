@@ -880,7 +880,10 @@ impl Studio {
         let row_top = at.y + PART_CARD.y + PART_CARD_GAP;
         let row = Rect::from_min_size(pos2(at.x, row_top), vec2(PART_CARD.x, COMBINE_ROW));
         let below = pos2(at.x, row.bottom() + PART_CARD_GAP);
-        let whole = Rect::from_min_size(at, vec2(PART_CARD.x, below.y + PART_CARD.y - at.y));
+        // Uncombine under them
+        let parting =
+            Rect::from_min_size(pos2(at.x, below.y + PART_CARD.y + PART_CARD_GAP), vec2(PART_CARD.x, COMBINE_ROW));
+        let whole = Rect::from_min_size(at, vec2(PART_CARD.x, parting.bottom() - at.y));
         egui::Area::new(Id::unique("studio parts")).fixed_pos(at).order(Order::Foreground).show(ctx, |ui| {
             ui.allocate_rect(whole, Sense::click());
             ui.painter().rect_filled(whole, 12, argb(TABS_FILL));
@@ -909,6 +912,21 @@ impl Studio {
             look.icon(ui, &icons::CHEVRON_RIGHT, pos2(row.right() - 18.0, row.center().y), 24.0, argb(DIM));
             if ui.interact(row, ui.scope_id().with("combine mode"), Sense::click()).clicked() {
                 self.blend_list = Some((COMBINE_MODE, row.center().y, true));
+            }
+            let left = pos2(parting.left() + 11.0, parting.center().y);
+            text(ui.painter(), left, Align2::LEFT_CENTER, "Uncombine", 17.0, Weight::Regular, argb(pc::ACCENT));
+            if ui.interact(parting, ui.scope_id().with("uncombine"), Sense::click()).clicked() {
+                self.part_cards = None;
+                self.uncombine_alert.ask(crate::alert::Asking {
+                    title: "Uncombine these brushes?".into(),
+                    message: "The pair becomes two brushes again, side by side in the set. It can't be undone.".into(),
+                    action: "Uncombine".into(),
+                    icon: None,
+                    destructive: false,
+                    extra: None,
+                    first: None,
+                    alone: false,
+                });
             }
         });
         let outside =
@@ -1070,6 +1088,13 @@ impl Studio {
         }
         self.read_part_previews(ctx, session);
         self.part_cards_view(ctx, look, session);
+        // uncombined: the studio closes keeping its edits, then the pair parts in the library
+        if self.uncombine_alert.show(ctx, look) == Some(crate::alert::Answer::Action) {
+            let brush = session.current_brush();
+            self.close(session, true);
+            session.uncombine_brush(brush.set, brush.index);
+            asked = Some(Asked::Closed);
+        }
         self.blend_list_view(ctx, look, session);
         let mut curve = std::mem::take(&mut self.curve_points);
         if self.curve.menu(ctx, &mut curve) {

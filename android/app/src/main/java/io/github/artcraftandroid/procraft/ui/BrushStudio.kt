@@ -412,6 +412,20 @@ private val CombineListLeft = 368.dp
 @Composable
 private fun StudioParts(vm: CanvasViewModel) {
     var cards by remember { mutableStateOf(false) }
+    // Uncombine, asking first
+    var parting by remember { mutableStateOf<Unit?>(null) }
+    Alert(
+        parting,
+        title = { "Uncombine these brushes?" },
+        message = { "The pair becomes two brushes again, side by side in the set. It can't be undone." },
+        action = "Uncombine",
+        destructive = false,
+        onCancel = { parting = null },
+        onAction = {
+            parting = null
+            vm.uncombineStudio()
+        },
+    )
     var list by remember { mutableStateOf(false) }
     var at by remember { mutableStateOf(IntOffset.Zero) }
     var rowY by remember { mutableFloatStateOf(0f) }
@@ -455,6 +469,15 @@ private fun StudioParts(vm: CanvasViewModel) {
                     Icon(PcIcons.ChevronRight, contentDescription = null, tint = StudioDim, modifier = Modifier.size(24.dp))
                 }
                 PartCard(vm, 1, "Secondary", second = true)
+                Box(
+                    Modifier.fillMaxWidth().height(CombineRow).tap {
+                        cards = false
+                        parting = Unit
+                    }.padding(start = 11.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text("Uncombine", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+                }
             }
         }
     }
