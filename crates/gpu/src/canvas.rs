@@ -291,6 +291,11 @@ impl StrokeStyle {
         }
     }
 
+    fn brush_blend(value: f32) -> u32 {
+        let id = value.round().clamp(0.0, BlendMode::MAX_ID as f32) as u32;
+        if BlendMode::from_id(id).is_some() || id == BRUSH_BEHIND { id } else { 0 }
+    }
+
     /// A stroke drawn with `brush`'s shape, grain and rendering.
     pub fn for_brush(
         brush: &Brush,
@@ -334,10 +339,10 @@ impl StrokeStyle {
             grade: if wet { brush.setting("wet_grade").clamp(-1.0, 1.0) } else { 0.0 },
             blur: if wet { brush.setting("wet_blur").clamp(0.0, 1.0) } else { 0.0 },
             wet_jitter: if wet { brush.setting("wet_jitter").clamp(0.0, 1.0) } else { 0.0 },
-            blend: brush.setting("blend_mode").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
+            blend: Self::brush_blend(brush.setting("blend_mode")),
             blur_jitter: if wet { brush.setting("wet_blur_jitter").clamp(0.0, 1.0) } else { 0.0 },
             grain_blend: brush.setting("grain_blend").round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32) as u32,
-            burnt_blend: brush.setting("burnt_blend").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
+            burnt_blend: Self::brush_blend(brush.setting("burnt_blend")),
             // a brush's rotation turns its grain the other way to the shaders' angle
             // the editors' turn of the image, the whole grain with it (the rotation control is
             // each stamp's own: `Stamp::grain_turn`)

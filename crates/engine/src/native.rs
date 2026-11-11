@@ -1629,6 +1629,11 @@ mod tests {
     #[test]
     fn every_blend_mode_has_its_number() {
         for m in BlendMode::ALL {
+            // Procreate has no Greater mode: it saves as Normal
+            if m == BlendMode::Greater {
+                assert_eq!(blend_from(blend_to(m)), BlendMode::Normal);
+                continue;
+            }
             assert_eq!(blend_from(blend_to(m)), m, "{m:?}");
         }
         assert_eq!(

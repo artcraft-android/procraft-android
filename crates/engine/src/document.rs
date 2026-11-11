@@ -38,12 +38,13 @@ pub enum BlendMode {
     Saturation,
     Color,
     Luminosity,
+    Greater,
 }
 
 impl BlendMode {
     /// Every mode, in the order the layer panel lists them (grouped: darken, normal, lighten,
     /// contrast, difference, colour).
-    pub const ALL: [BlendMode; 27] = [
+    pub const ALL: [BlendMode; 28] = [
         BlendMode::Multiply,
         BlendMode::Darken,
         BlendMode::Shade,
@@ -71,10 +72,11 @@ impl BlendMode {
         BlendMode::Saturation,
         BlendMode::Color,
         BlendMode::Luminosity,
+        BlendMode::Greater,
     ];
 
     /// The highest of the modes' numbers.
-    pub const MAX_ID: u32 = 26;
+    pub const MAX_ID: u32 = 30;
 
     /// The renderer's number for the mode (stable: shaders switch on it).
     pub fn id(self) -> u32 {
@@ -106,6 +108,7 @@ impl BlendMode {
             BlendMode::Color => 24,
             BlendMode::Luminosity => 25,
             BlendMode::Shade => 26,
+            BlendMode::Greater => 30,
         }
     }
 
@@ -142,6 +145,7 @@ impl BlendMode {
             BlendMode::Saturation => "Saturation",
             BlendMode::Color => "Color",
             BlendMode::Luminosity => "Luminosity",
+            BlendMode::Greater => "Greater",
         }
     }
 }

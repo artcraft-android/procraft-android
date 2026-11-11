@@ -220,9 +220,40 @@ fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
     if (mode == 29u) {
         return b + s * (1.0 - b.a);
     }
+    if (mode == 30u) {
+      return blend_greater(b, s);
+    }
     let cb = unpremultiply(b);
     let cs = unpremultiply(s);
     let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
     let rgb = s.a * (1.0 - b.a) * cs + s.a * b.a * mixed + (1.0 - s.a) * b.rgb;
     return vec4<f32>(rgb, s.a + b.a * (1.0 - s.a));
+}
+
+// Standard Greater/Max Alpha Blend for premultiplied targets
+fn blend_greater(b: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
+    let dA = b.a;
+    let sa = s.a;
+
+    // Early exit if background is fully opaque or source is completely transparent
+    if (dA >= 1.0 || sa <= 0.0) {
+        return b;
+    }
+
+    // Target alpha is determined by the greater of the two layers
+    let target_a = max(dA, sa);
+
+    // Unpremultiply both inputs to operate in straight (unassociated) color space
+    let color_b = select(vec3<f32>(0.0), b.rgb / dA, dA > 0.0);
+    let color_s = select(vec3<f32>(0.0), s.rgb / sa, sa > 0.0);
+
+    // Calculate normalized weight based on relative alpha contribution
+    let total_a = dA + sa;
+    let weight = select(0.5, sa / total_a, total_a > 0.0);
+
+    // Blend in straight RGB space
+    let blended_rgb = mix(color_b, color_s, weight);
+
+    // Re-premultiply by the target alpha for output consistency
+    return vec4<f32>(blended_rgb * target_a, target_a);
 }

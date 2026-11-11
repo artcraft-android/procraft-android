@@ -774,7 +774,7 @@ fn merge_duplicate_blend_and_locks() {
     assert_eq!(s.layers().len(), 2);
     assert!(s.set_layer_blend(copy, procraft_engine::document::BlendMode::Multiply.id()));
     assert!(!s.set_layer_blend(copy, 999));
-    assert_eq!(crate::layers::blend_modes().len(), 27);
+    assert_eq!(crate::layers::blend_modes().len(), 28);
     assert!(s.merge_down(copy));
     assert_eq!(s.layers().len(), 1);
     // red multiplied by red is still red

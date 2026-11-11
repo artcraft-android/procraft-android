@@ -1550,6 +1550,13 @@ def half_disc():
     return unary_union([solid, ring(12, 12, 8.1, 1.8)])
 
 
+def greater():
+    """Greater: the more opaque of two discs — the solid one covers the outline."""
+    front = Point(14.6, 12.0).buffer(DISC_R, quad_segs=24)
+    back = ring(9.4, 12.0, DISC_R - 0.9, 1.8).difference(front.buffer(GAP / 2))
+    return unary_union([back, front])
+
+
 def behind():
     """Behind: a solid sheet behind a sheet's outline."""
     front = soft(box(3.0, 9.0, 15.0, 21.0), 1.4)
@@ -1569,7 +1576,7 @@ def ramp():
 
 
 BLENDS = {'multiply': overlap_dark, 'darken': darken, 'shade': sunset, 'color-burn': flame, 'linear-burn': campfire,
-          'darker-color': darker_colour, 'normal': lambda: Point(12, 12).buffer(8.0, quad_segs=32),
+          'darker-color': darker_colour, 'normal': lambda: Point(12, 12).buffer(8.0, quad_segs=32), 'greater': greater,
           'lighten': sun_object, 'screen': dim_sun, 'color-dodge': lambda: star(12, 12, 10.0, 0.3), 'add': plus_in_ring,
           'lighter-color': lighter_colour, 'overlay': overlap_rings, 'soft-light': lamp, 'hard-light': spotlight,
           'vivid-light': flash, 'linear-light': torch, 'pin-light': thumbtack, 'hard-mix': four_squares,

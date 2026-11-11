@@ -318,8 +318,8 @@ impl Brush {
             // blend modes are kept by number (as the layers' are numbered; a grain's own and behind
             // past them)
             "blend_mode" | "burnt_blend" => {
-                let id = value.round().clamp(0.0, BRUSH_BEHIND as f32);
-                let known = id <= BlendMode::MAX_ID as f32 || id == BRUSH_BEHIND as f32;
+                let id = value.round().clamp(0.0, BlendMode::MAX_ID as f32);
+                let known = BlendMode::from_id(id as u32).is_some() || id == BRUSH_BEHIND as f32;
                 self.extra.insert(key.to_owned(), if known { id } else { 0.0 });
             }
             // the grain's and a dual brush's second's: a layer mode or the grain's own heights
