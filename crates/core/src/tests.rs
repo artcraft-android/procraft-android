@@ -940,10 +940,13 @@ fn dump_brush_comparisons() {
 }
 
 /// Each brush of a file as it paints on a canvas, not in its preview: a stroke in white across a
-/// clear layer, at three sizes, with the pen's pressure rising and falling, as `<brush>.png` in
+/// clear layer, at three sizes (the size its preview draws at, as its thumbnail was drawn, then 0.3
+/// and 1.0; or those `DUMP_SIZES` lists, `start` for the first), with the pen's pressure rising
+/// and falling, as `<brush>.png` in
 /// `PROCRAFT_DUMP` (beside the file's own thumbnail, `<brush>-thumbnail.png`, when it has one).
 /// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p procraft-core dump_brush_strokes -- --ignored`
-/// (`BRUSH_SET` can be another app's brush file too: .abr, .sut, .kpp and the rest.)
+/// (`BRUSH_SET` can be another app's brush file too: .abr, .sut, .kpp and the rest; or
+/// `bundled:Name,Other Name` for those of the brushes the app comes with.)
 #[test]
 #[ignore]
 fn dump_brush_strokes() {
@@ -951,17 +954,29 @@ fn dump_brush_strokes() {
     let Ok(path) = std::env::var("BRUSH_SET") else { return };
     let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
     let Some(s) = session(1024, 1024) else { return };
-    // a set of ours, or another app's brushes
-    let bytes = std::fs::read(path).unwrap();
-    let set = s.import_brushes(bytes.clone()).or_else(|| s.import_other_brushes(bytes, "Dump".to_owned())).unwrap();
-    let brushes: Vec<(u32, String)> =
-        s.brush_library()[set as usize].brushes.iter().map(|b| (b.index, b.name.clone())).collect();
-    for (index, name) in brushes {
+    // the app's own brushes by name, a set of ours, or another app's brushes
+    let brushes: Vec<(u32, u32, String)> = match path.strip_prefix("bundled:") {
+        Some(names) => {
+            let wanted: Vec<&str> = names.split(',').collect();
+            let library = s.brush_library();
+            let all = library.iter().flat_map(|set| set.brushes.iter());
+            all.filter(|b| wanted.contains(&b.name.as_str())).map(|b| (b.set, b.index, b.name.clone())).collect()
+        }
+        None => {
+            let bytes = std::fs::read(path).unwrap();
+            let imported = s.import_brushes(bytes.clone()).or_else(|| s.import_other_brushes(bytes, "Dump".to_owned()));
+            let set = imported.unwrap();
+            let library = s.brush_library();
+            library[set as usize].brushes.iter().map(|b| (set, b.index, b.name.clone())).collect()
+        }
+    };
+    for (set, index, name) in brushes {
         // a set's folder entries aren't brushes
         if name.starts_with('\u{1F4C2}') {
             continue;
         }
-        let file_name = name.replace(['/', '\\'], "-");
+        // (no character a file name can't hold on any system)
+        let file_name = name.replace(['/', '\\', '<', '>', ':', '"', '|', '?', '*'], "-");
         let file = brushfile::read(&s.brush_as_file(set, index).unwrap()).unwrap();
         if let Some((w, h, own)) = file.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
             std::fs::write(format!("{root}/{file_name}-thumbnail.png"), crate::project::rgba_png(w, h, &own)).unwrap();
@@ -978,13 +993,33 @@ fn dump_brush_strokes() {
             s.studio_end(true);
         }
         s.set_color(1.0, 1.0, 1.0);
-        for (row, size) in [0.3_f32, 0.6, 1.0].into_iter().enumerate() {
+        // the slider at the size the brush's preview draws, the pen turned and pressed as there
+        let (start, lean, least, gain) = {
+            let brush = s.shared.lock().brush(ToolKind::Paint).clone();
+            let share = procraft_engine::preview::size_share(&brush).powf(1.0 / procraft_engine::brush::SIZE_CURVE);
+            let lean = (brush.setting("preview_tilt_offset") - 1.0) * std::f32::consts::FRAC_PI_2;
+            (share, lean, brush.setting("preview_pressure_min"), 2.0 * brush.setting("preview_pressure_scale"))
+        };
+        let sizes: Vec<f32> = match std::env::var("DUMP_SIZES") {
+            Ok(listed) => listed.split(',').map(|v| if v == "start" { start } else { v.parse().unwrap() }).collect(),
+            Err(_) => vec![start, 0.3, 1.0],
+        };
+        let rows = sizes.len() as f32;
+        for (row, size) in sizes.into_iter().enumerate() {
             s.set_brush_size(size);
-            let y = 200.0 + row as f32 * 300.0;
+            let y = 1024.0 * (row as f32 + 0.5) / rows;
             let at = |i: usize| {
                 let t = i as f32 / 120.0;
                 let mut p = sample(100.0 + t * 820.0, y + (t * 6.0).sin() * 25.0, i as f64 * 8.0);
-                p.pressure = (std::f32::consts::PI * t).sin().max(0.05);
+                p.pressure = if size == start {
+                    // the preview's swell: light at the ends, full in the middle
+                    (least + gain * 1.005 * (-9.0 * (t - 0.5) * (t - 0.5)).exp()).clamp(0.0, 1.0)
+                } else {
+                    (std::f32::consts::PI * t).sin().max(0.05)
+                };
+                // leaning as the brush's own preview leans the pen, as its thumbnail was drawn (a
+                // shape that follows the azimuth turns as there)
+                p.orientation = lean;
                 p
             };
             s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
