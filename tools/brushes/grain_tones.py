@@ -3,10 +3,13 @@ each grain image another app's brush files name instead of carrying it, the valu
 of it (none, 5%, 10%, a quarter, half, three quarters, 90%, 95%, all); for each shape image, at
 every sixteenth, and how much ink each of 64 bands of its rows holds, top to bottom (as shares of
 its fullest band). Measured as the engine reads an image (its luminance times its alpha, averaged
-down to 256 square). Each is keyed by a hash of its file's name, so the tables hold measurements
-only: neither the images nor their names.
+down to 256 square). And each grain's feature size: how far it shifts before it looks only half
+like itself (its autocorrelation at half), as a share of its side, at four levels of detail (the
+image at 1024, 512, 256 and 128 a side, no finer than its own), so that our stand-in can be tiled
+to match whatever size its tile is drawn. Each is keyed by a hash of its file's name, so the tables hold
+measurements only: neither the images nor their names.
 
-usage: python -I tools/brushes/grain_tones.py <that app's bundle folder>
+usage: python -I tools/brushes/grain_tones.py <that app's bundle folder>   (needs Pillow and numpy)
 """
 import os
 import plistlib
@@ -66,8 +69,9 @@ def images_by_name(bundle):
     return found
 
 
-def values(path):
-    """The image's values as the engine reads it: luminance times alpha, 256 square."""
+def values(path, side=SIDE):
+    """The image's values as the engine reads it: luminance times alpha, `side` square (None: at
+    its own size)."""
     im = Image.open(path)
     if im.mode in ("LA", "RGBA", "PA") or "transparency" in im.info:
         rgba = im.convert("RGBA")
@@ -76,8 +80,10 @@ def values(path):
         im = Image.frombytes("L", rgba.size, bytes(l * a // 255 for l, a in zip(lum.tobytes(), alpha.tobytes())))
     else:
         im = im.convert("L")
+    if side is None:
+        return im
     # each of the engine's pixels the average of the image's it covers
-    return im.resize((SIDE, SIDE), Image.Resampling.BOX)
+    return im.resize((side, side), Image.Resampling.BOX)
 
 
 def tones(path, shares):
@@ -94,6 +100,42 @@ def rows(path):
     sums = [sum(px[y * SIDE:(y + per) * SIDE]) for y in range(0, SIDE, per)]
     top = max(sums) or 1
     return [round(255 * v / top) for v in sums]
+
+
+FEATURE_SIDES = (1024, 512, 256, 128)
+
+
+def feature(path):
+    """How far the image shifts before it matches itself only half, at each of FEATURE_SIDES (the
+    image averaged down to that side; at its own size where it is smaller), in 65536ths."""
+    im = values(path, None)
+    own = min(im.size)
+    return [feature_at(im if side >= own else im.resize((side, side), Image.Resampling.BOX)) for side in FEATURE_SIDES]
+
+
+def feature_at(im):
+    """How far `im` shifts before it matches itself only half (its autocorrelation, wrapping
+    round, falls to 0.5), across and down averaged, as a share of its side, in 65536ths (at least 1).
+    """
+    import numpy as np
+
+    g = np.asarray(im, dtype=np.float64)
+    g = g - g.mean()
+    if g.std() < 1e-6:
+        return 65535
+    f = np.fft.fft2(g)
+    ac = np.real(np.fft.ifft2(f * np.conj(f)))
+    ac /= ac[0, 0]
+
+    def half(line):
+        for k in range(1, len(line) // 2):
+            if line[k] <= 0.5:
+                a, b = line[k - 1], line[k]
+                return ((k - 1) + (a - 0.5) / max(a - b, 1e-9)) / len(line)
+        return 0.5
+
+    share = (half(ac[0, :]) + half(ac[:, 0])) / 2
+    return max(1, min(65535, round(share * 65536)))
 
 
 def table(bundle, images, key, measure):
@@ -119,11 +161,12 @@ def main():
     grains = table(bundle, images, "bundledGrainPath", lambda p: tones(p, SHARES))
     shapes = table(bundle, images, "bundledShapePath", lambda p: tones(p, SHAPE_SHARES))
     bands = table(bundle, images, "bundledShapePath", rows)
+    features = table(bundle, images, "bundledGrainPath", feature)
     header = """//! Written by tools/brushes/grain_tones.py (don't edit by hand): the tones of the stock grains
 //! and shapes other apps' brush files name instead of carrying (see [`stock_grain_tones`] and
 //! [`stock_shape_tones`]), each the values at [`TONE_SHARES`] or [`SHAPE_TONE_SHARES`] of it, and
-//! how much each band of a shape's rows holds (see [`stock_shape_rows`]), keyed by a hash of its
-//! file's name.
+//! how much each band of a shape's rows holds (see [`stock_shape_rows`]), and each grain's
+//! feature size (see [`stock_grain_feature`]), keyed by a hash of its file's name.
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
@@ -132,7 +175,9 @@ def main():
         f.write(header + f"pub(crate) const STOCK_GRAIN_TONES: &[(u64, [u8; 9])] = &[\n{body(grains)}\n];\n")
         f.write(f"\npub(crate) const STOCK_SHAPE_TONES: &[(u64, [u8; 17])] = &[\n{body(shapes)}\n];\n")
         f.write(f"\npub(crate) const STOCK_SHAPE_ROWS: &[(u64, [u8; {BANDS}])] = &[\n{body(bands)}\n];\n")
-    print(f"{len(grains)} grains, {len(shapes)} shapes measured")
+        f.write("\npub(crate) const STOCK_GRAIN_FEATURES: &[(u64, [u16; 4])] = &[\n"
+                + "\n".join(f"    (0x{h:016x}, [{', '.join(str(v) for v in t)}])," for h, t in features) + "\n];\n")
+    print(f"{len(grains)} grains, {len(shapes)} shapes, {len(features)} grains' features measured")
 
 
 if __name__ == "__main__":

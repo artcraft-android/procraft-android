@@ -148,6 +148,80 @@ pub fn stock_grain_tones(name: &str) -> Option<[u8; 9]> {
     stock_tones(crate::stock_tones::STOCK_GRAIN_TONES, name)
 }
 
+/// The sides at which [`stock_grain_features`] gives a stock grain's feature size: the image as a
+/// tile that size on the canvas shows it (no finer than its own).
+pub const FEATURE_SIDES: [f32; 4] = [1024.0, 512.0, 256.0, 128.0];
+
+/// How big the features of the stock grain a brush file names `name` are, as a share of its side
+/// (how far it shifts before it matches itself only half), at each of [`FEATURE_SIDES`], as
+/// measured, if it is one we know.
+pub fn stock_grain_features(name: &str) -> Option<[f32; 4]> {
+    let table = crate::stock_tones::STOCK_GRAIN_FEATURES;
+    let key = name_key(name);
+    let at = table.binary_search_by_key(&key, |&(k, _)| k).ok()?;
+    table.get(at).map(|&(_, v)| v.map(|v| f32::from(v) / 65536.0))
+}
+
+/// The feature size `features` (see [`stock_grain_features`]) shows at a tile `tile` canvas pixels
+/// on a side: between the levels it falls between, by their sides' logarithms.
+pub fn feature_at_tile(features: &[f32; 4], tile: f32) -> f32 {
+    let level = (FEATURE_SIDES[0].log2() - tile.max(1.0).log2()).clamp(0.0, (FEATURE_SIDES.len() - 1) as f32);
+    let low = level.floor() as usize;
+    let f = level - low as f32;
+    let at = |i: usize| features.get(i.min(features.len() - 1)).copied().unwrap_or(0.0);
+    at(low) * (1.0 - f) + at(low + 1) * f
+}
+
+/// How big the features of our grain `index` are, as [`stock_grain_feature`] measures a stock
+/// one, worked out the first time it is asked for: none for a grain with no pattern.
+pub fn grain_feature(index: u32) -> Option<f32> {
+    static FEATURES: std::sync::OnceLock<Vec<std::sync::OnceLock<Option<f32>>>> = std::sync::OnceLock::new();
+    let all = FEATURES.get_or_init(|| (0..grains().len()).map(|_| std::sync::OnceLock::new()).collect());
+    let slot = all.get(index as usize)?;
+    *slot.get_or_init(|| {
+        let grain = GRAINS.get_or_init(make_grains).get(index as usize)?;
+        feature_share(&grain.pixels, TEXTURE_SIZE)
+    })
+}
+
+/// How far a square tile `n` on a side shifts (wrapping round) before it matches itself only half
+/// (its autocorrelation falls to 0.5), across and down averaged, as a share of its side; none for
+/// a flat one.
+fn feature_share(pixels: &[u8], n: usize) -> Option<f32> {
+    if pixels.len() != n * n || n == 0 {
+        return None;
+    }
+    let mean = pixels.iter().map(|&v| f64::from(v)).sum::<f64>() / pixels.len() as f64;
+    let g: Vec<f64> = pixels.iter().map(|&v| f64::from(v) - mean).collect();
+    let power: f64 = g.iter().map(|v| v * v).sum();
+    if power < 1e-6 * pixels.len() as f64 {
+        return None;
+    }
+    let shifted = |k: usize, across: bool| -> f64 {
+        let mut sum = 0.0;
+        for y in 0..n {
+            for x in 0..n {
+                let (sx, sy) = if across { ((x + k) % n, y) } else { (x, (y + k) % n) };
+                let at = |i: usize| g.get(i).copied().unwrap_or(0.0);
+                sum += at(y * n + x) * at(sy * n + sx);
+            }
+        }
+        sum / power
+    };
+    let half = |across: bool| -> f64 {
+        let mut before = 1.0;
+        for k in 1..n / 2 {
+            let now = shifted(k, across);
+            if now <= 0.5 {
+                return ((k - 1) as f64 + (before - 0.5) / (before - now).max(1e-9)) / n as f64;
+            }
+            before = now;
+        }
+        0.5
+    };
+    Some(((half(true) + half(false)) / 2.0) as f32)
+}
+
 /// The tones of the stock shape a brush file names `name`, as measured: its values at
 /// [`SHAPE_TONE_SHARES`], if it is one we know.
 pub fn stock_shape_tones(name: &str) -> Option<[u8; 17]> {
@@ -194,10 +268,15 @@ pub fn striped(pixels: &[u8], rows: &[u8; 64]) -> Vec<u8> {
 }
 
 fn stock_tones<const N: usize>(table: &[(u64, [u8; N])], name: &str) -> Option<[u8; N]> {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
-    // FNV-1a, as the table's keys are
-    let key = base.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    let key = name_key(name);
     table.binary_search_by_key(&key, |&(k, _)| k).ok().and_then(|i| table.get(i)).map(|&(_, t)| t)
+}
+
+/// The key the stock tables keep an image's measurements under: FNV-1a of its file's name in lower
+/// case.
+fn name_key(name: &str) -> u64 {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
+    base.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// `pixels`, a shape, with its values moved onto `tones` (its values at `shares`) keeping their
@@ -1950,6 +2029,31 @@ mod tests {
             }
         }
         assert_eq!(stock_grain_tones("no such grain.png"), None);
+    }
+
+    #[test]
+    fn grains_features_are_measured_as_the_stock_ones_are() {
+        // fine noise has features of about a pixel, bricks of a quarter of the tile
+        let fine = grain_feature(grain::FINE_NOISE).unwrap();
+        let brick = grain_feature(grain::BRICK).unwrap();
+        assert!(fine < 0.01 && brick > 0.1, "{fine} {brick}");
+        assert_eq!(grain_feature(10_000), None);
+        // a flat tile has none; a checker of 8 pixel squares matches itself half 2 pixels over
+        assert_eq!(feature_share(&[7; 64], 8), None);
+        let checker: Vec<u8> = (0..64 * 64).map(|i| if (i % 64 / 8 + i / 64 / 8) % 2 == 0 { 0 } else { 255 }).collect();
+        let share = feature_share(&checker, 64).unwrap();
+        assert!((share - 2.0 / 64.0).abs() < 0.003, "{share}");
+        // the stock table: each name once, in order, every feature some size
+        let table = crate::stock_tones::STOCK_GRAIN_FEATURES;
+        assert!(table.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(table.iter().all(|&(_, v)| v.iter().all(|&v| v > 0)));
+        assert_eq!(stock_grain_features("no such grain.png"), None);
+        // between levels, by the tile's size
+        let levels = [0.001, 0.002, 0.004, 0.008];
+        assert_eq!(feature_at_tile(&levels, 4096.0), 0.001);
+        assert_eq!(feature_at_tile(&levels, 256.0), 0.004);
+        assert!((feature_at_tile(&levels, 362.0) - 0.003).abs() < 2e-4);
+        assert_eq!(feature_at_tile(&levels, 16.0), 0.008);
     }
 
     #[test]
