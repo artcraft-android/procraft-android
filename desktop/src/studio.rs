@@ -753,6 +753,11 @@ pub struct Studio {
     started: Option<Instant>,
     /// A source's editor, while open.
     source_editor: Option<crate::source_editor::SourceEditor>,
+    /// The About page asking before a new reset point (true) or a reset (false).
+    reset_alert: crate::alert::Alert,
+    reset_asked: Option<bool>,
+    /// A dual brush's Uncombine, asking first.
+    uncombine_alert: crate::alert::Alert,
 }
 
 impl Studio {
@@ -993,6 +998,21 @@ impl Studio {
         {
             pad.show_sphere(sphere);
             self.sphere = Some(sphere);
+        }
+        // the About page's question, answered
+        if self.reset_alert.show(ctx, look) == Some(crate::alert::Answer::Action) {
+            match self.reset_asked.take() {
+                Some(true) => {
+                    session.studio_new_reset_point();
+                    self.about = Some(AboutShown::read(ctx, session));
+                }
+                Some(false) => {
+                    session.studio_reset();
+                    self.read(ctx, session);
+                    self.sync_pad(session);
+                }
+                None => {}
+            }
         }
         let mut asked = None;
         egui::Area::new(Id::unique("brush studio")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
@@ -1799,7 +1819,7 @@ impl Studio {
 
     /// The brush's About page: a card with its maker's picture, name and signature, then making a
     /// new reset point and resetting to it, with when it was made.
-    fn about_view(&mut self, ui: &mut Ui, look: &mut Look, session: &Arc<CanvasSession>, width: f32) {
+    fn about_view(&mut self, ui: &mut Ui, look: &mut Look, _session: &Arc<CanvasSession>, width: f32) {
         let Some(about) = &self.about else { return };
         let (card, _) = ui.allocate_exact_size(vec2(width, 295.0), Sense::hover());
         ui.painter().rect_filled(card, 20, argb(ABOUT_CARD));
@@ -1868,14 +1888,34 @@ impl Studio {
             text(ui.painter(), at, Align2::LEFT_CENTER, "Reset brush", 17.0, Weight::Regular, argb(ABOUT_ROW_INK));
         }
         let reset = response.clicked();
+        // each asks first: neither can be undone
+        let asking = |title: &str, message: &str, action: &str, destructive: bool| crate::alert::Asking {
+            title: title.into(),
+            message: message.into(),
+            action: action.into(),
+            icon: None,
+            destructive,
+            extra: None,
+            first: None,
+            alone: false,
+        };
         if new_point {
-            session.studio_new_reset_point();
-            self.about = Some(AboutShown::read(ui.ctx(), session));
+            self.reset_asked = Some(true);
+            self.reset_alert.ask(asking(
+                "New reset point?",
+                "Resetting the brush will bring it back to how it is now. It can't be undone.",
+                "Make",
+                false,
+            ));
         }
         if reset {
-            session.studio_reset();
-            self.read(ui.ctx(), session);
-            self.sync_pad(session);
+            self.reset_asked = Some(false);
+            self.reset_alert.ask(asking(
+                "Reset this brush?",
+                "It goes back to its last reset point, or to how it came. It can't be undone.",
+                "Reset",
+                true,
+            ));
         }
     }
 }

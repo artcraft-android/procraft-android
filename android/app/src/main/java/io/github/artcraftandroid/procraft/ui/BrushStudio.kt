@@ -890,6 +890,31 @@ private fun BrushNameHeading(vm: CanvasViewModel) {
 @Composable
 private fun AboutBrush(vm: CanvasViewModel) {
     val about = vm.studioAbout
+    // each asks first: neither can be undone (true a new reset point, false a reset)
+    var asking by remember { mutableStateOf<Boolean?>(null) }
+    Alert(
+        asking?.takeIf { it },
+        title = { "New reset point?" },
+        message = { "Resetting the brush will bring it back to how it is now. It can't be undone." },
+        action = "Make",
+        destructive = false,
+        onCancel = { asking = null },
+        onAction = {
+            asking = null
+            vm.newResetPoint()
+        },
+    )
+    Alert(
+        asking?.takeIf { !it },
+        title = { "Reset this brush?" },
+        message = { "It goes back to its last reset point, or to how it came. It can't be undone." },
+        action = "Reset",
+        onCancel = { asking = null },
+        onAction = {
+            asking = null
+            vm.resetStudio()
+        },
+    )
     Column(Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().height(295.dp).clip(RoundedCornerShape(20.dp)).background(AboutCard), horizontalAlignment = Alignment.CenterHorizontally) {
             Spacer(Modifier.height(30.dp))
@@ -911,7 +936,7 @@ private fun AboutBrush(vm: CanvasViewModel) {
         }
         Spacer(Modifier.height(25.dp))
         Box(
-            Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(22.dp)).background(AboutCard).tap { vm.newResetPoint() }.padding(start = 15.dp),
+            Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(22.dp)).background(AboutCard).tap { asking = true }.padding(start = 15.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text("Create new reset point", color = AboutRowInk, fontSize = 17.sp, maxLines = 1)
@@ -919,7 +944,7 @@ private fun AboutBrush(vm: CanvasViewModel) {
         Spacer(Modifier.height(11.dp))
         val made = about?.resetMade
         Column(
-            Modifier.fillMaxWidth().height(if (made != null) 69.dp else 44.dp).clip(RoundedCornerShape(22.dp)).background(AboutCard).tap { vm.resetStudio() }
+            Modifier.fillMaxWidth().height(if (made != null) 69.dp else 44.dp).clip(RoundedCornerShape(22.dp)).background(AboutCard).tap { asking = false }
                 .padding(start = 15.dp),
             verticalArrangement = Arrangement.Center,
         ) {
