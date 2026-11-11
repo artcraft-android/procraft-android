@@ -7481,6 +7481,34 @@ impl Canvas {
         Ok(FineThumbnail { pending: self.start_sample_view(gpu, &layer.view, rect, max_side), cut_mask: Some(mask) })
     }
 
+    /// A group's members composited over transparency, scaled to fit `max_side` pixels (never
+    /// enlarged), read back: what the group holds, as a layer's thumbnail shows what it holds.
+    /// Starts the GPU readback; the caller waits after releasing the document lock.
+    pub fn start_group_thumbnail(
+        &mut self,
+        gpu: &Gpu,
+        doc: &mut Document,
+        id: LayerId,
+        max_side: u32,
+    ) -> Result<PendingThumbnail, GpuError> {
+        self.render(gpu, doc, None);
+        // a group that passes through is composited straight onto the canvas and has no cache of
+        // its own; showing what it holds needs one, made here for as long as it takes
+        self.make_groups(&gpu.device, doc.depth(id) + 1);
+        let full = self.full();
+        let mut encoder =
+            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("group thumbnail") });
+        let mut uniforms = UniformData::default();
+        let Some(view) = self.composite_group(&gpu.device, doc, &mut encoder, &mut uniforms, full, id) else {
+            return Err(GpuError::Readback(format!("no group {id:?}")));
+        };
+        // the view borrows the group's cache, which the readback below leaves alone
+        let view = view.clone();
+        self.write_uniforms(gpu, &uniforms);
+        gpu.queue.submit([encoder.finish()]);
+        Ok(self.start_sample_view(gpu, &view, full, max_side))
+    }
+
     /// `rect` of a layer box-filtered to fit `max_side` pixels (never enlarged), read back.
     fn sample_layer(&self, gpu: &Gpu, id: LayerId, rect: IRect, max_side: u32) -> Result<Thumbnail, GpuError> {
         let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;

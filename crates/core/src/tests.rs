@@ -792,6 +792,29 @@ fn merge_duplicate_blend_and_locks() {
 }
 
 #[test]
+fn a_group_thumbnail_shows_what_it_holds_and_its_version_follows() {
+    let Some(s) = session(64, 64) else { return };
+    let layer = s.layers()[0].id;
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(1.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(32.0, 32.0, 0.0)]);
+    s.stroke_end(vec![]);
+    s.add_layer();
+    s.pick_all_layers();
+    let group = s.group_picked();
+    assert_ne!(group, 0, "a group was made");
+    // what the group holds, as it is drawn: the red stroke, on nothing
+    let thumbnail = s.layer_thumbnail(group, 32).expect("a group's thumbnail");
+    assert!(thumbnail.rgba.as_chunks::<4>().0.iter().any(|p| p[0] > 200 && p[3] > 200), "red in the group's thumbnail");
+    // its version is what it holds: hiding a member changes the thumbnail, so it changes too
+    let version = |s: &CanvasSession| s.layer_versions().iter().find(|v| v.id == group).map(|v| v.version);
+    let before = version(&s);
+    assert!(before.is_some(), "a group has a thumbnail version");
+    s.set_layer_visible(layer, false);
+    assert_ne!(version(&s), before, "a hidden member is another picture");
+}
+
+#[test]
 fn background_settings() {
     let Some(s) = session(100, 100) else { return };
     assert!(s.set_background_color(0.0, 0.0, 0.0, true));

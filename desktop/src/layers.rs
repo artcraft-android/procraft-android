@@ -36,7 +36,6 @@ const LIST_CORNER: f32 = 8.0;
 /// A group's row height, and how far in each level of group sits.
 const GROUP_HEIGHT: f32 = 44.0;
 const GROUP_INDENT: f32 = 21.0;
-const GROUP_LINE: u32 = 0xFF4E4E4E;
 const MASK_OWNER_ROW: u32 = 0xFF2C5281;
 const PICKED_ROW: u32 = 0xFF2C5281;
 const LOCKED_LETTER: u32 = 0xFF808080;
@@ -680,7 +679,17 @@ impl Layers {
         let ink = if looks.chosen || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
         let box_fill = if looks.chosen || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
         if l.kind == LayerType::Group {
-            self.group_row(ui, look, session, l, at.translate(vec2(looks.indent, 0.0)), ink, box_fill);
+            self.group_row(
+                ui,
+                look,
+                session,
+                l,
+                at.translate(vec2(looks.indent, 0.0)),
+                ink,
+                box_fill,
+                looks.version,
+                read,
+            );
             false
         } else {
             self.layer_row(ui, look, session, l, at, ink, box_fill, looks, modes, read)
@@ -1599,7 +1608,7 @@ impl Layers {
         }
     }
 
-    /// A group's row: a line where a thumbnail would be, its name, its open or closed arrow and its box.
+    /// A group's row: what it holds as its thumbnail, its name, its open or closed arrow and its box.
     #[allow(clippy::too_many_arguments)]
     fn group_row(
         &mut self,
@@ -1610,13 +1619,15 @@ impl Layers {
         row: Rect,
         ink: Color32,
         box_fill: Color32,
+        version: Option<u64>,
+        read: &mut usize,
     ) {
         let x = row.left() + GROUP_INDENT * l.depth as f32;
-        let line = Rect::from_min_size(pos2(x + 4.0, row.center().y - 2.0), vec2(93.0, 4.0));
-        ui.painter().rect_filled(line, 2, argb(GROUP_LINE));
+        let thumb = Rect::from_min_size(pos2(x + 4.0, row.center().y - 17.0), vec2(93.0, 34.0));
+        self.thumbnail(ui, look, session, l, thumb, version, read);
         let visibility = Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.top()), vec2(44.0, GROUP_HEIGHT));
         let arrow = Rect::from_min_size(pos2(visibility.left() - 44.0 + 8.0, row.top()), vec2(44.0, GROUP_HEIGHT));
-        self.name(ui, look, session, l, pos2(line.right(), row.center().y), arrow.left() - 8.0, ink);
+        self.name(ui, look, session, l, pos2(thumb.right(), row.center().y), arrow.left() - 8.0, ink);
         let icon = if l.collapsed { &icons::CHEVRON_RIGHT } else { &icons::CHEVRON_DOWN };
         look.icon(ui, icon, arrow.center(), 16.0, ink);
         if ui.interact(arrow, ui.scope_id().with(("fold", l.id)), Sense::click()).clicked() {
@@ -1642,7 +1653,7 @@ impl Layers {
     ) {
         let painter = ui.painter_at(rect);
         let corner = 4u8;
-        if l.alpha_lock {
+        if l.alpha_lock || l.kind == LayerType::Group {
             painter.rect_filled(rect, corner, Color32::WHITE);
             let cell = 6.0;
             let (cols, rows) = ((rect.width() / cell).ceil() as i32, (rect.height() / cell).ceil() as i32);
