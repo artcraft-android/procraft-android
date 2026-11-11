@@ -18,6 +18,7 @@ mod adjusting;
 mod animation;
 mod brush_files;
 mod brush_library;
+mod brush_pictures;
 mod brushes;
 mod bundled;
 mod clipboard;

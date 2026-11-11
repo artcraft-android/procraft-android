@@ -32,6 +32,15 @@ impl Source {
         Some(Source { id: image_id(&pixels), pixels: Arc::new(pixels) })
     }
 
+    /// The image from pixels already shared (not copied), or none if it isn't `TEXTURE_SIZE`
+    /// square.
+    pub fn shared(pixels: Arc<Vec<u8>>) -> Option<Source> {
+        if pixels.len() != TEXTURE_SIZE * TEXTURE_SIZE {
+            return None;
+        }
+        Some(Source { id: image_id(&pixels), pixels })
+    }
+
     /// The pixels as text (base64), to keep with a brush.
     pub fn to_text(&self) -> String {
         crate::base64::encode(&self.pixels)
