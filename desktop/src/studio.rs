@@ -110,11 +110,15 @@ struct Section {
     controls: &'static [Control],
 }
 
-/// A brush's own sound, shown while a plugin makes strokes' sounds: as the plugin sets, one of six,
-/// or none.
-const BRUSH_SOUND: &str = "brush_sound";
-const BRUSH_SOUNDS: &[&str] =
-    &["Default", "Eraser", "Pencil", "Pen", "Paintbrush", "Airbrush", "Spray can", "No sound"];
+/// A plugin's row, as the spacing goes by it (its words are its own).
+static PLUGIN_ROW: Control = Control::Choice("", &[]);
+
+/// The rows the plugins that are on add to the brush studio's Properties, kept with each brush:
+/// each one's label, key and choices.
+pub fn plugin_rows(plugins: &procraft_core::Plugins) -> Vec<(String, String, Vec<String>)> {
+    let on = plugins.plugins().into_iter().filter(|p| p.on && p.problem.is_none());
+    on.flat_map(|p| p.brush_controls).map(|c| (c.label, c.key, c.choices)).collect()
+}
 
 /// A page: its name, its icon (shown this wide) and its sections.
 struct Page {
@@ -478,7 +482,6 @@ const PAGES: &[Page] = &[
                     slider("min_opacity", "Minimum opacity"),
                 ],
             },
-            Section { title: Some("Sound"), controls: &[Control::Choice(BRUSH_SOUND, BRUSH_SOUNDS)] },
         ],
     },
     Page {
@@ -696,8 +699,8 @@ pub enum Asked {
 #[derive(Default)]
 pub struct Studio {
     pub open: bool,
-    /// Whether a plugin makes strokes' sounds: the Properties page shows a brush's own.
-    sound: bool,
+    /// The rows plugins add to Properties: each one's label, key and choices.
+    pub plugin_rows: Vec<(String, String, Vec<String>)>,
     tab: usize,
     name: String,
     /// The name as typed in its field on the About page, and whether the field has been focused.
@@ -775,7 +778,8 @@ impl Studio {
     }
 
     fn read(&mut self, ctx: &egui::Context, session: &CanvasSession) {
-        let keys = studio_keys();
+        let mut keys = studio_keys();
+        keys.extend(self.plugin_rows.iter().map(|(_, key, _)| key.clone()));
         let values = session.studio_settings(keys.clone());
         self.values = keys.into_iter().zip(values).collect();
         self.read_sources(ctx, session);
@@ -970,7 +974,7 @@ impl Studio {
         if !self.open {
             return None;
         }
-        self.sound = prefs.plugins.makes_stroke_sound();
+        self.plugin_rows = plugin_rows(&prefs.plugins);
         if self.preview_due.is_some_and(|due| Instant::now() >= due) {
             self.preview_due = None;
             self.preview = brush_preview(ctx, session);
@@ -1134,10 +1138,6 @@ impl Studio {
                     let width = ui.available_width();
                     let mut above = Edge::Top;
                     for (k, section) in page.sections.iter().enumerate() {
-                        // a brush's own sound only while a plugin makes the sound
-                        if !self.sound && matches!(section.controls.first(), Some(Control::Choice(BRUSH_SOUND, _))) {
-                            continue;
-                        }
                         // the About page is headed by the brush's name
                         let about = matches!(section.controls.first(), Some(Control::About));
                         let title = section.title.map(str::to_owned).or_else(|| about.then(|| self.name.clone()));
@@ -1156,6 +1156,19 @@ impl Studio {
                             ui.add_space(gap(above, Some(control)));
                             self.control(ui, look, session, control, width);
                             above = Edge::Control(control);
+                        }
+                    }
+                    // the rows plugins that are on add to Properties, each under its own label
+                    if page.name == "Properties" {
+                        for (label, key, choices) in self.plugin_rows.clone() {
+                            ui.add_space(gap(above, None));
+                            let (row, _) = ui.allocate_exact_size(vec2(width, 23.0), Sense::hover());
+                            let at = pos2(row.left() + 8.0, row.center().y);
+                            text(ui.painter(), at, Align2::LEFT_CENTER, &label, 21.0, Weight::Bold, argb(HEADER));
+                            ui.add_space(gap(Edge::Title, Some(&PLUGIN_ROW)));
+                            let options: Vec<&str> = choices.iter().map(String::as_str).collect();
+                            self.choice_rows(ui, look, session, &key, &options, width);
+                            above = Edge::Control(&PLUGIN_ROW);
                         }
                     }
                     ui.add_space(77.0);
@@ -1204,6 +1217,60 @@ impl Studio {
         by.is_none_or(|(key, choice)| self.value(key).round() as i32 == choice)
     }
 
+    /// A choice as a list of rows, the chosen one lit with a tick: `key` set to the row's place.
+    fn choice_rows(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &Arc<CanvasSession>,
+        key: &str,
+        options: &[&str],
+        width: f32,
+    ) {
+        let chosen = self.value(key).round() as i32;
+        let height = 44.0 * options.len() as f32 + options.len().saturating_sub(1) as f32;
+        let (group, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+        ui.painter().rect_filled(group, 22, argb(LIST));
+        let mut y = group.top();
+        for (i, label) in options.iter().enumerate() {
+            if i > 0 {
+                ui.painter().rect_filled(
+                    Rect::from_min_size(pos2(group.left(), y), vec2(width, 1.0)),
+                    0,
+                    argb(LIST_LINE),
+                );
+                y += 1.0;
+            }
+            let row = Rect::from_min_size(pos2(group.left(), y), vec2(width, 44.0));
+            let on = i as i32 == chosen;
+            if on {
+                let corner = |at: bool| if at { 22 } else { 0 };
+                let corners = egui::CornerRadius {
+                    nw: corner(i == 0),
+                    ne: corner(i == 0),
+                    sw: corner(i + 1 == options.len()),
+                    se: corner(i + 1 == options.len()),
+                };
+                ui.painter().rect_filled(row, corners, argb(pc::ACCENT));
+                look.icon(ui, &icons::MENU_TICK, pos2(row.right() - 14.0 - 17.0, row.center().y), 34.0, Color32::WHITE);
+            }
+            let ink = if on { Color32::WHITE } else { argb(DIM) };
+            text(
+                ui.painter(),
+                pos2(row.left() + 16.0, row.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                17.0,
+                Weight::Regular,
+                ink,
+            );
+            if ui.interact(row, ui.scope_id().with(("choice", key, i)), Sense::click()).clicked() {
+                self.set(session, key, i as f32);
+            }
+            y += 44.0;
+        }
+    }
+
     fn control(&mut self, ui: &mut Ui, look: &mut Look, session: &Arc<CanvasSession>, c: &'static Control, width: f32) {
         match c {
             Control::Slider(key, label, how, by) => {
@@ -1247,56 +1314,7 @@ impl Studio {
                     ui.painter().rect_filled(knob, 12, argb(SWITCH_FIXED_KNOB));
                 }
             }
-            Control::Choice(key, options) => {
-                let chosen = self.value(key).round() as i32;
-                let height = 44.0 * options.len() as f32 + options.len().saturating_sub(1) as f32;
-                let (group, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-                ui.painter().rect_filled(group, 22, argb(LIST));
-                let mut y = group.top();
-                for (i, label) in options.iter().enumerate() {
-                    if i > 0 {
-                        ui.painter().rect_filled(
-                            Rect::from_min_size(pos2(group.left(), y), vec2(width, 1.0)),
-                            0,
-                            argb(LIST_LINE),
-                        );
-                        y += 1.0;
-                    }
-                    let row = Rect::from_min_size(pos2(group.left(), y), vec2(width, 44.0));
-                    let on = i as i32 == chosen;
-                    if on {
-                        let corner = |at: bool| if at { 22 } else { 0 };
-                        let corners = egui::CornerRadius {
-                            nw: corner(i == 0),
-                            ne: corner(i == 0),
-                            sw: corner(i + 1 == options.len()),
-                            se: corner(i + 1 == options.len()),
-                        };
-                        ui.painter().rect_filled(row, corners, argb(pc::ACCENT));
-                        look.icon(
-                            ui,
-                            &icons::MENU_TICK,
-                            pos2(row.right() - 14.0 - 17.0, row.center().y),
-                            34.0,
-                            Color32::WHITE,
-                        );
-                    }
-                    let ink = if on { Color32::WHITE } else { argb(DIM) };
-                    text(
-                        ui.painter(),
-                        pos2(row.left() + 16.0, row.center().y),
-                        Align2::LEFT_CENTER,
-                        label,
-                        17.0,
-                        Weight::Regular,
-                        ink,
-                    );
-                    if ui.interact(row, ui.scope_id().with(("choice", key, i)), Sense::click()).clicked() {
-                        self.set(session, key, i as f32);
-                    }
-                    y += 44.0;
-                }
-            }
+            Control::Choice(key, options) => self.choice_rows(ui, look, session, key, options, width),
             Control::Kinds(key, options) => {
                 let chosen = self.value(key).round() as i32;
                 let (band, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());

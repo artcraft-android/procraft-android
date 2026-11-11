@@ -14,7 +14,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::plugin_run::{self, Hook, MODULE, MOST_MODULE};
-use crate::plugins::{self, PluginControl, PluginFile, PluginFileKind, PluginPart, PluginSlider, PluginSwitch};
+use crate::plugins::{
+    self, PluginBrushControl, PluginControl, PluginFile, PluginFileKind, PluginPart, PluginSlider, PluginSwitch,
+};
 
 /// The manifest's name in a plugin file, and in its folder.
 const MANIFEST: &str = "craft-extension.json";
@@ -115,6 +117,8 @@ pub(crate) struct Manifest {
     /// Where its code steps in, if it holds any.
     pub hooks: Vec<Hook>,
     pub controls: Vec<PluginControl>,
+    /// Rows it adds to the brush studio, kept with each brush.
+    pub brush_controls: Vec<PluginBrushControl>,
     files: Vec<Listed>,
 }
 
@@ -173,6 +177,31 @@ struct RawManifest {
     hooks: Vec<String>,
     #[serde(default)]
     controls: Vec<RawControl>,
+    #[serde(default)]
+    brush_controls: Vec<RawBrushControl>,
+}
+
+/// A row a plugin adds to the brush studio: a choice of a few, kept with each brush.
+#[derive(Deserialize)]
+struct RawBrushControl {
+    key: String,
+    label: String,
+    choices: Vec<String>,
+}
+
+/// The most rows a plugin may add to the brush studio, and choices a row may have.
+const MOST_BRUSH_CONTROLS: usize = 8;
+const MOST_CHOICES: usize = 16;
+
+/// `raw` as a row of plugin `id`'s in the brush studio, if it holds up: its key kept with each
+/// brush is `plugin:<id>:<key>`.
+fn checked_brush_control(id: &str, raw: RawBrushControl) -> Result<PluginBrushControl, Refusal> {
+    let plain = |text: &String, most| !text.trim().is_empty() && shows_plainly(text, most);
+    let choices = (2..=MOST_CHOICES).contains(&raw.choices.len()) && raw.choices.iter().all(|c| plain(c, 24));
+    if !valid_key(&raw.key) || !plain(&raw.label, 40) || !choices {
+        return Err(Refusal::Described);
+    }
+    Ok(PluginBrushControl { key: format!("plugin:{id}:{}", raw.key), label: raw.label, choices: raw.choices })
 }
 
 #[derive(Deserialize)]
@@ -493,6 +522,17 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     if has(PluginPart::Filter) && controls.iter().any(|c| !c.key().starts_with(&format!("{id}."))) {
         return Err(Refusal::Described);
     }
+    // rows in the brush studio, for code to read (a filter has no way to)
+    let fits_brush = raw.brush_controls.is_empty() || (has(PluginPart::Hooks) && !has(PluginPart::Filter));
+    let mut brush_keys = HashSet::new();
+    if !fits_brush
+        || raw.brush_controls.len() > MOST_BRUSH_CONTROLS
+        || !raw.brush_controls.iter().all(|c| brush_keys.insert(c.key.clone()))
+    {
+        return Err(Refusal::Described);
+    }
+    let brush_controls =
+        raw.brush_controls.into_iter().map(|c| checked_brush_control(&id, c)).collect::<Result<Vec<_>, _>>()?;
     Ok(Manifest {
         id,
         name: raw.name,
@@ -503,6 +543,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         experimental: raw.experimental.unwrap_or(true),
         hooks,
         controls,
+        brush_controls,
         files,
     })
 }
@@ -1335,6 +1376,37 @@ pub(crate) mod tests {
             }]),
         );
         assert_eq!(refusal(&a_filter_file(&at_least)), Refusal::Described);
+    }
+
+    #[test]
+    fn a_plugin_s_rows_in_the_brush_studio_are_choices_kept_with_each_brush() {
+        let module = crate::plugin_run::tests::position_module("", "(i64.const 0)");
+        let mut manifest = coded("org.example.rows", &module);
+        manifest["brush_controls"] = json!([{ "key": "kind", "label": "Kind", "choices": ["One", "Two", "Three"] }]);
+        let package = read_package(&pack(&manifest, &[(MODULE, module.as_slice())])).unwrap();
+        assert_eq!(
+            package.manifest.brush_controls,
+            [PluginBrushControl {
+                key: "plugin:org.example.rows:kind".to_owned(),
+                label: "Kind".to_owned(),
+                choices: vec!["One".to_owned(), "Two".to_owned(), "Three".to_owned()],
+            }]
+        );
+        for wrong in [
+            json!([{ "key": "kind", "label": "Kind", "choices": ["Only"] }]),
+            json!([{ "key": "Kind", "label": "Kind", "choices": ["One", "Two"] }]),
+            json!([{ "key": "kind", "label": "", "choices": ["One", "Two"] }]),
+            json!([{ "key": "kind", "label": "Kind", "choices": ["One", "x".repeat(25)] }]),
+            json!([{ "key": "a", "label": "A", "choices": ["1", "2"] }, { "key": "a", "label": "A", "choices": ["1", "2"] }]),
+        ] {
+            let mut odd = manifest.clone();
+            odd["brush_controls"] = wrong.clone();
+            assert_eq!(refusal(&pack(&odd, &[(MODULE, module.as_slice())])), Refusal::Described, "{wrong}");
+        }
+        // a filter has no way to read them
+        let mut filter = a_filter();
+        filter["brush_controls"] = json!([{ "key": "k", "label": "K", "choices": ["1", "2"] }]);
+        assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
     }
 
     #[test]

@@ -42,12 +42,20 @@
 //!   panel's Classic shows a triangle in place of its square (not 0).
 //! - `procraft_quickshape_curves() -> i32`: for the hook `quickshape_curves`, whether a stroke that
 //!   bends more than once snaps to a curve (not 0).
-//! - `procraft_stroke_sound(setting: i32) -> f32`: for the hook `stroke_sound`, the stroke's
-//!   sound: its volume (0), whether erasing makes a sound (1, 0 or 1), which sound every brush makes
-//!   (2, in sixths, 0 each brush's kind's) and which sound erasing makes (3, in sixths), or below 0
-//!   for the app's own; and for 4 to 9 (the eraser, pencil, pen, paintbrush, airbrush, spray can),
-//!   the place in the manifest (0 the first) of the file control whose recording that sound plays,
-//!   a whole number, or below 0 for the app's own sound.
+//! - For the hook `stroke_sound` (a sound as you draw, the plugin's): `procraft_stroke_sound(frames:
+//!   i32, rate: i32, speed: f32, pressure: f32, since_ms: f32, state: i32, hover_x: f32, hover_y:
+//!   f32, height: f32) -> i32` gives where the next `frames` samples (32-bit floats, -1 to 1, at
+//!   `rate` a second) are, for the stroke moving at `speed` (window heights a second) with
+//!   `pressure`, its last input `since_ms` ago (below 0: no stroke open), `state` saying (bits) 1 a
+//!   stroke is open, 2 the pen hovers (at `hover_x`, `hover_y`, window pixels, in a window `height`
+//!   tall), 4 the tool erases. Called on the sound's own thread, every few milliseconds. Before the
+//!   first at a rate, `procraft_sound_prepare(rate: i32) -> i32`, if it has one, as a long call.
+//! - What a plugin is told if it listens: the current brush, before a sound when it changed (its
+//!   name and its set's, UTF-8, into `procraft_text_buffer(len: i32) -> i32`, then
+//!   `procraft_brush(name_len: i32, set_len: i32)`; its rows in the brush studio, each by its place,
+//!   through `procraft_brush_control(index: i32, value: f32)`); and the file picked for a file
+//!   control (into `procraft_file_buffer(index: i32, len: i32) -> i32`, then `procraft_file(index:
+//!   i32, len: i32)`, `len` 0 when let go), as a long call.
 //! - For the hook `inbetween` (Animation Assist's In-between draws a frame between a frame and the
 //!   next, the plugin's way): `procraft_between_begin(width: i32, height: i32) -> i32` starts one
 //!   of that many pixels and gives where a row of them goes (`width` × 4 bytes, premultiplied
@@ -74,6 +82,14 @@ const MOST_MEMORY: usize = 16 << 20;
 /// What a plugin on the fill hook may ask for: a few planes of a bit a pixel, for the fills
 /// [`MOST_FILL`] lets through.
 const MOST_FILL_MEMORY: usize = 64 << 20;
+/// What a plugin on the sound hook may ask for: its sounds' loops and the recordings picked.
+const MOST_SOUND_MEMORY: usize = 128 << 20;
+/// What a sound may spend (a few milliseconds of it), readying the sounds at a rate, and taking a
+/// file in.
+const SOUND_FUEL: u64 = 20_000_000;
+const SOUND_FRAME_FUEL: u64 = 4_000;
+const PREPARE_FUEL: u64 = 4_000_000_000;
+const FILE_FUEL: u64 = 2_000_000_000;
 /// What a plugin on the in-between hook may ask for: the two frames and the one between, and room
 /// to work.
 pub(crate) const MOST_BETWEEN_MEMORY: usize = 256 << 20;
@@ -126,6 +142,12 @@ const RANDOMISE: &str = "procraft_randomise";
 const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
 const QUICKSHAPE_CURVES: &str = "procraft_quickshape_curves";
 const STROKE_SOUND: &str = "procraft_stroke_sound";
+const SOUND_PREPARE: &str = "procraft_sound_prepare";
+const TEXT_BUFFER: &str = "procraft_text_buffer";
+const BRUSH: &str = "procraft_brush";
+const BRUSH_CONTROL: &str = "procraft_brush_control";
+const FILE_BUFFER: &str = "procraft_file_buffer";
+const FILE: &str = "procraft_file";
 const BETWEEN_BEGIN: &str = "procraft_between_begin";
 const BETWEEN_ROW: &str = "procraft_between_row";
 const BETWEEN_RUN: &str = "procraft_between_run";
@@ -220,7 +242,11 @@ impl Hook {
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
             Hook::QuickshapeCurves => exports(module, QUICKSHAPE_CURVES, &[], &[ValType::I32]),
-            Hook::StrokeSound => exports(module, STROKE_SOUND, &[ValType::I32], &[ValType::F32]),
+            Hook::StrokeSound => {
+                use ValType::{F32, I32};
+                exports(module, STROKE_SOUND, &[I32, I32, F32, F32, F32, I32, F32, F32, F32], &[I32])
+                    && has_memory(module)
+            }
             Hook::Inbetween => {
                 exports(module, BETWEEN_BEGIN, &[ValType::I32, ValType::I32], &[ValType::I32])
                     && exports(module, BETWEEN_ROW, &[ValType::I32, ValType::I32], &[])
@@ -348,6 +374,9 @@ pub(crate) fn can_run(bytes: &[u8], hooks: &[Hook], controls: bool) -> bool {
 }
 
 /// What the fill hook calls.
+/// The sound hook's call: frames, rate, speed, pressure, since, state, hover x and y, height.
+type SoundCall = TypedFunc<(i32, i32, f32, f32, f32, i32, f32, f32, f32), i32>;
+
 /// The in-between hook's calls.
 struct BetweenCalls {
     begin: TypedFunc<(i32, i32), i32>,
@@ -417,7 +446,16 @@ pub(crate) struct Running {
     randomise: Option<TypedFunc<(i32, i32), f32>>,
     colour_triangle: Option<TypedFunc<(), i32>>,
     quickshape_curves: Option<TypedFunc<(), i32>>,
-    stroke_sound: Option<TypedFunc<i32, f32>>,
+    stroke_sound: Option<SoundCall>,
+    sound_prepare: Option<TypedFunc<i32, i32>>,
+    text_buffer: Option<TypedFunc<i32, i32>>,
+    brush: Option<TypedFunc<(i32, i32), ()>>,
+    brush_control: Option<TypedFunc<(i32, f32), ()>>,
+    file_buffer: Option<TypedFunc<(i32, i32), i32>>,
+    file: Option<TypedFunc<(i32, i32), ()>>,
+    /// The rate its sounds are readied for, and the brush it was last told (as a number).
+    sound_rate: Option<i32>,
+    told_brush: Option<u64>,
     between: Option<BetweenCalls>,
     memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
@@ -428,6 +466,8 @@ impl Running {
     pub(crate) fn start_on(bytes: &[u8], controls: &[f32], hooks: &[Hook]) -> Result<Running, Stop> {
         let most_memory = if hooks.contains(&Hook::Inbetween) {
             MOST_BETWEEN_MEMORY
+        } else if hooks.contains(&Hook::StrokeSound) {
+            MOST_SOUND_MEMORY
         } else if hooks.contains(&Hook::FillMask) {
             MOST_FILL_MEMORY
         } else {
@@ -490,6 +530,12 @@ impl Running {
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
             let quickshape_curves = instance.get_typed_func(&store, QUICKSHAPE_CURVES).ok();
             let stroke_sound = instance.get_typed_func(&store, STROKE_SOUND).ok();
+            let sound_prepare = instance.get_typed_func(&store, SOUND_PREPARE).ok();
+            let text_buffer = instance.get_typed_func(&store, TEXT_BUFFER).ok();
+            let brush = instance.get_typed_func(&store, BRUSH).ok();
+            let brush_control = instance.get_typed_func(&store, BRUSH_CONTROL).ok();
+            let file_buffer = instance.get_typed_func(&store, FILE_BUFFER).ok();
+            let file = instance.get_typed_func(&store, FILE).ok();
             let between = (|| {
                 Some(BetweenCalls {
                     begin: instance.get_typed_func(&store, BETWEEN_BEGIN).ok()?,
@@ -519,6 +565,14 @@ impl Running {
                 colour_triangle,
                 quickshape_curves,
                 stroke_sound,
+                sound_prepare,
+                text_buffer,
+                brush,
+                brush_control,
+                file_buffer,
+                file,
+                sound_rate: None,
+                told_brush: None,
                 between,
                 memory,
                 control,
@@ -617,42 +671,101 @@ impl Running {
         })
     }
 
-    /// What it answers the sound hook for `setting`, as it answers; none without the hook.
-    fn stroke_sound_said(&mut self, setting: i32) -> Result<Option<f32>, Stop> {
-        let Running { store, stroke_sound, .. } = self;
-        let Some(stroke_sound) = stroke_sound else { return Ok(None) };
-        let said = guarded(|| {
-            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
-            stroke_sound.call(&mut *store, setting).map_err(|e| stop_of(&e))
+    /// The sound of the stroke as `motion` has it: `frames` samples at `rate` a second, as it makes
+    /// them, readied for the rate first (a long call, the first time at it) and told `brush` when
+    /// that changed. None without the hook.
+    pub(crate) fn stroke_sound(
+        &mut self,
+        frames: usize,
+        rate: u32,
+        motion: &crate::stroke_sound::SoundMotion,
+        brush: &crate::stroke_sound::SoundBrush,
+    ) -> Result<Option<Vec<f32>>, Stop> {
+        if self.stroke_sound.is_none() || self.memory.is_none() {
+            return Ok(None);
+        }
+        let rate = i32::try_from(rate).map_err(|_| Stop::Nonsense)?;
+        if self.sound_rate != Some(rate) {
+            self.sound_prepare(rate)?;
+            self.sound_rate = Some(rate);
+        }
+        if self.told_brush != Some(brush.key) {
+            self.tell_brush(brush)?;
+            self.told_brush = Some(brush.key);
+        }
+        let Running { store, stroke_sound, memory, .. } = self;
+        let (Some(call), Some(memory)) = (stroke_sound.as_ref(), memory.as_ref()) else { return Ok(None) };
+        let count = i32::try_from(frames).map_err(|_| Stop::Nonsense)?;
+        let m = motion;
+        let args = (count, rate, m.speed, m.pressure, m.since_ms, m.state, m.hover.0, m.hover.1, m.height);
+        let at = guarded(|| {
+            store.set_fuel(SOUND_FUEL + SOUND_FRAME_FUEL * frames as u64).map_err(|_| Stop::Damaged)?;
+            call.call(&mut *store, args).map_err(|e| stop_of(&e))
         })?;
-        Ok(Some(said))
+        let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+        let mut bytes = vec![0_u8; frames * 4];
+        memory.read(&*store, place, &mut bytes).map_err(|_| Stop::Nonsense)?;
+        let sample = |b: &[u8; 4]| {
+            let s = f32::from_le_bytes(*b);
+            if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 }
+        };
+        Ok(Some(bytes.as_chunks::<4>().0.iter().map(sample).collect()))
     }
 
-    /// Which control's file it says sound `kind` (0 the eraser to 5 the spray can) plays, by its
-    /// place in the manifest; none for the app's own sound.
-    pub(crate) fn stroke_sound_file(&mut self, kind: usize) -> Result<Option<usize>, Stop> {
-        let setting = i32::try_from(kind).map_or(i32::MAX, |k| k.saturating_add(4));
-        let Some(said) = self.stroke_sound_said(setting)? else { return Ok(None) };
-        if said.is_nan() || said > 255.0 || (said >= 0.0 && said.fract() != 0.0) {
-            Err(Stop::Nonsense)
-        } else if said < 0.0 {
-            Ok(None)
-        } else {
-            Ok(Some(said as usize))
-        }
+    /// Readies its sounds for `rate`, if it asks to be: a long call.
+    fn sound_prepare(&mut self, rate: i32) -> Result<(), Stop> {
+        let Running { store, sound_prepare, .. } = self;
+        let Some(prepare) = sound_prepare.as_ref() else { return Ok(()) };
+        let (mut left, until) = (PREPARE_FUEL, Instant::now() + MOST_FILL_TIME);
+        guarded(|| long_call(store, prepare, rate, &mut left, until).map(|_| ()))
     }
 
-    /// What it says the stroke's sound's `setting` is (0 volume, 1 whether erasing sounds, 2 which
-    /// sound, 3 erasing's sound), 0 to 1; none for the app's own.
-    pub(crate) fn stroke_sound(&mut self, setting: i32) -> Result<Option<f32>, Stop> {
-        let Some(said) = self.stroke_sound_said(setting)? else { return Ok(None) };
-        if said.is_nan() || said > 1.0 {
-            Err(Stop::Nonsense)
-        } else if said < 0.0 {
-            Ok(None)
-        } else {
-            Ok(Some(said))
+    /// Tells it the current brush, if it listens: its name and set, and its rows in the brush studio.
+    fn tell_brush(&mut self, brush: &crate::stroke_sound::SoundBrush) -> Result<(), Stop> {
+        let Running { store, text_buffer, brush: named, brush_control, memory, .. } = self;
+        if let (Some(text_buffer), Some(named), Some(memory)) = (text_buffer.as_ref(), named.as_ref(), memory.as_ref())
+        {
+            let text = [brush.name.as_bytes(), brush.set.as_bytes()].concat();
+            let length = |n: usize| i32::try_from(n).map_err(|_| Stop::Nonsense);
+            guarded(|| {
+                store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+                let at = text_buffer.call(&mut *store, length(text.len())?).map_err(|e| stop_of(&e))?;
+                let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+                memory.write(&mut *store, place, &text).map_err(|_| Stop::Nonsense)?;
+                store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+                named.call(&mut *store, (length(brush.name.len())?, length(brush.set.len())?)).map_err(|e| stop_of(&e))
+            })?;
         }
+        if let Some(brush_control) = brush_control.as_ref() {
+            for (index, value) in brush.controls.iter().enumerate() {
+                let index = i32::try_from(index).map_err(|_| Stop::Nonsense)?;
+                guarded(|| {
+                    store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+                    brush_control.call(&mut *store, (index, *value)).map_err(|e| stop_of(&e))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Hands it the file picked for its control `index` (none: let go), if it takes them: a long
+    /// call.
+    pub(crate) fn give_file(&mut self, index: usize, bytes: Option<&[u8]>) -> Result<(), Stop> {
+        let Running { store, file_buffer, file, memory, .. } = self;
+        let (Some(file), Some(memory)) = (file.as_ref(), memory.as_ref()) else { return Ok(()) };
+        let data = bytes.unwrap_or(&[]);
+        let index = i32::try_from(index).map_err(|_| Stop::Nonsense)?;
+        let len = i32::try_from(data.len()).map_err(|_| Stop::Nonsense)?;
+        let (mut left, until) = (FILE_FUEL, Instant::now() + MOST_FILL_TIME);
+        guarded(|| {
+            if !data.is_empty() {
+                let Some(file_buffer) = file_buffer.as_ref() else { return Ok(()) };
+                let at = long_call(store, file_buffer, (index, len), &mut left, until)?;
+                let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+                memory.write(&mut *store, place, data).map_err(|_| Stop::Nonsense)?;
+            }
+            long_call(store, file, (index, len), &mut left, until)
+        })
     }
 
     /// Whether it says QuickShape snaps a stroke that bends more than once to a curve.

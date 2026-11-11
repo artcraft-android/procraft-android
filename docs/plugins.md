@@ -77,7 +77,36 @@ A plugin can have up to eight, each a `slider` or a `switch`; a plugin with code
 | `accepts` | What a `file` control takes: `"sound"`, a recording (the app reads it, keeps a minute of it at most with the plugin, and drops it with the plugin) |
 
 A `file` control shows Import, or the name of the file picked and Clear. The plugin is told 1 while a
-file is picked, 0 while none is; what the file is for is up to the hook that uses it.
+file is picked, 0 while none is, and is handed the file itself if it takes files (see below); what
+the file is for is up to the plugin.
+
+### Rows in the brush studio
+
+A plugin with code can add up to eight rows to the brush studio's Properties page, each a choice of 2
+to 16 (each 24 characters at most), kept with each brush:
+
+```json
+"brush_controls": [
+  { "key": "sound", "label": "Sound", "choices": ["Default", "Eraser", "Pencil"] }
+]
+```
+
+A brush starts at the first choice. The row shows under its `label` while the plugin is on; a brush
+keeps its choice under `plugin:<id>:<key>`, so it stays with the brush when the plugin is off.
+
+### What the code is told
+
+Besides its hooks, code may export any of these, and is told:
+
+- The current brush, before a sound is asked for when it changed: its name and its set's (UTF-8) into
+  `procraft_text_buffer(len: i32) -> i32`, which answers where `len` bytes go, then
+  `procraft_brush(name_len: i32, set_len: i32)`; and its rows' choices through
+  `procraft_brush_control(index: i32, value: f32)`, `index` their place in `brush_controls`.
+- The file picked for a `file` control, when it starts and whenever one is picked or let go: into
+  `procraft_file_buffer(index: i32, len: i32) -> i32` (where `len` bytes go), then
+  `procraft_file(index: i32, len: i32)`, `index` the control's place in `controls` and `len` 0 when
+  it is let go. A sound comes as a WAV file of 32-bit floats, one channel, a minute at most. It's a
+  long call, on fuel of its own.
 
 A `key` is lowercase letters, digits and `_`, starting with a letter, and can't be `on`. A filter
 reads it as a field, so there it also has to be a word WGSL allows, and not a keyword such as `loop`.
@@ -372,32 +401,31 @@ procraft_quickshape_curves() -> i32
 
 ### `stroke_sound`
 
-The sound of the stroke being drawn. While a plugin on this hook is on, the app plays a sound it makes
-as you draw, behaving as Krita's Brush SFX plugin by davi133 does (github.com/davi133/brush_sfx): six
-sounds (an eraser, a pencil, a pen, a paintbrush, an airbrush and a spray can), each brush the one its
-kind takes (by its name, else its set's), louder the faster and harder the stroke goes, the pen's and the
-paintbrush's ring rising with speed, the airbrush hissing while pressed and the spray can while it
-moves, its ball rattling when the pen is shaken back and forth above the canvas. The plugin sets three
-things, each 0 to 1:
+A sound as you draw. While a plugin on this hook is on, the app asks it for the stroke's sound every
+few milliseconds, on a thread of its own, and plays what it hands back:
 
 ```
-procraft_stroke_sound(setting: i32) -> f32
+procraft_stroke_sound(frames: i32, rate: i32, speed: f32, pressure: f32, since_ms: f32,
+                      state: i32, hover_x: f32, hover_y: f32, height: f32) -> i32
+procraft_sound_prepare(rate: i32) -> i32
 ```
 
-`setting` 0 is the master volume; 1 whether erasing makes a sound (1) or none (0); 2 one sound for
-every brush, in sixths (1/6 the eraser, 2/6 the pencil, 3/6 the pen, 4/6 the paintbrush, 5/6 the
-airbrush, 1 the spray can), or 0 for each brush's kind's; 3 the sound erasing makes, in sixths. Answer
-below 0 to leave one as the app has it (full volume, erasing heard, each brush's kind's, the eraser's).
-An answer above 1, or not a number, stops the plugin.
+It answers where in its memory the next `frames` samples are (32-bit floats, -1 to 1, at `rate` a
+second). The stroke moves at `speed` (window heights a second) with `pressure` (a finger as pressed
+all the way); its last input came `since_ms` ago (below 0: no stroke is open); `state` says, as bits,
+1 a stroke is open, 2 the pen hovers (at `hover_x`, `hover_y`, window pixels, in a window `height`
+tall), 4 the tool erases. Before the first sound at a rate, `procraft_sound_prepare` (if it has one)
+readies whatever it makes once, as a long call. A sound may spend fuel by the frame; there's 128 MB
+of memory. It's told the brush and its rows as above, so a sound can go by the brush.
 
-`setting` 4 to 9 asks, for the eraser, pencil, pen, paintbrush, airbrush and spray can in turn, which
-`file` control's recording that sound plays in place of its own: the control's place in the manifest (0
-the first), a whole number, or below 0 for the app's own sound. The app plays the recording looped (its
-end eased into its start), as loud as the sound it stands in for, through the same speed, pressure and
-filtering.
-
-While such a plugin is on, the Brush Studio's Properties page has a Sound section: a brush's own sound,
-over what the plugin sets, or none. It plays on Android, Windows and Linux (through PipeWire, PulseAudio or ALSA); not yet on a Mac.
+The Brush sounds plugin the app comes with behaves as Krita's Brush SFX plugin by davi133 does
+(github.com/davi133/brush_sfx): six sounds (an eraser, a pencil, a pen, a paintbrush, an airbrush and
+a spray can), each brush the one its kind takes (by its name, else its set's), louder the faster and
+harder the stroke goes, the pen's and the paintbrush's ring rising with speed, the airbrush hissing
+while pressed and the spray can while it moves, its ball rattling when the pen is shaken back and
+forth above the canvas. Its controls set the volume, one sound for every brush, whether erasing makes
+a sound and which, and a recording for any of the six; its row in the brush studio gives a brush its
+own sound, or none. All of it is in the plugin, made sample by sample with a few filters.
 
 ### Limits
 

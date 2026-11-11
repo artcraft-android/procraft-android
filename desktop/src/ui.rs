@@ -557,6 +557,7 @@ impl Interface {
         self.time_lapse.record(&ctx, session, input.idle());
         // the brush studio over everything (the library stays open under it)
         if let Some(new) = self.library.studio.take() {
+            self.studio.plugin_rows = crate::studio::plugin_rows(&self.prefs.plugins);
             self.studio.begin(&ctx, session, new);
         }
         if self.studio.open {

@@ -450,10 +450,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var pluginList by mutableStateOf(plugins.plugins())
         private set
 
-    /** Whether a plugin makes strokes' sounds (the Brush Studio then shows a brush's own). */
-    var strokeSoundOn by mutableStateOf(false)
-        private set
-
     /** Whether a plugin draws in-betweens (the frame options then offer In-between). */
     var tweensOn by mutableStateOf(false)
         private set
@@ -465,7 +461,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun followPluginLooks() {
         io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
-        strokeSoundOn = plugins.makesStrokeSound()
         tweensOn = plugins.tweens()
         followStrokeSound()
     }
@@ -4807,6 +4802,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun studio(key: String): Float = studioValues[key] ?: 0f
 
+    /** The rows the plugins that are on add to the brush studio, kept with each brush. */
+    fun pluginBrushControls(): List<io.github.artcraftandroid.procraft.core.PluginBrushControl> =
+        pluginList.filter { it.on && it.problem == null }.flatMap { it.brushControls }
+
     /** The studio's brush is a dual brush, and its second part shows. */
     var studioDual by mutableStateOf(false)
         private set
@@ -4882,7 +4881,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun readStudio() {
         val s = session ?: return
-        val keys = io.github.artcraftandroid.procraft.ui.STUDIO_KEYS
+        val keys = io.github.artcraftandroid.procraft.ui.STUDIO_KEYS + pluginBrushControls().map { it.key }
         s.studioSettings(keys).forEachIndexed { i, v -> studioValues[keys[i]] = v }
         studioCurve = s.studioCurve().chunked(2).filter { it.size == 2 }.map { Offset(it[0], it[1]) }
         readStudioSources()

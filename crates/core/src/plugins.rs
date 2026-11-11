@@ -133,6 +133,15 @@ pub struct PluginFile {
     pub chosen: Option<String>,
 }
 
+/// A row a plugin adds to the brush studio's Properties: a choice of a few, by their place, kept
+/// with each brush under `key` (`plugin:<id>:<key>`; 0 the first choice, as a brush starts).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginBrushControl {
+    pub key: String,
+    pub label: String,
+    pub choices: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, uniffi::Enum)]
 pub enum PluginControl {
     Switch { control: PluginSwitch },
@@ -161,6 +170,8 @@ pub struct PluginInfo {
     pub problem: Option<String>,
     /// What its card shows, while it is on. A filter's own are on its panel.
     pub controls: Vec<PluginControl>,
+    /// Rows it adds to the brush studio, while it is on.
+    pub brush_controls: Vec<PluginBrushControl>,
 }
 
 impl PluginInfo {
@@ -319,18 +330,6 @@ fn read_chosen(store: &std::path::Path, plugin: &mut PluginInfo) {
     }
 }
 
-/// The files picked for `plugin`'s controls in `store`, by control (none: not a file control, or
-/// none picked).
-fn chosen_files(store: Option<&std::path::Path>, plugin: &PluginInfo) -> Vec<Option<PathBuf>> {
-    let chosen = |control: &PluginControl| match (store, control) {
-        (Some(store), PluginControl::File { control }) if control.chosen.is_some() => {
-            Some(plugin_file::chosen_paths(store, &plugin.id, &control.key).0)
-        }
-        _ => None,
-    };
-    plugin.controls.iter().map(chosen).collect()
-}
-
 fn from_file(manifest: Manifest) -> PluginInfo {
     let only_filter = manifest.holds == [PluginPart::Filter];
     PluginInfo {
@@ -346,6 +345,7 @@ fn from_file(manifest: Manifest) -> PluginInfo {
         on: only_filter,
         problem: None,
         controls: if only_filter { Vec::new() } else { manifest.controls },
+        brush_controls: manifest.brush_controls,
     }
 }
 
@@ -516,7 +516,16 @@ impl Plugins {
         match started {
             Ok((running, hooks)) => {
                 self.hooks.put_on(plugin.id.clone(), running, &hooks);
-                self.hooks.files(&plugin.id, chosen_files(store, plugin));
+                self.hooks.brush_keys(&plugin.id, plugin.brush_controls.iter().map(|c| c.key.clone()).collect());
+                // the files picked for it, handed over
+                for (at, control) in plugin.controls.iter().enumerate() {
+                    if let (Some(store), PluginControl::File { control }) = (store, control)
+                        && control.chosen.is_some()
+                        && let Ok(bytes) = std::fs::read(plugin_file::chosen_paths(store, &plugin.id, &control.key).0)
+                    {
+                        self.hooks.give_file(&plugin.id, at, Some(&bytes));
+                    }
+                }
             }
             Err(stop) => {
                 self.hooks.failed(&plugin.id, stop);
@@ -804,10 +813,9 @@ impl Plugins {
         let id = plugin.id.clone();
         let Some(PluginControl::File { control }) = plugin.controls.get_mut(at) else { return false };
         let (file, named) = plugin_file::chosen_paths(store, &id, &key);
-        let written = |tmp: &std::path::Path| {
-            std::fs::write(tmp, crate::sound_file::write_wav(&samples, rate))
-                .map_err(|e| crate::project::file_error("saving", e))
-        };
+        let kept_wav = crate::sound_file::write_wav(&samples, rate);
+        let written =
+            |tmp: &std::path::Path| std::fs::write(tmp, &kept_wav).map_err(|e| crate::project::file_error("saving", e));
         let kept = file.parent().is_some_and(|folder| std::fs::create_dir_all(folder).is_ok())
             && crate::project::write_atomically(&file, written).is_ok()
             && std::fs::write(&named, &name).is_ok();
@@ -817,7 +825,7 @@ impl Plugins {
         }
         control.chosen = Some(name);
         self.hooks.control(&id, at, 1.0);
-        self.hooks.file(&id, at, Some(file));
+        self.hooks.give_file(&id, at, Some(&kept_wav));
         true
     }
 
@@ -834,7 +842,7 @@ impl Plugins {
         }
         control.chosen = None;
         self.hooks.control(&id, at, 0.0);
-        self.hooks.file(&id, at, None);
+        self.hooks.give_file(&id, at, None);
         true
     }
 
@@ -1005,6 +1013,7 @@ mod tests {
     /// One from elsewhere: nothing in the app asks about it.
     fn stranger() -> PluginInfo {
         PluginInfo {
+            brush_controls: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),

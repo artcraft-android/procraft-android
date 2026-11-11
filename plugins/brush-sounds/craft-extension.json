@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "io.github.artcraftandroid.brush-sounds",
   "name": "Brush sounds",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "holds": ["hooks"],
   "publisher": { "name": "ProCraft" },
   "description": "A sound as you draw: an eraser, pencil, pen, paintbrush, airbrush or spray can, by the brush. Import a recording for any of them. A brush can have its own in the Brush Studio.",
@@ -20,5 +20,8 @@
     { "key": "paintbrush_recording", "type": "file", "label": "Paintbrush recording", "accepts": "sound" },
     { "key": "airbrush_recording", "type": "file", "label": "Airbrush recording", "accepts": "sound" },
     { "key": "spray_recording", "type": "file", "label": "Spray can recording", "accepts": "sound" }
+  ],
+  "brush_controls": [
+    { "key": "sound", "label": "Sound", "choices": ["Default", "Eraser", "Pencil", "Pen", "Paintbrush", "Airbrush", "Spray can", "No sound"] }
   ]
 }

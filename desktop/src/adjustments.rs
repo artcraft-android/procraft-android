@@ -605,6 +605,7 @@ mod tests {
             on_key: String::new(),
             problem: None,
             controls: Vec::new(),
+            brush_controls: Vec::new(),
         }
     }
 

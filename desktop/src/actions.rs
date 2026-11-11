@@ -1683,6 +1683,7 @@ mod tests {
     #[test]
     fn a_plugin_nothing_answers_to_draws_and_does_nothing() {
         let stranger = PluginInfo {
+            brush_controls: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),
