@@ -317,13 +317,15 @@ impl State {
         let samples = resample(&outline, &edit.along);
         builder.add(&samples);
         let stamps = builder.finish();
+        // with a symmetry guide on, its copies too, as the stroke had them and as it is kept
+        let guide = self.doc.stroke_guide();
         if let Some(canvas) = self.canvas.as_mut() {
             // nothing drawn ahead of the pen before it snapped stays over the shape
             canvas.set_prediction(&[]);
             canvas.set_tip(&[]);
             // made a shape, a dual brush's stroke goes on as its first alone
             canvas.drop_second();
-            canvas.replace_stamps(&stamps);
+            canvas.replace_stamps(&crate::guide::mirrored(&guide, &stamps));
         }
         self.stroke = Some(builder);
         self.second = None;

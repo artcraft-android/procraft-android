@@ -2948,6 +2948,32 @@ fn a_private_picture_stays_out_of_the_time_lapse() {
 }
 
 #[test]
+fn a_shape_snapped_with_symmetry_on_shows_its_copy_while_held() {
+    use crate::guide::{GuideType, SymmetryType};
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.2);
+    s.set_guide_on(true);
+    s.set_guide_kind(GuideType::Symmetry);
+    s.set_guide_symmetry(SymmetryType::Vertical, false);
+    s.set_guide_assisted(true);
+    // a wavering line on the left half, held: a straight line, and its copy on the right
+    let at = |i: usize| {
+        let t = i as f32 / 40.0;
+        sample(10.0 + 30.0 * t, 20.0 + 60.0 * t + 1.5 * (t * 25.0).sin(), i as f64 * 8.0)
+    };
+    s.stroke_begin(PointerKind::Finger, vec![at(0)]);
+    s.stroke_add((1..=40).map(at).collect());
+    assert_eq!(s.quickshape_hold().expect("a shape").kind, QuickShapeKind::Line);
+    // (25, 50) is on the line, (75, 50) its copy
+    assert_eq!(pixel(&s, 25, 50)[0], 0);
+    assert_eq!(pixel(&s, 75, 50)[0], 0, "the copy shows while the pen is down");
+    s.stroke_end(vec![]);
+    s.quickshape_done();
+    assert_eq!(pixel(&s, 75, 50)[0], 0, "and is kept");
+}
+
+#[test]
 fn the_drawing_guide_mirrors_and_assists_strokes() {
     use crate::guide::{GuideType, SymmetryType};
     let Some(s) = session(100, 100) else { return };
