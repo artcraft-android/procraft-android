@@ -159,20 +159,35 @@ fn paintable(session: &CanvasSession, id: u64) -> bool {
     session.layers().iter().any(|l| l.id == id && !l.locked && l.kind == crate::layers::LayerType::Paint)
 }
 
+/// A plugin's change of the artwork in progress (see [`CanvasSession::plugin_step`]): what it
+/// changed becomes one step when this goes, however the plugin finished.
+pub(crate) struct PluginStep<'a>(&'a CanvasSession);
+
+impl Drop for PluginStep<'_> {
+    fn drop(&mut self) {
+        self.0.end_plugin_step();
+    }
+}
+
 impl CanvasSession {
-    /// Marks the history before a plugin's action, for [`CanvasSession::end_plugin_step`].
-    pub(crate) fn begin_plugin_step(&self) {
+    /// Marks the history before a plugin's action or panel touch: until what this gives goes, no
+    /// stroke begins and undo and redo wait (they would join the plugin's step).
+    pub(crate) fn plugin_step(&self) -> PluginStep<'_> {
         let mut st = self.shared.lock();
         st.finish_stroke();
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.mark_steps();
         }
+        st.plugin_stepping += 1;
+        drop(st);
+        PluginStep(self)
     }
 
     /// What a plugin's action changed becomes one step undo takes back.
-    pub(crate) fn end_plugin_step(&self) {
+    fn end_plugin_step(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.plugin_stepping = st.plugin_stepping.saturating_sub(1);
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.collapse_steps();
         }

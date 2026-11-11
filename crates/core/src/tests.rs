@@ -2948,6 +2948,30 @@ fn a_private_picture_stays_out_of_the_time_lapse() {
 }
 
 #[test]
+fn no_stroke_or_undo_joins_a_plugins_change_while_it_goes_on() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.3);
+    let dot = |x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    dot(20.0);
+    {
+        let _step = s.plugin_step();
+        // a stroke and an undo while a plugin's action runs: neither happens
+        dot(80.0);
+        assert!(s.undo().is_none());
+    }
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255], "no stroke while the plugin's change went on");
+    assert_eq!(pixel(&s, 20, 50)[0], 0, "and the one before wasn't undone");
+    // once it has ended, both go as ever
+    dot(80.0);
+    assert_eq!(pixel(&s, 80, 50)[0], 0);
+    s.undo();
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+}
+
+#[test]
 fn a_shape_snapped_with_symmetry_on_shows_its_copy_while_held() {
     use crate::guide::{GuideType, SymmetryType};
     use crate::quickshape::QuickShapeKind;

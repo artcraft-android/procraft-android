@@ -967,9 +967,9 @@ impl Plugins {
             .ok_or(Stop::Damaged)
             .and_then(|(hooks, bytes)| Running::start_on(&bytes, &values, &hooks, &permissions));
         let ran = started.and_then(|mut running| {
-            session.begin_plugin_step();
+            let step = session.plugin_step();
             let ran = running.action(index, Arc::clone(&session));
-            session.end_plugin_step();
+            drop(step);
             ran.map(|()| running)
         });
         match ran {
@@ -1063,9 +1063,9 @@ impl Plugins {
             (panel.id.clone(), Arc::clone(&panel.running), value)
         };
         let mut code = running.lock().unwrap_or_else(|e| e.into_inner());
-        session.begin_plugin_step();
+        let step = session.plugin_step();
         let ran = code.panel_event(row, value, Arc::clone(&session));
-        session.end_plugin_step();
+        drop(step);
         let answer = ran.map(|()| code.take_panel());
         drop(code);
         // what it answered, unless that panel was closed meanwhile (or another took its place)

@@ -502,6 +502,9 @@ pub(crate) struct State {
     /// Where the library was last kept or read whole, and what it held then (see
     /// `brush_library::Images::Told`): kept again only once that changes.
     pub(crate) library_kept: Option<(std::path::PathBuf, u64)>,
+    /// Plugins' changes in progress (an action's or a panel touch's): while any is, no stroke
+    /// begins and undo and redo wait, or they would join its step.
+    pub(crate) plugin_stepping: u32,
     /// The pad shows only its sample scribble: a stroke of one's own takes it away.
     pub(crate) pad_sample: bool,
     /// The pad drawn as a sphere, the flat pad's strokes set aside meanwhile.
@@ -1336,6 +1339,7 @@ impl CanvasSession {
             pad_strokes: None,
             grain_store: grain_store::GrainStore::default(),
             library_kept: None,
+            plugin_stepping: 0,
             pad_sample: false,
             sphere: None,
             frame_interval_ms: 0.0,
@@ -1502,6 +1506,10 @@ impl CanvasSession {
             self.shared.frame(st);
             return;
         }
+        // a plugin changing the artwork: this stroke would join its step
+        if st.plugin_stepping > 0 {
+            return;
+        }
         // radial symmetry in as many parts as a plugin says, for this stroke
         st.doc.guide.radial = st.hooks.as_ref().and_then(|hooks| hooks.radial_segments());
         // a fill still spreading in shows all of itself before anything is drawn over it
@@ -1619,6 +1627,9 @@ impl CanvasSession {
             self.shared.frame(st);
             return;
         }
+        if st.plugin_stepping > 0 {
+            return;
+        }
         if st.scene_shown() {
             st.scene_stroke_add(&samples, false);
             self.shared.frame(st);
@@ -1673,6 +1684,9 @@ impl CanvasSession {
         let st = &mut *guard;
         if st.plugin_touch(plugin_artwork::Phase::Up, &samples) {
             self.shared.frame(st);
+            return;
+        }
+        if st.plugin_stepping > 0 {
             return;
         }
         // a paint stroke's colour goes into the history (painting an adjustment on uses none)
@@ -1997,6 +2011,10 @@ impl CanvasSession {
 
     /// Undoes the last step; returns what it was called, if it was named.
     pub fn undo(&self) -> Option<String> {
+        // (not while a plugin changes the artwork: its step isn't one yet)
+        if self.shared.lock().plugin_stepping > 0 {
+            return None;
+        }
         // a plugin's own artwork goes back through what it kept; the canvas's own steps (an action's,
         // say) once it has none
         if self.plugin_undo(true) == Some(true) {
@@ -2046,6 +2064,9 @@ impl CanvasSession {
 
     /// Redoes the last step undone; returns what it was called, if it was named.
     pub fn redo(&self) -> Option<String> {
+        if self.shared.lock().plugin_stepping > 0 {
+            return None;
+        }
         if self.plugin_undo(false) == Some(true) {
             return None;
         }
