@@ -943,6 +943,7 @@ fn dump_brush_comparisons() {
 /// clear layer, at three sizes, with the pen's pressure rising and falling, as `<brush>.png` in
 /// `PROCRAFT_DUMP` (beside the file's own thumbnail, `<brush>-thumbnail.png`, when it has one).
 /// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p procraft-core dump_brush_strokes -- --ignored`
+/// (`BRUSH_SET` can be another app's brush file too: .abr, .sut, .kpp and the rest.)
 #[test]
 #[ignore]
 fn dump_brush_strokes() {
@@ -950,7 +951,9 @@ fn dump_brush_strokes() {
     let Ok(path) = std::env::var("BRUSH_SET") else { return };
     let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
     let Some(s) = session(1024, 1024) else { return };
-    let set = s.import_brushes(std::fs::read(path).unwrap()).unwrap();
+    // a set of ours, or another app's brushes
+    let bytes = std::fs::read(path).unwrap();
+    let set = s.import_brushes(bytes.clone()).or_else(|| s.import_other_brushes(bytes, "Dump".to_owned())).unwrap();
     let brushes: Vec<(u32, String)> =
         s.brush_library()[set as usize].brushes.iter().map(|b| (b.index, b.name.clone())).collect();
     for (index, name) in brushes {

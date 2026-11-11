@@ -328,7 +328,8 @@ fn folder_id(seed: u64, i: usize) -> String {
 /// A brush from a brush file: the studio's controls on a fresh brush, its images found or stood in
 /// for.
 /// A Photoshop tip fitted into a shape's square, centred on black: each pixel the average of the
-/// tip's pixels it covers (or the nearest one, drawn up).
+/// tip's pixels it covers, or (drawn up) between the four nearest, so a small tip made large is
+/// smooth, as other apps draw it, not in blocks.
 fn fitted(t: &procraft_engine::abr::AbrTip) -> Vec<u8> {
     fitted_at(t, TEXTURE_SIZE)
 }
@@ -344,6 +345,26 @@ fn fitted_at(t: &procraft_engine::abr::AbrTip, n: usize) -> Vec<u8> {
     let (tw, th) =
         (((w as f32 * scale).round() as usize).clamp(1, n), ((h as f32 * scale).round() as usize).clamp(1, n));
     let (ox, oy) = ((n - tw) / 2, (n - th) / 2);
+    if scale > 1.0 {
+        // drawn up: each pixel between the tip's four nearest (its edge carried on past it)
+        let get = |x: usize, y: usize| f32::from(t.pixels.get(y.min(h - 1) * w + x.min(w - 1)).copied().unwrap_or(0));
+        let place = |i: usize| {
+            let u = ((i as f32 + 0.5) / scale - 0.5).max(0.0);
+            (u.floor() as usize, u.fract())
+        };
+        for y in 0..th {
+            let (y0, fy) = place(y);
+            for x in 0..tw {
+                let (x0, fx) = place(x);
+                let top = get(x0, y0) * (1.0 - fx) + get(x0 + 1, y0) * fx;
+                let bottom = get(x0, y0 + 1) * (1.0 - fx) + get(x0 + 1, y0 + 1) * fx;
+                if let Some(v) = out.get_mut((oy + y) * n + ox + x) {
+                    *v = (top * (1.0 - fy) + bottom * fy).round() as u8;
+                }
+            }
+        }
+        return out;
+    }
     let span = |i: usize, most: usize| {
         let from = ((i as f32 / scale) as usize).min(most - 1);
         (from, (((i + 1) as f32 / scale).ceil() as usize).clamp(from + 1, most))
@@ -1766,6 +1787,31 @@ pub(crate) fn sized_gray_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_small_tip_is_drawn_up_smoothly_and_a_large_one_down_by_its_average() {
+        use procraft_engine::abr::AbrTip;
+        // two pixels side by side, black and white: drawn up, grey between them, not two blocks
+        let small = AbrTip { name: String::new(), spacing: None, width: 2, height: 2, pixels: vec![0, 255, 0, 255] };
+        let n = TEXTURE_SIZE;
+        let up = fitted(&small);
+        let row: Vec<u8> = up[n / 2 * n..n / 2 * n + n].to_vec();
+        assert_eq!((row[0], row[n - 1]), (0, 255));
+        assert!(row.windows(2).all(|p| p[0] <= p[1]), "rising from black to white");
+        let between = row.iter().filter(|&&v| v > 10 && v < 245).count();
+        assert!(between > n / 4, "{between} pixels between");
+        // a tip twice the square's size, in 2x2 checks: each pixel the average of the four it covers
+        let big = AbrTip {
+            name: String::new(),
+            spacing: None,
+            width: 2 * n as u32,
+            height: 2 * n as u32,
+            pixels: (0..4 * n * n)
+                .map(|i| if (i % (2 * n) + i / (2 * n)).is_multiple_of(2) { 255 } else { 0 })
+                .collect(),
+        };
+        assert!(fitted(&big).iter().all(|&v| v == 127));
+    }
 
     #[test]
     fn a_krita_texture_is_its_mask_combined_by_its_mode() {
