@@ -8,8 +8,8 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui
 use std::sync::Arc;
 
 use procraft_core::{
-    CanvasSession, ColourHistory, HueControl, Palettes, SLIDER_HUES, colours_in_p3, disc_picture, disc_to_square,
-    harmony_wheel, hue_at, hue_position, p3_hsv_of, p3_hsv_to_rgb, square_to_disc,
+    CanvasSession, ColourHistory, HueControl, Palettes, Plugins, SLIDER_HUES, colours_in_p3, disc_picture,
+    disc_to_square, harmony_wheel, hue_at, hue_position, p3_hsv_of, p3_hsv_to_rgb, square_to_disc,
 };
 
 use crate::colour_drop::{ColourDrop, Touch};
@@ -392,6 +392,12 @@ impl Colours {
     /// Whether Classic shows a plugin's triangle in place of its square.
     pub fn set_triangle(&mut self, on: bool) {
         self.pickers.triangle = on;
+    }
+
+    /// The picker plugin on, if any, and the session its picture is drawn with: Classic's square is
+    /// its.
+    pub fn set_picker(&mut self, picker: Option<(Arc<Plugins>, Arc<CanvasSession>)>) {
+        self.pickers.picker = picker;
     }
 
     /// Classic's square in `rect`, in the colour model; whether it changed the colour.
@@ -990,10 +996,12 @@ pub struct Pickers {
     /// brightness.
     square: Option<(u32, usize, ColourModel, TextureHandle)>,
     wheel: Option<(u32, usize, TextureHandle)>,
-    /// A plugin has Classic show a triangle in place of its square (HSB), and its picture for its
-    /// hue and size.
+    /// A plugin has Classic show a triangle in place of its square (HSB), or a picker plugin draws
+    /// it (its picture and where touches land); the picture for its hue and size, and whether a
+    /// picker plugin's.
     pub triangle: bool,
-    triangle_picture: Option<(u32, usize, TextureHandle)>,
+    pub picker: Option<(Arc<Plugins>, Arc<CanvasSession>)>,
+    triangle_picture: Option<(u32, usize, bool, TextureHandle)>,
     /// Harmony's hue, saturation and brightness (Display P3) as dragged to, with the colour they
     /// made: kept while that is the colour, not worked out again from it (a dark or greyish
     /// colour's would wander, and black's be lost).
@@ -1099,8 +1107,8 @@ impl Pickers {
     /// brightness up; returns whether it changed `hsv`.
     pub fn square(&mut self, ui: &Ui, hsv: &mut [f32; 3], square: Rect) -> bool {
         let model = self.model;
-        // a plugin's: a triangle in its place
-        if self.triangle && model == ColourModel::Hsb {
+        // a plugin's: its picker, or a triangle, in its place
+        if (self.triangle || self.picker.is_some()) && model == ColourModel::Hsb {
             return self.triangle(ui, hsv, square);
         }
         let ctx = ui.ctx().clone();
@@ -1133,35 +1141,49 @@ impl Pickers {
         *hsv != before
     }
 
-    /// A plugin's triangle in Classic's square `area`, as big as fits: saturation and brightness
-    /// between the pure hue (right), white (top left) and black (bottom left); returns whether it
-    /// changed `hsv`.
+    /// A plugin's picker in Classic's square `area`, as big as fits: a picker plugin's picture,
+    /// touches and knob, or else a triangle (saturation and brightness between the pure hue at the
+    /// right, white at the top left and black at the bottom left); returns whether it changed `hsv`.
     fn triangle(&mut self, ui: &Ui, hsv: &mut [f32; 3], area: Rect) -> bool {
         let side = area.width().min(area.height());
         let rect = Rect::from_center_size(area.center(), vec2(side, side));
         let ctx = ui.ctx().clone();
         let before = *hsv;
+        let picker = self.picker.clone();
+        let pick = |x: f32, y: f32| match &picker {
+            Some((plugins, _)) => plugins.picker_pick(x, y),
+            None => Some(procraft_core::triangle_sv(x, y)),
+        };
         let response = ui.interact(rect, ui.scope_id().with("classic triangle"), Sense::click_and_drag());
-        if let Some(p) = response.interact_pointer_pos() {
-            let sv = procraft_core::triangle_sv((p.x - rect.left()) / side, (p.y - rect.top()) / side);
-            if let [s, v] = sv[..] {
-                hsv[1] = s;
-                hsv[2] = v;
-            }
+        if let Some(p) = response.interact_pointer_pos()
+            && let Some([s, v]) = pick((p.x - rect.left()) / side, (p.y - rect.top()) / side).as_deref()
+        {
+            hsv[1] = *s;
+            hsv[2] = *v;
         }
         let hue_key = (hsv[0] * 10_000.0).round() as u32;
         let px = (side * ctx.pixels_per_point()).round() as usize;
-        if self.triangle_picture.as_ref().is_none_or(|(h, at, _)| *h != hue_key || *at != px) {
-            let rgba = procraft_core::triangle_picture(hsv[0], px as u32);
-            let image = egui::ColorImage::from_rgba_premultiplied([px, px], &rgba);
-            let texture = ctx.load_texture("classic triangle", image, TextureOptions::LINEAR);
-            self.triangle_picture = Some((hue_key, px, texture));
+        let plugin = picker.is_some();
+        let stale = |(h, at, by, _): &(u32, usize, bool, TextureHandle)| *h != hue_key || *at != px || *by != plugin;
+        if self.triangle_picture.as_ref().is_none_or(stale) {
+            let rgba = match &picker {
+                Some((_, session)) => session.picker_picture(hsv[0], px as u32),
+                None => Some(procraft_core::triangle_picture(hsv[0], px as u32)),
+            };
+            // (a picture that couldn't be drawn shows none; its plugin goes off)
+            self.triangle_picture = rgba.filter(|rgba| rgba.len() == px * px * 4).map(|rgba| {
+                let image = egui::ColorImage::from_rgba_premultiplied([px, px], &rgba);
+                (hue_key, px, plugin, ctx.load_texture("classic triangle", image, TextureOptions::LINEAR))
+            });
         }
-        if let Some((_, _, t)) = &self.triangle_picture {
+        if let Some((_, _, _, t)) = &self.triangle_picture {
             ui.painter().image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
-        let at = procraft_core::triangle_point(hsv[1], hsv[2]);
-        if let [x, y] = at[..] {
+        let at = match &picker {
+            Some((plugins, _)) => plugins.picker_point(hsv[1], hsv[2]),
+            None => Some(procraft_core::triangle_point(hsv[1], hsv[2])),
+        };
+        if let Some([x, y]) = at.as_deref() {
             knob(ui, pos2(rect.left() + x * side, rect.top() + y * side), 10.75, srgb(ColourModel::Hsb.to_rgb(*hsv)));
         }
         *hsv != before

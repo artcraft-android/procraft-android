@@ -35,6 +35,8 @@ const MOST_MANIFEST: usize = 64 << 10;
 const MOST_SHADER: usize = 64 << 10;
 /// A filter's code in its folder.
 pub(crate) const FILTER_CODE: &str = "filter.wgsl";
+/// A picker's picture's code in its folder (code on the `picker` hook brings it).
+pub(crate) const PICTURE_CODE: &str = "picture.wgsl";
 /// How far an entry may shrink in the archive, from this size on: text never gets near it.
 const MOST_RATIO: usize = 100;
 const RATIO_FROM: usize = 64 << 10;
@@ -543,6 +545,10 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     } else if !raw.hooks.is_empty() {
         return Err(Refusal::Described);
     }
+    // a picker brings its picture, and only a picker has one
+    if fits(PICTURE_CODE, MOST_SHADER) != hooks.contains(&Hook::Picker).then_some(true) {
+        return Err(Refusal::Described);
+    }
     // a filter's controls are its own, so none of them can be a moved setting
     if has(PluginPart::Filter) && controls.iter().any(|c| !c.key().starts_with(&format!("{id}."))) {
         return Err(Refusal::Described);
@@ -606,6 +612,12 @@ fn code_refused(manifest: &Manifest, path: &str, data: &[u8]) -> Option<Refusal>
         let read = text.and_then(|text| procraft_gpu::read_filter(text, &value_names(&manifest.controls)));
         let refused = read.map_err(|why| log::warn!("a filter's code was refused: {why}")).is_err();
         return refused.then_some(Refusal::FilterCode);
+    }
+    if manifest.hooks.contains(&Hook::Picker) && path == PICTURE_CODE {
+        let text = std::str::from_utf8(data).map_err(|e| e.to_string());
+        let read = text.and_then(|text| procraft_gpu::read_picture(text).map(|_| ()));
+        let refused = read.map_err(|why| log::warn!("a picture's code was refused: {why}")).is_err();
+        return refused.then_some(Refusal::Code);
     }
     let code = manifest.holds.contains(&PluginPart::Hooks) && path == MODULE;
     let (controls, actions) = (!manifest.controls.is_empty(), !manifest.actions.is_empty());
@@ -818,6 +830,13 @@ pub(crate) fn read_code(dir: &Path, id: &str, version: &str) -> Option<(Vec<Hook
     let folder = dir.join(id).join(version);
     let manifest = read_folder(&folder, id, version)?;
     Some((manifest.hooks, read_capped(&folder.join(MODULE), MOST_MODULE)?))
+}
+
+/// The picture's code of the picker `id` at `version` in `dir`, if it holds up as it did.
+pub(crate) fn read_picture_code(dir: &Path, id: &str, version: &str) -> Option<String> {
+    let folder = dir.join(id).join(version);
+    read_folder(&folder, id, version)?;
+    String::from_utf8(read_capped(&folder.join(PICTURE_CODE), MOST_SHADER)?).ok()
 }
 
 /// The manifest and the code of the filter `id` at `version` in `dir`, if all of it holds up as it
@@ -1631,6 +1650,38 @@ pub(crate) mod tests {
         let filter = with(a_filter(), "/permissions", json!(["brush"]));
         assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
         assert_eq!(of("/compat/procraft/interface", json!(1)), Refusal::Described);
+    }
+
+    /// A picker plugin's file: its module and its picture's code (`picture`, if any).
+    pub(crate) fn picker_file(id: &str, picture: Option<&str>) -> Vec<u8> {
+        let module = wat::parse_str(crate::plugin_run::tests::PICKS).unwrap();
+        let mut manifest = coded(id, &module);
+        manifest["hooks"] = json!(["picker"]);
+        let mut files: Vec<(&str, &[u8])> = vec![(MODULE, &module)];
+        if let Some(text) = picture {
+            let listed = json!({ "path": PICTURE_CODE, "sha256": sha256(text.as_bytes()), "size": text.len() });
+            manifest["files"].as_array_mut().unwrap().push(listed);
+            files.push((PICTURE_CODE, text.as_bytes()));
+        }
+        pack(&manifest, &files)
+    }
+
+    #[test]
+    fn a_picker_brings_its_picture_and_only_a_picker_has_one() {
+        let picture = crate::plugin_run::tests::PICTURE;
+        let package = read_package(&picker_file("org.example.picker", Some(picture))).unwrap();
+        assert_eq!(package.manifest.hooks, [Hook::Picker]);
+        // without its picture it isn't written right, nor with code that isn't a picture
+        assert_eq!(refusal(&picker_file("org.example.picker", None)), Refusal::Described);
+        let reaches = "fn picture(at: vec2<f32>) -> vec4<f32> { return layer_at(at); }";
+        assert_eq!(refusal(&picker_file("org.example.picker", Some(reaches))), Refusal::Code);
+        // and a plugin on another hook can't bring one
+        let module = a_module();
+        let mut manifest = coded("org.example.plugin", &module);
+        let listed = json!({ "path": PICTURE_CODE, "sha256": sha256(picture.as_bytes()), "size": picture.len() });
+        manifest["files"].as_array_mut().unwrap().push(listed);
+        let file = pack(&manifest, &[(MODULE, &module), (PICTURE_CODE, picture.as_bytes())]);
+        assert_eq!(refusal(&file), Refusal::Described);
     }
 
     #[test]

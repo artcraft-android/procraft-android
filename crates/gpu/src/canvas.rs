@@ -21,6 +21,7 @@ use wgpu::util::DeviceExt;
 use crate::{Gpu, GpuError};
 
 pub(crate) mod plugin_filter;
+pub(crate) mod plugin_picture;
 
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 

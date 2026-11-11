@@ -2,11 +2,11 @@
   "schema": 1,
   "id": "io.github.artcraftandroid.colour-triangle",
   "name": "Colour triangle",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "holds": ["hooks"],
   "publisher": { "name": "ProCraft" },
   "description": "The colour panel's Classic tab picks saturation and brightness in a triangle instead of a square.",
-  "compat": { "procraft": { "interface": 1 } },
+  "compat": { "procraft": { "interface": 2 } },
   "permissions": [],
-  "hooks": ["colour_triangle"]
+  "hooks": ["picker"]
 }

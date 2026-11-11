@@ -21,6 +21,9 @@ object Pc {
     /** A plugin has the colour panel's Classic show a triangle in place of its square. */
     var colourTriangle by mutableStateOf(false)
 
+    /** A picker plugin's Classic square, while one is on: its picture, and where touches land and the knob sits. */
+    var picker by mutableStateOf<ClassicPicker?>(null)
+
     /** The accent a plugin gives the interface, if one does: drawn in place of the interface's blues. */
     var accentGiven by mutableStateOf<Color?>(null)
 
@@ -294,3 +297,14 @@ object CanvasSpace {
         return tagged
     }
 }
+
+/**
+ * A picker plugin's Classic square: [pick] gives the saturation and brightness at a point and [point] where they sit
+ * (points 0..1 across and down); [picture] draws it for a hue, a side in pixels, premultiplied RGBA (none if it
+ * couldn't be drawn: its plugin goes off).
+ */
+class ClassicPicker(
+    val pick: (Float, Float) -> List<Float>?,
+    val point: (Float, Float) -> List<Float>?,
+    val picture: (Float, Int) -> ByteArray?,
+)

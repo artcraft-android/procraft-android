@@ -461,6 +461,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun followPluginLooks() {
         io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
+        io.github.artcraftandroid.procraft.ui.Pc.picker = if (plugins.pickerOn()) {
+            io.github.artcraftandroid.procraft.ui.ClassicPicker(
+                pick = { x, y -> plugins.pickerPick(x, y) },
+                point = { s, v -> plugins.pickerPoint(s, v) },
+                picture = { hue, n -> session?.pickerPicture(hue, n.toUInt()) },
+            )
+        } else {
+            null
+        }
         tweensOn = plugins.tweens()
         followStrokeSound()
     }

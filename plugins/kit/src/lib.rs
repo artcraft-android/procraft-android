@@ -10,7 +10,8 @@
 //! ```
 //!
 //! Each macro exports the functions its hook asks for, with the memory handed over and back taken
-//! care of. A plugin's actions (things it does when tapped, [`actions!`]) call the app's functions
+//! care of ([`picker!`] for the colour panel's Classic square, beside its `picture.wgsl`). A
+//! plugin's actions (things it does when tapped, [`actions!`]) call the app's functions
 //! in [`app`]: adding a layer, painting on it, setting the brush. Without the `std` feature only
 //! [`Controls`], [`controls!`], [`yes!`], [`answer!`] and [`position!`] are there, for the smallest
 //! plugins.
@@ -119,6 +120,29 @@ macro_rules! position {
             let moved: fn(f32, f32) -> (f32, f32) = $moved;
             let (to_x, to_y) = moved(x, y);
             (u64::from(to_x.to_bits()) | (u64::from(to_y.to_bits()) << 32)) as i64
+        }
+    };
+}
+
+/// Exports the picker hook: `$pick` (a `fn(x: f32, y: f32) -> (f32, f32)`) says the saturation and
+/// brightness a point of Classic's square picks, and `$point` (a `fn(s: f32, v: f32) -> (f32, f32)`)
+/// where they sit on it; points are 0..1 across and down. The picture is the plugin's
+/// `picture.wgsl`.
+#[macro_export]
+macro_rules! picker {
+    ($pick:expr, $point:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn procraft_picker_pick(x: f32, y: f32) -> i64 {
+            let pick: fn(f32, f32) -> (f32, f32) = $pick;
+            let (s, v) = pick(x, y);
+            (u64::from(s.to_bits()) | (u64::from(v.to_bits()) << 32)) as i64
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn procraft_picker_point(s: f32, v: f32) -> i64 {
+            let point: fn(f32, f32) -> (f32, f32) = $point;
+            let (x, y) = point(s, v);
+            (u64::from(x.to_bits()) | (u64::from(y.to_bits()) << 32)) as i64
         }
     };
 }

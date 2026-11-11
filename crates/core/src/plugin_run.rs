@@ -42,6 +42,10 @@
 //!   (0 to 1), or below 0 to leave it; `seed` is the same for every setting of one press.
 //! - `procraft_colour_triangle() -> i32`: for the hook `colour_triangle`, whether the colour
 //!   panel's Classic shows a triangle in place of its square (not 0).
+//! - For the hook `picker` (interface 2; the colour panel's Classic square drawn the plugin's way,
+//!   its picture the plugin's `picture.wgsl`): `procraft_picker_pick(x: f32, y: f32) -> i64` gives
+//!   the saturation and brightness at a point of the square (0..1, y down) and
+//!   `procraft_picker_point(s: f32, v: f32) -> i64` where they sit, each pair packed as `position`'s.
 //! - For the hook `quickshape_curve` (a curve QuickShape may snap to, the plugin's):
 //!   `procraft_curve_begin(count: i32, best: i32) -> i32` gives where the stroke's `count` points go
 //!   (x and y each, 32-bit floats, window pixels), `best` the kind QuickShape found first (its place
@@ -148,6 +152,8 @@ const PIN_PANELS: &str = "procraft_pin_panels";
 const OPACITY_TOGETHER: &str = "procraft_opacity_together";
 const RANDOMISE: &str = "procraft_randomise";
 const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
+const PICKER_PICK: &str = "procraft_picker_pick";
+const PICKER_POINT: &str = "procraft_picker_point";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -195,6 +201,7 @@ pub(crate) enum Hook {
     QuickshapeCurve,
     StrokeSound,
     Inbetween,
+    Picker,
 }
 
 impl Hook {
@@ -216,6 +223,7 @@ impl Hook {
             "quickshape_curve" => Some(Hook::QuickshapeCurve),
             "stroke_sound" => Some(Hook::StrokeSound),
             "inbetween" => Some(Hook::Inbetween),
+            "picker" => Some(Hook::Picker),
             _ => None,
         }
     }
@@ -239,6 +247,7 @@ impl Hook {
             Hook::QuickshapeCurve => "This plugin can make QuickShape snap strokes to curves.",
             Hook::StrokeSound => "This plugin can play a sound as you draw.",
             Hook::Inbetween => "This plugin can draw frames between your animation's frames.",
+            Hook::Picker => "This plugin can draw the colour panel's Classic picker its own way.",
         }
     }
 
@@ -260,6 +269,10 @@ impl Hook {
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
+            Hook::Picker => {
+                exports(module, PICKER_PICK, &[ValType::F32, ValType::F32], &[ValType::I64])
+                    && exports(module, PICKER_POINT, &[ValType::F32, ValType::F32], &[ValType::I64])
+            }
             Hook::QuickshapeCurve => {
                 exports(module, CURVE_BEGIN, &[ValType::I32, ValType::I32], &[ValType::I32])
                     && exports(module, CURVE_RUN, &[], &[ValType::I32])
@@ -295,6 +308,22 @@ impl Hook {
             }
         }
     }
+}
+
+/// Two numbers `func` answers for `asked`, packed as the position hook's are, each put in 0..1; a
+/// number that isn't one stops it.
+fn picker_pair(
+    store: &mut Store<Host>,
+    func: &TypedFunc<(f32, f32), i64>,
+    asked: (f32, f32),
+) -> Result<(f32, f32), Stop> {
+    let packed = guarded(|| {
+        store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+        func.call(&mut *store, asked).map_err(|e| stop_of(&e))
+    })?;
+    let bits = packed as u64;
+    let (a, b) = (f32::from_bits(bits as u32), f32::from_bits((bits >> 32) as u32));
+    if a.is_finite() && b.is_finite() { Ok((a.clamp(0.0, 1.0), b.clamp(0.0, 1.0))) } else { Err(Stop::Nonsense) }
 }
 
 /// Why a plugin stopped, or never ran. Each stays on its card, in plain words.
@@ -492,6 +521,8 @@ pub(crate) struct Running {
     opacity_together: Option<TypedFunc<(), i32>>,
     randomise: Option<TypedFunc<(i32, i32), f32>>,
     colour_triangle: Option<TypedFunc<(), i32>>,
+    picker_pick: Option<TypedFunc<(f32, f32), i64>>,
+    picker_point: Option<TypedFunc<(f32, f32), i64>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -589,6 +620,8 @@ impl Running {
             let opacity_together = instance.get_typed_func(&store, OPACITY_TOGETHER).ok();
             let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
+            let picker_pick = instance.get_typed_func(&store, PICKER_PICK).ok();
+            let picker_point = instance.get_typed_func(&store, PICKER_POINT).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -632,6 +665,8 @@ impl Running {
                 opacity_together,
                 randomise,
                 colour_triangle,
+                picker_pick,
+                picker_point,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -929,6 +964,22 @@ impl Running {
         Ok(said != 0)
     }
 
+    /// The saturation and brightness it says the point (`x`, `y`) of its picker (0..1 each way, y
+    /// down) picks; none if it has no picker.
+    pub(crate) fn picker_pick(&mut self, x: f32, y: f32) -> Result<Option<(f32, f32)>, Stop> {
+        let Running { store, picker_pick, .. } = self;
+        let Some(pick) = picker_pick else { return Ok(None) };
+        picker_pair(store, pick, (x, y)).map(Some)
+    }
+
+    /// Where it says saturation `s` and brightness `v` sit on its picker (0..1 each way, y down);
+    /// none if it has no picker.
+    pub(crate) fn picker_point(&mut self, s: f32, v: f32) -> Result<Option<(f32, f32)>, Stop> {
+        let Running { store, picker_point, .. } = self;
+        let Some(point) = picker_point else { return Ok(None) };
+        picker_pair(store, point, (s, v)).map(Some)
+    }
+
     /// Where it says brush setting `setting` goes, as a share of its range (none: left as it is).
     pub(crate) fn randomise(&mut self, setting: i32, seed: i32) -> Result<Option<f32>, Stop> {
         let Running { store, randomise, .. } = self;
@@ -1106,6 +1157,20 @@ impl Running {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A picker that flips each answer upside down: a point (x, y) picks (x, 1 - y), and (s, v) sits at
+    /// (s, 1 - v).
+    pub(crate) const PICKS: &str = r#"(module
+        (func $flip (param f32 f32) (result i64)
+            (i64.or
+                (i64.extend_i32_u (i32.reinterpret_f32 (local.get 0)))
+                (i64.shl (i64.extend_i32_u (i32.reinterpret_f32 (f32.sub (f32.const 1) (local.get 1)))) (i64.const 32))))
+        (func (export "procraft_picker_pick") (param f32 f32) (result i64) (call $flip (local.get 0) (local.get 1)))
+        (func (export "procraft_picker_point") (param f32 f32) (result i64) (call $flip (local.get 0) (local.get 1))))"#;
+
+    /// A picture: red across, green down, the hue in blue.
+    pub(crate) const PICTURE: &str =
+        "fn picture(at: vec2<f32>) -> vec4<f32> { return vec4<f32>(at.x, at.y, hue(), 1.0); }";
 
     /// An action that adds a layer named "Grid" and paints a 10 x 10 red square at (20, 30) on it.
     pub(crate) const ACTS: &str = r#"(module

@@ -4,8 +4,8 @@
     python tools/pack_plugin.py --bundle
 
 With no name it packs them all. What goes in is what the manifest's `holds` says: for `hooks`, the
-folder's crate built to WebAssembly (rustup target add wasm32-unknown-unknown); for `filter`, its
-text. A file is a zip of the craft-extension.json, with those listed by size and SHA-256 as the app
+folder's crate built to WebAssembly (rustup target add wasm32-unknown-unknown), and for code on the
+`picker` hook its picture.wgsl too; for `filter`, its text. A file is a zip of the craft-extension.json, with those listed by size and SHA-256 as the app
 asks, and them (plugin.wasm, filter.wgsl or both). They land in target/plugins unless --out says
 where. A file packed again from the same folder comes out the same, byte for byte.
 
@@ -27,6 +27,7 @@ PLUGINS = os.path.join(ROOT, 'plugins')
 TARGET = 'wasm32-unknown-unknown'
 MODULE = 'plugin.wasm'
 FILTER = 'filter.wgsl'
+PICTURE = 'picture.wgsl'
 MANIFEST = 'craft-extension.json'
 TARGET_DIR = os.path.join(ROOT, 'target', 'plugins')
 BUNDLED = os.path.join(ROOT, 'crates', 'core', 'bundled-plugins')
@@ -94,6 +95,10 @@ def pack(name, out):
     if 'filter' in manifest['holds']:
         with open(os.path.join(folder, FILTER), 'rb') as f:
             files[FILTER] = f.read()
+    # a picker brings its picture
+    if 'picker' in manifest.get('hooks', []):
+        with open(os.path.join(folder, PICTURE), 'rb') as f:
+            files[PICTURE] = f.read()
     manifest['files'] = [
         {'path': path, 'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data)} for path, data in files.items()
     ]

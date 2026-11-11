@@ -25,6 +25,8 @@ struct OnHook {
     hooks: u32,
     /// The keys of its rows in the brush studio, in their order.
     brush_keys: Vec<String>,
+    /// On the picker hook: its picture's code.
+    picture: Option<Arc<str>>,
 }
 
 #[derive(Default)]
@@ -349,8 +351,46 @@ impl Hooks {
         working.on.retain(|p| p.id != id);
         let at = working.on.partition_point(|p| p.id < id);
         let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
-        working.on.insert(at, OnHook { id, running: Arc::new(Mutex::new(running)), hooks, brush_keys: Vec::new() });
+        let running = Arc::new(Mutex::new(running));
+        working.on.insert(at, OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None });
         self.rehook(&working);
+    }
+
+    /// `id`'s picture's code, for the picker hook.
+    pub(crate) fn give_picture(&self, id: &str, text: String) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.picture = Some(text.into());
+        }
+    }
+
+    /// The picker hook's plugin (the first on it): its id and its picture's code.
+    pub(crate) fn picker(&self) -> Option<(String, Arc<str>)> {
+        if !self.has(Hook::Picker) {
+            return None;
+        }
+        let working = self.working();
+        let on = working.on.iter().find(|p| p.hooks & Hook::Picker.bit() != 0)?;
+        Some((on.id.clone(), Arc::clone(on.picture.as_ref()?)))
+    }
+
+    /// The picker hook: the saturation and brightness a point of the picker picks (0..1, y down).
+    pub(crate) fn picker_pick(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        if !self.has(Hook::Picker) {
+            return None;
+        }
+        self.through(Hook::Picker, None, |running, got| if got.is_some() { Ok(got) } else { running.picker_pick(x, y) })
+    }
+
+    /// The picker hook: where saturation `s` and brightness `v` sit on the picker (0..1, y down).
+    pub(crate) fn picker_point(&self, s: f32, v: f32) -> Option<(f32, f32)> {
+        if !self.has(Hook::Picker) {
+            return None;
+        }
+        self.through(
+            Hook::Picker,
+            None,
+            |running, got| if got.is_some() { Ok(got) } else { running.picker_point(s, v) },
+        )
     }
 
     /// The keys of `id`'s rows in the brush studio, in their order.
@@ -412,6 +452,39 @@ impl CanvasSession {
     pub fn use_plugins(&self, plugins: Arc<Plugins>) {
         let hooks = plugins.hooks();
         self.shared.lock().hooks = Some(hooks);
+    }
+
+    /// The picker plugin's picture for `hue` (0..1), `side` pixels square: premultiplied RGBA rows,
+    /// drawn on the GPU (it is compiled once). None with no picker plugin on or no GPU yet, or if it
+    /// couldn't be drawn: one that runs away or takes too long goes off, and says why.
+    pub fn picker_picture(&self, hue: f32, side: u32) -> Option<Vec<u8>> {
+        let (hooks, gpu, cached) = {
+            let st = self.shared.lock();
+            (st.hooks.clone()?, st.gpu.clone()?, st.picker_program.clone())
+        };
+        let (id, text) = hooks.picker()?;
+        let program = match cached.filter(|(was, code, _)| *was == id && *code == text) {
+            Some((_, _, program)) => program,
+            None => {
+                let code = procraft_gpu::read_picture(&text).map_err(|why| log::warn!("a picture was refused: {why}"));
+                let made = code.ok().and_then(|code| gpu.make_picture(code).ok());
+                let Some(program) = made else {
+                    hooks.stopped(&id, Stop::Damaged);
+                    return None;
+                };
+                self.shared.lock().picker_program = Some((id.clone(), Arc::clone(&text), Arc::clone(&program)));
+                program
+            }
+        };
+        match gpu.draw_picture(&program, hue, side) {
+            Ok(rgba) => Some(rgba),
+            // asked bigger than it can be drawn, or the device gone: not the plugin's doing
+            Err(procraft_gpu::PictureStop::TooBig | procraft_gpu::PictureStop::Lost) => None,
+            Err(procraft_gpu::PictureStop::Spent | procraft_gpu::PictureStop::Cut) => {
+                hooks.stopped(&id, Stop::TooSlow);
+                None
+            }
+        }
     }
 
     /// The notice an undo (`undo`) or a redo of the step `name` shows: "Undo Brush stroke", or
@@ -693,6 +766,49 @@ pub(crate) mod tests {
         assert!(plugins.panel().is_some());
         assert!(plugins.set_on(ID.to_owned(), false));
         assert_eq!(plugins.panel(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_picker_plugin_draws_classic_and_says_where_touches_land() {
+        let Some(s) = session() else { return };
+        let dir = store("picker");
+        let plugins = Plugins::with_store(dir.clone());
+        let file = crate::plugin_file::tests::picker_file(ID, Some(crate::plugin_run::tests::PICTURE));
+        assert_eq!(plugins.install(file), None);
+        assert!(!plugins.picker_on(), "off until turned on");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        assert!(plugins.picker_on());
+        assert_eq!(plugins.picker_pick(0.25, 0.75), Some(vec![0.25, 0.25]));
+        assert_eq!(plugins.picker_point(0.5, 0.0), Some(vec![0.5, 1.0]));
+        // its picture, for the hue asked: red across, green down, the hue in blue
+        let rgba = s.picker_picture(0.5, 8).expect("drawn");
+        assert_eq!(rgba.len(), 8 * 8 * 4);
+        let last = &rgba[rgba.len() - 4..];
+        assert!(last[0] > 230 && last[1] > 230 && (last[2] as i32 - 128).abs() <= 1 && last[3] == 255, "{last:?}");
+        // off, there is none
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert!(!plugins.picker_on());
+        assert_eq!(s.picker_picture(0.5, 8), None);
+        assert_eq!(plugins.picker_pick(0.25, 0.75), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_picker_picture_that_never_ends_switches_its_plugin_off() {
+        let Some(s) = session() else { return };
+        let dir = store("picker-loops");
+        let plugins = Plugins::with_store(dir.clone());
+        let loops =
+            "fn picture(at: vec2<f32>) -> vec4<f32> { var x = at.x; loop { x = x + 1.0; } return vec4<f32>(x); }";
+        assert_eq!(plugins.install(crate::plugin_file::tests::picker_file(ID, Some(loops))), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(s.picker_picture(0.0, 64), None);
+        let card = plugins.plugins().into_iter().find(|p| p.id == ID).unwrap();
+        assert!(!card.on);
+        assert_eq!(card.problem.as_deref(), Some("Switched off: it took too long."));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

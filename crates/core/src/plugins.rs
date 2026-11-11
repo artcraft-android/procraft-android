@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::hooks::Hooks;
 use crate::plugin_file::{self, Added, Manifest, Refusal};
-use crate::plugin_run::{Running, Stop};
+use crate::plugin_run::{Hook, Running, Stop};
 
 /// A setting the app used to have and a plugin now brings: what it was kept under, as it started
 /// (a switch off is 0), and its name. Its value stays there for the plugin, whose control says so.
@@ -593,6 +593,13 @@ impl Plugins {
             Ok((running, hooks)) => {
                 self.hooks.put_on(plugin.id.clone(), running, &hooks);
                 self.hooks.brush_keys(&plugin.id, plugin.brush_controls.iter().map(|c| c.key.clone()).collect());
+                // a picker's picture, for the sessions to draw
+                if hooks.contains(&Hook::Picker)
+                    && let Some(text) =
+                        store.and_then(|store| plugin_file::read_picture_code(store, &plugin.id, &plugin.version))
+                {
+                    self.hooks.give_picture(&plugin.id, text);
+                }
                 // the files picked for it, handed over
                 for (at, control) in plugin.controls.iter().enumerate() {
                     if let (Some(store), PluginControl::File { control }) = (store, control)
@@ -1124,6 +1131,24 @@ impl Plugins {
     /// [`crate::CanvasSession::stroke_sound`] while one does.
     pub fn makes_stroke_sound(&self) -> bool {
         self.hooks().makes_stroke_sound()
+    }
+
+    /// Whether a plugin on draws the colour panel's Classic square its own way: its picture
+    /// ([`crate::CanvasSession::picker_picture`]) and where touches land on it.
+    pub fn picker_on(&self) -> bool {
+        self.hooks().picker().is_some()
+    }
+
+    /// The saturation and brightness the picker plugin says point (`x`, `y`) of the Classic square
+    /// picks (0..1, y down): `[s, v]`, or none with no picker plugin on.
+    pub fn picker_pick(&self, x: f32, y: f32) -> Option<Vec<f32>> {
+        self.hooks().picker_pick(x, y).map(|(s, v)| vec![s, v])
+    }
+
+    /// Where the picker plugin says saturation `s` and brightness `v` sit on the Classic square
+    /// (0..1, y down): `[x, y]`, or none with no picker plugin on.
+    pub fn picker_point(&self, s: f32, v: f32) -> Option<Vec<f32>> {
+        self.hooks().picker_point(s, v).map(|(x, y)| vec![x, y])
     }
 
     /// Whether a plugin has the colour panel's Classic show a triangle (saturation and brightness
@@ -1918,7 +1943,10 @@ mod tests {
         assert_eq!(plugins.accent_colour(), Some(0xFD0000));
         assert!(plugins.set_slider(format!("{COLOUR}.saturation"), 0.0).is_some());
         assert_eq!(plugins.accent_colour(), Some(0xFDFDFD));
-        assert!(plugins.colour_triangle());
+        // the triangle draws Classic, and says where a touch lands: its right corner is the pure hue
+        assert!(plugins.picker_on());
+        let corner = plugins.picker_pick(0.933, 0.5).unwrap();
+        assert!(corner.iter().all(|share| (share - 1.0).abs() < 1e-3), "{corner:?}");
         // kept, so through a restart
         let next = app_at(&dir);
         read_lines(&next, &plugins.kept_lines());
@@ -1933,7 +1961,7 @@ mod tests {
         assert_eq!(landing(&plugins), UNTOUCHED);
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
         assert_eq!(plugins.accent_colour(), None);
-        assert!(!plugins.colour_triangle());
+        assert!(!plugins.picker_on());
         assert!(!plugins.hooks().pick_layer() && !plugins.hooks().paste_mask() && !plugins.hooks().fill_mask());
         let _ = std::fs::remove_dir_all(&dir);
     }

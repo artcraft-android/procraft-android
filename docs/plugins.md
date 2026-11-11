@@ -377,11 +377,39 @@ Randomise is one change to the brush: Cancel or Reset brush takes it back.
 
 Whether the colour panel's Classic tab shows a triangle in place of its square (not 0): saturation and
 brightness between the pure hue (its right corner), white (top left) and black (bottom left). The hue
-slider and the others under it stay as they are.
+slider and the others under it stay as they are. It stays for plugins written to it; `picker` does
+this and more.
 
 ```
 procraft_colour_triangle() -> i32
 ```
+
+### `picker`
+
+The plugin draws the colour panel's Classic square its own way (interface 2). It brings the picture
+as WGSL in `picture.wgsl`, beside its module, which the app draws on the GPU each time the hue changes.
+Its code says where a touch lands and where the knob sits. Points go 0 to 1 across and down the
+square, and saturation and brightness go 0 to 1. Each pair comes back packed as `position`'s do.
+
+```
+procraft_picker_pick(x: f32, y: f32) -> i64     // the saturation and brightness at (x, y)
+procraft_picker_point(s: f32, v: f32) -> i64    // where they sit
+```
+
+`picture.wgsl` has one function, `picture`. It's asked for the colour (straight, not premultiplied)
+at each pixel's centre, and given `hue()` (0 to 1 round the wheel from red) and `picture_size()` in
+pixels:
+
+```wgsl
+fn picture(at: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(at.x, 1.0 - at.y, hue(), 1.0);
+}
+```
+
+It's checked as a filter's function is (see [What is refused](#what-is-refused)): it reaches
+nothing, and its loops pay from a budget. A picture that runs out of budget, or takes too long,
+switches the plugin off. `tools/pack_plugin.py` packs `picture.wgsl` for a plugin on this hook. The
+kit's `picker!` writes the two functions, and `plugins/colour-triangle` is one to start from.
 
 ### `inbetween`
 

@@ -779,7 +779,13 @@ impl Interface {
         if self.open != Some(Popover::Layers) {
             self.end_background_pick(session);
         }
-        // the colour panel dragged out by its grabber: a window over the canvas until closed
+        // the colour panel dragged out by its grabber: a window over the canvas until closed, its
+        // Classic as the plugins on now draw it
+        if self.colours.floating.is_some() {
+            self.colours.set_triangle(self.prefs.plugins.colour_triangle());
+            let picker = self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
+            self.colours.set_picker(picker);
+        }
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
         // the colour model chosen on the panel, kept; the panel works in the one kept
         if let Some(model) = self.colours.model_chosen.take() {
@@ -2216,12 +2222,14 @@ impl Interface {
     fn background_panel(
         &mut self,
         ctx: &egui::Context,
-        session: &CanvasSession,
+        session: &Arc<CanvasSession>,
         button: Rect,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let Some(pick) = self.background_pick.as_mut() else { return Rect::NOTHING };
         self.colours.set_triangle(self.prefs.plugins.colour_triangle());
+        let picker = self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
+        self.colours.set_picker(picker);
         let brush = std::mem::replace(&mut self.colours.hsv, pick.hsv);
         self.colours.background = true;
         let history = self.prefs.colour_history_shown;
@@ -2310,6 +2318,9 @@ impl Interface {
             }
             Popover::Colour => {
                 self.colours.set_triangle(self.prefs.plugins.colour_triangle());
+                let picker =
+                    self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
+                self.colours.set_picker(picker);
                 let shown = self.prefs.colour_history_shown;
                 let history = &mut self.prefs.colour_history_shown;
                 let rect = self.colours.show(ctx, &mut self.look, session, &mut self.drop, button, history, backdrops);

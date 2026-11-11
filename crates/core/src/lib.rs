@@ -411,6 +411,8 @@ pub(crate) struct State {
     pub(crate) brush_on_screen: bool,
     /// What samples go through on their way to a stroke, if anything.
     pub(crate) hooks: Option<Arc<hooks::Hooks>>,
+    /// The picker plugin's picture, compiled for this session's GPU: whose it is, and its code.
+    pub(crate) picker_program: Option<(String, Arc<str>, Arc<procraft_gpu::PictureProgram>)>,
     /// When the stroke's input was last heard, for a sound plugin.
     pub(crate) sound_heard: Option<std::time::Instant>,
     /// Where the pen last hovered (window pixels) and when, for the spray can's rattle.
@@ -1286,6 +1288,7 @@ impl CanvasSession {
             selection_visibility: 0.25,
             brush_on_screen: false,
             hooks: None,
+            picker_program: None,
             sound_heard: None,
             sound_hover: None,
             input: procraft_engine::stroke::InputSettings::default(),
