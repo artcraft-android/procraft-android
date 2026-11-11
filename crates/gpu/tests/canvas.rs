@@ -2412,6 +2412,47 @@ fn paint_laid_in_place_turns_a_mirrored_stamp_s_shape() {
 }
 
 #[test]
+fn wet_edges_pool_wet_paint_by_how_much_of_it_shows() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // light stamps of watery paint (as a light press lays) show only part of their paint, though
+    // after a few the paper is touched all over: the wet edges pool by the part that shows, as a
+    // dry stroke's do by its coverage (so a stroke's thinning ends get the rim, near full where
+    // about 0.7 shows), not by the touch
+    let shown = |wet_edges: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            wet_pull: Some(0.5),
+            dilution: 1.0,
+            load: 1.0,
+            attack: 1.0,
+            rendering: Rendering::Gradual,
+            wet_edges,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        let stamps: Vec<Stamp> = (0..40)
+            .map(|i| Stamp {
+                time_ms: f64::from(i),
+                distance: i as f32 * 0.5,
+                ..Stamp::round(Vec2::new(28.0 + i as f32 * 0.2, 32.0), 20.0, 0.1)
+            })
+            .collect();
+        canvas.add_stamps(&stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        f32::from(pixel(&layer, 64, 32, 32)[3]) / 255.0
+    };
+    let (plain, pooled) = (shown(0.0), shown(1.0));
+    assert!((0.2..0.95).contains(&plain), "thinned paint shows part: {plain}");
+    let x = 4.5 * plain;
+    let expected = 1.0 - (x.sin() / x).abs();
+    assert!((pooled - expected).abs() < 0.04, "pooled {pooled}, by what shows {expected} (plain {plain})");
+}
+
+#[test]
 fn wet_edges_pool_paint_laid_in_place() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
