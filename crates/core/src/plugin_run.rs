@@ -48,10 +48,12 @@
 //!   for the app's own; and for 4 to 9 (the eraser, pencil, pen, paintbrush, airbrush, spray can),
 //!   the place in the manifest (0 the first) of the file control whose recording that sound plays,
 //!   a whole number, or below 0 for the app's own sound.
-//! - `procraft_tween(setting: i32) -> f32`: for the hook `tween`, how Animation Assist's
-//!   In-between draws a frame between a frame and the next: whether the drawings slide between
-//!   their places (0, 0 or 1) and how near the next frame it falls (1, 0 to 1), or below 0 for the
-//!   app's own (they slide, halfway).
+//! - For the hook `inbetween` (Animation Assist's In-between draws a frame between a frame and the
+//!   next, the plugin's way): `procraft_between_begin(width: i32, height: i32) -> i32` starts one
+//!   of that many pixels and gives where a row of them goes (`width` × 4 bytes, premultiplied
+//!   RGBA8); `procraft_between_row(frame: i32, y: i32)` says row `y` of `frame` (0 this frame, 1 the
+//!   next) is there; `procraft_between_run() -> i32` draws the frame between (0: none);
+//!   `procraft_between_out(y: i32)` puts its row `y` there. A long call, on fuel by the area.
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
 
@@ -72,6 +74,12 @@ const MOST_MEMORY: usize = 16 << 20;
 /// What a plugin on the fill hook may ask for: a few planes of a bit a pixel, for the fills
 /// [`MOST_FILL`] lets through.
 const MOST_FILL_MEMORY: usize = 64 << 20;
+/// What a plugin on the in-between hook may ask for: the two frames and the one between, and room
+/// to work.
+pub(crate) const MOST_BETWEEN_MEMORY: usize = 256 << 20;
+/// What an in-between may spend, to start with and by the pixel.
+const BETWEEN_FUEL: u64 = 20_000_000;
+const BETWEEN_PIXEL_FUEL: u64 = 4096;
 const MOST_TABLE: usize = 10_000;
 const MOST_CALLS_DEEP: usize = 256;
 /// What it may spend, in roughly one a step: to start up, and on one sample or control. A sample
@@ -118,7 +126,10 @@ const RANDOMISE: &str = "procraft_randomise";
 const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
 const QUICKSHAPE_CURVES: &str = "procraft_quickshape_curves";
 const STROKE_SOUND: &str = "procraft_stroke_sound";
-const TWEEN: &str = "procraft_tween";
+const BETWEEN_BEGIN: &str = "procraft_between_begin";
+const BETWEEN_ROW: &str = "procraft_between_row";
+const BETWEEN_RUN: &str = "procraft_between_run";
+const BETWEEN_OUT: &str = "procraft_between_out";
 /// How many parts radial symmetry may be asked to make.
 const RADIAL_PARTS: std::ops::RangeInclusive<i32> = 2..=64;
 const MEMORY: &str = "memory";
@@ -142,7 +153,7 @@ pub(crate) enum Hook {
     ColourTriangle,
     QuickshapeCurves,
     StrokeSound,
-    Tween,
+    Inbetween,
 }
 
 impl Hook {
@@ -163,7 +174,7 @@ impl Hook {
             "colour_triangle" => Some(Hook::ColourTriangle),
             "quickshape_curves" => Some(Hook::QuickshapeCurves),
             "stroke_sound" => Some(Hook::StrokeSound),
-            "tween" => Some(Hook::Tween),
+            "inbetween" => Some(Hook::Inbetween),
             _ => None,
         }
     }
@@ -186,7 +197,7 @@ impl Hook {
             Hook::ColourTriangle => "This plugin can change how the colour panel's Classic picker looks.",
             Hook::QuickshapeCurves => "This plugin can make QuickShape snap strokes to curves.",
             Hook::StrokeSound => "This plugin can play a sound as you draw.",
-            Hook::Tween => "This plugin can draw frames between your animation's frames.",
+            Hook::Inbetween => "This plugin can draw frames between your animation's frames.",
         }
     }
 
@@ -210,7 +221,13 @@ impl Hook {
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
             Hook::QuickshapeCurves => exports(module, QUICKSHAPE_CURVES, &[], &[ValType::I32]),
             Hook::StrokeSound => exports(module, STROKE_SOUND, &[ValType::I32], &[ValType::F32]),
-            Hook::Tween => exports(module, TWEEN, &[ValType::I32], &[ValType::F32]),
+            Hook::Inbetween => {
+                exports(module, BETWEEN_BEGIN, &[ValType::I32, ValType::I32], &[ValType::I32])
+                    && exports(module, BETWEEN_ROW, &[ValType::I32, ValType::I32], &[])
+                    && exports(module, BETWEEN_RUN, &[], &[ValType::I32])
+                    && exports(module, BETWEEN_OUT, &[ValType::I32], &[])
+                    && has_memory(module)
+            }
             Hook::InterfaceScale => exports(module, INTERFACE_SCALE, &[ValType::F32, ValType::F32], &[ValType::F32]),
             Hook::PasteMask => {
                 exports(module, PASTE_MASK, &[], &[ValType::I32])
@@ -331,6 +348,14 @@ pub(crate) fn can_run(bytes: &[u8], hooks: &[Hook], controls: bool) -> bool {
 }
 
 /// What the fill hook calls.
+/// The in-between hook's calls.
+struct BetweenCalls {
+    begin: TypedFunc<(i32, i32), i32>,
+    row: TypedFunc<(i32, i32), ()>,
+    run: TypedFunc<(), i32>,
+    out: TypedFunc<i32, ()>,
+}
+
 struct FillCalls {
     mask: TypedFunc<(), i32>,
     begin: TypedFunc<(i32, i32, i32, i32), i32>,
@@ -393,7 +418,7 @@ pub(crate) struct Running {
     colour_triangle: Option<TypedFunc<(), i32>>,
     quickshape_curves: Option<TypedFunc<(), i32>>,
     stroke_sound: Option<TypedFunc<i32, f32>>,
-    tween: Option<TypedFunc<i32, f32>>,
+    between: Option<BetweenCalls>,
     memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
 }
@@ -401,7 +426,13 @@ pub(crate) struct Running {
 impl Running {
     /// `bytes` started, under the caps of a plugin on `hooks`, and told `controls`.
     pub(crate) fn start_on(bytes: &[u8], controls: &[f32], hooks: &[Hook]) -> Result<Running, Stop> {
-        let most_memory = if hooks.contains(&Hook::FillMask) { MOST_FILL_MEMORY } else { MOST_MEMORY };
+        let most_memory = if hooks.contains(&Hook::Inbetween) {
+            MOST_BETWEEN_MEMORY
+        } else if hooks.contains(&Hook::FillMask) {
+            MOST_FILL_MEMORY
+        } else {
+            MOST_MEMORY
+        };
         Running::start_within(bytes, controls, most_memory)
     }
 
@@ -459,7 +490,14 @@ impl Running {
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
             let quickshape_curves = instance.get_typed_func(&store, QUICKSHAPE_CURVES).ok();
             let stroke_sound = instance.get_typed_func(&store, STROKE_SOUND).ok();
-            let tween = instance.get_typed_func(&store, TWEEN).ok();
+            let between = (|| {
+                Some(BetweenCalls {
+                    begin: instance.get_typed_func(&store, BETWEEN_BEGIN).ok()?,
+                    row: instance.get_typed_func(&store, BETWEEN_ROW).ok()?,
+                    run: instance.get_typed_func(&store, BETWEEN_RUN).ok()?,
+                    out: instance.get_typed_func(&store, BETWEEN_OUT).ok()?,
+                })
+            })();
             let memory = instance.get_memory(&store, MEMORY);
             let control = instance.get_typed_func(&store, CONTROL).ok();
             Ok(Running {
@@ -481,7 +519,7 @@ impl Running {
                 colour_triangle,
                 quickshape_curves,
                 stroke_sound,
-                tween,
+                between,
                 memory,
                 control,
             })
@@ -539,22 +577,44 @@ impl Running {
         }
     }
 
-    /// What it says the in-betweens' `setting` is (0 whether the drawings slide, 1 how near the next
-    /// frame it falls), 0 to 1; none for the app's own.
-    pub(crate) fn tween(&mut self, setting: i32) -> Result<Option<f32>, Stop> {
-        let Running { store, tween, .. } = self;
-        let Some(tween) = tween else { return Ok(None) };
-        let said = guarded(|| {
-            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
-            tween.call(&mut *store, setting).map_err(|e| stop_of(&e))
-        })?;
-        if said.is_nan() || said > 1.0 {
-            Err(Stop::Nonsense)
-        } else if said < 0.0 {
-            Ok(None)
-        } else {
-            Ok(Some(said))
+    /// The frame between `this` and `next` (each `width` × `height`, premultiplied RGBA8), as it
+    /// draws it: a long call, on fuel by the area. None without the hook, or if it draws none.
+    pub(crate) fn inbetween(
+        &mut self,
+        this: &[u8],
+        next: &[u8],
+        width: usize,
+        height: usize,
+    ) -> Result<Option<Vec<u8>>, Stop> {
+        let Running { store, between, memory, .. } = self;
+        let (Some(between), Some(memory)) = (between.as_ref(), memory.as_ref()) else { return Ok(None) };
+        let row = width * 4;
+        if row == 0 || height == 0 || this.len() != row * height || next.len() != row * height {
+            return Ok(None);
         }
+        let until = Instant::now() + MOST_FILL_TIME;
+        let mut left = BETWEEN_FUEL + BETWEEN_PIXEL_FUEL * (width * height) as u64;
+        guarded(|| {
+            let size =
+                (i32::try_from(width).map_err(|_| Stop::Nonsense)?, i32::try_from(height).map_err(|_| Stop::Nonsense)?);
+            let at = long_call(store, &between.begin, size, &mut left, until)?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            for (frame, pixels) in [this, next].into_iter().enumerate() {
+                for (y, line) in pixels.chunks_exact(row).enumerate() {
+                    memory.write(&mut *store, place, line).map_err(|_| Stop::Nonsense)?;
+                    long_call(store, &between.row, (frame as i32, y as i32), &mut left, until)?;
+                }
+            }
+            if long_call(store, &between.run, (), &mut left, until)? == 0 {
+                return Ok(None);
+            }
+            let mut out = vec![0_u8; row * height];
+            for (y, line) in out.chunks_exact_mut(row).enumerate() {
+                long_call(store, &between.out, y as i32, &mut left, until)?;
+                memory.read(&*store, place, line).map_err(|_| Stop::Nonsense)?;
+            }
+            Ok(Some(out))
+        })
     }
 
     /// What it answers the sound hook for `setting`, as it answers; none without the hook.

@@ -10558,13 +10558,27 @@ fn an_inbetween_frame_goes_between_a_frame_and_the_next_as_a_plugin_draws_it() {
     assert_eq!(s.add_inbetween(a), None);
     let dir = std::env::temp_dir().join(format!("procraft-tween-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let module =
-        wat::parse_str(r#"(module (func (export "procraft_tween") (param i32) (result f32) (f32.const -1)))"#).unwrap();
     let plugins = crate::plugins::Plugins::with_store(dir.to_string_lossy().into_owned());
-    let mut manifest = coded("org.example.tween", &module);
-    manifest["hooks"] = serde_json::json!(["tween"]);
+    // a plugin on the hook that draws nothing: nothing made
+    let module = wat::parse_str(
+        r#"(module (memory (export "memory") 1)
+            (func (export "procraft_between_begin") (param i32 i32) (result i32) (i32.const 0))
+            (func (export "procraft_between_row") (param i32 i32))
+            (func (export "procraft_between_run") (result i32) (i32.const 0))
+            (func (export "procraft_between_out") (param i32)))"#,
+    )
+    .unwrap();
+    let mut manifest = coded("org.example.nothing", &module);
+    manifest["hooks"] = serde_json::json!(["inbetween"]);
     assert_eq!(plugins.install(pack(&manifest, &[(MODULE, module.as_slice())])), None);
-    assert!(plugins.set_on("org.example.tween".to_owned(), true));
+    assert!(plugins.set_on("org.example.nothing".to_owned(), true));
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert_eq!(s.add_inbetween(a), None);
+    assert!(plugins.set_on("org.example.nothing".to_owned(), false));
+    // the Tweening plugin the app comes with
+    let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "tweening").unwrap();
+    assert_eq!(plugins.install(bytes.to_vec()), None);
+    assert!(plugins.set_on("io.github.artcraftandroid.tweening".to_owned(), true));
     assert!(plugins.tweens());
     s.use_plugins(std::sync::Arc::clone(&plugins));
     // the last frame has no next

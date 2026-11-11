@@ -336,21 +336,27 @@ slider and the others under it stay as they are.
 procraft_colour_triangle() -> i32
 ```
 
-### `tween`
+### `inbetween`
 
-Animation Assist's frame options get In-between while a plugin is on this hook: a frame drawn between
-the current frame and the next (each a single layer), put just after it and made current, as one
-undo step. The app draws it: each drawing moved and sized from its own place toward the other's, as
-far as the in-between falls, and the two faded from one to the other. Tapped again, it goes between
-the new frame and the next, and so on.
+Animation Assist's frame options get In-between while a plugin is on this hook: the plugin draws a
+frame between the current frame and the next (each a single layer), and the app puts it just after
+the current one and makes it current, as one undo step. Tapped again, it goes between the new frame
+and the next, and so on. How the frame between looks is all the plugin's: the app only hands over the
+two frames' pixels (the part either is drawn in) and takes back what it draws.
 
 ```
-procraft_tween(setting: i32) -> f32
+procraft_between_begin(width: i32, height: i32) -> i32
+procraft_between_row(frame: i32, y: i32)
+procraft_between_run() -> i32
+procraft_between_out(y: i32)
 ```
 
-`setting` 0 is whether the drawings slide between their places (1) or only fade where they are (0); 1
-is how near the next frame the in-between falls (0.05 to 0.95; 0.5 halfway). Answer below 0 to leave
-one as the app has it (they slide, halfway). An answer above 1, or not a number, stops the plugin.
+`begin` starts one of `width` × `height` pixels and answers where in its memory a row of them goes
+(`width` × 4 bytes, premultiplied RGBA). The app then writes each row of this frame (`frame` 0) and of
+the next (`frame` 1) there, calling `row` after each; calls `run`, which draws the frame between (0 for
+none); and for each row calls `out` and reads it back from the same place. It is a long call, on fuel
+by the area, with up to 256 MB of memory; one that runs out stops. The Tweening plugin the app comes
+with slides each drawing from its own place and size toward the other's and fades between them.
 
 ### `quickshape_curves`
 

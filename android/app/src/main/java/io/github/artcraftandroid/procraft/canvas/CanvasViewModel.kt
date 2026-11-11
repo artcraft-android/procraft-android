@@ -7273,11 +7273,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (held > 0) layerChange { if (it.splitHeldFrame(layer.id, held.toUInt()) == null) message = noRoom() } else duplicate(layer)
     }
 
-    /** A plugin's In-between: a frame drawn between this frame and the next, made current. */
+    /** A plugin's In-between: a frame drawn between this frame and the next by the plugin (off the main thread: it takes a moment), made current. */
     fun addInbetween() {
         frameOptionsOpen = false
         val layer = currentFrameLayer() ?: return
-        layerChange { if (it.addInbetween(layer.id) == null) message = "An in-between goes between two frames of one layer each, with something drawn." }
+        val s = session ?: return
+        viewModelScope.launch {
+            val made = withContext(Dispatchers.Default) { s.addInbetween(layer.id) }
+            if (made == null) message = "An in-between goes between two frames of one layer each, with something drawn." else layerChange { }
+        }
     }
 
     /** The frame deleted; on a held place it is held one frame less. */
