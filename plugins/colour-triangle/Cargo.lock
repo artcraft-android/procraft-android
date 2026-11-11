@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "colour-triangle"
 version = "1.0.0"
+dependencies = [
+ "procraft-plugin-kit",
+]
+
+[[package]]
+name = "procraft-plugin-kit"
+version = "0.1.0"

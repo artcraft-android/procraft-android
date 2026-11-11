@@ -1,0 +1,19 @@
+[package]
+name = "procraft-plugin-kit"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "What a ProCraft plugin needs to talk to the app, so a plugin is ordinary Rust"
+
+[lib]
+name = "kit"
+
+[features]
+default = ["std"]
+# The doors that hand pictures, sounds, text and files back and forth; without it, only the
+# controls and yes-or-no hooks, for the smallest plugins.
+std = []
+
+# Not a member of the app's workspace: each plugin builds it into its own module.
+[workspace]

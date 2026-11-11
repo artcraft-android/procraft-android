@@ -1,92 +1,20 @@
 //! Tweening: In-between in Animation Assist's frame options. The app hands over two frames (the
-//! part either is drawn in), a row of pixels at a time, and takes back the frame between them, a
-//! row at a time. Here each drawing slides and grows from its own place toward the other's, as far
+//! part either is drawn in) and takes back the frame between them (the plugin kit passes them).
+//! Here each drawing slides and grows from its own place toward the other's, as far
 //! as the in-between falls, and the two fade from one to the other. It's a plugin, not part of the
 //! app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
 //! The interface is written down at the top of `crates/core/src/plugin_run.rs`.
 
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+/// The controls: whether the drawings slide (0 or 1), and how near the next frame the in-between
+/// falls.
+static CONTROLS: kit::Controls<2> = kit::Controls::new([1.0, 0.5]);
+kit::controls!(CONTROLS);
 
-/// The controls (an f32's bits): whether the drawings slide (0 or 1), and how near the next frame
-/// the in-between falls.
-static SETTINGS: [AtomicU32; 2] = [
-    AtomicU32::new(0x3F80_0000), // on
-    AtomicU32::new(0x3F00_0000), // halfway
-];
-
-/// An in-between under way: its size, the two frames, the frame between, and where a row of
-/// pixels goes in and comes out.
-struct Job {
-    width: usize,
-    height: usize,
-    this: Vec<u8>,
-    next: Vec<u8>,
-    between: Vec<u8>,
-    row: Vec<u8>,
-}
-
-static JOB: Mutex<Option<Job>> = Mutex::new(None);
-
-fn setting(i: usize) -> f32 {
-    SETTINGS.get(i).map_or(0.0, |s| f32::from_bits(s.load(Ordering::Relaxed)))
-}
-
-/// A control's value, by its place in the manifest.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_control(index: i32, value: f32) {
-    let Some(slot) = usize::try_from(index).ok().and_then(|i| SETTINGS.get(i)) else { return };
-    if value.is_finite() {
-        slot.store(value.to_bits(), Ordering::Relaxed);
-    }
-}
-
-/// A new in-between of `width` × `height` pixels: where a row of them goes in and comes out.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_between_begin(width: i32, height: i32) -> i32 {
-    let (width, height) = (width.max(0) as usize, height.max(0) as usize);
-    let size = width * height * 4;
-    let mut job = Job { width, height, this: vec![0; size], next: vec![0; size], between: Vec::new(), row: vec![0; width * 4] };
-    let at = job.row.as_mut_ptr() as i32;
-    *JOB.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
-    at
-}
-
-/// Row `y` of `frame` (0 this frame, 1 the next) is in the row.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_between_row(frame: i32, y: i32) {
-    let mut guard = JOB.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(job) = guard.as_mut() else { return };
-    let row = job.width * 4;
-    let Ok(y) = usize::try_from(y) else { return };
-    let pixels = if frame == 0 { &mut job.this } else { &mut job.next };
-    if let Some(to) = pixels.get_mut(y * row..(y + 1) * row) {
-        to.copy_from_slice(&job.row);
-    }
-}
-
-/// Both frames in: the frame between them is drawn.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_between_run() -> i32 {
-    let mut guard = JOB.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(job) = guard.as_mut() else { return 0 };
-    let near = setting(1).clamp(0.05, 0.95);
-    job.between = inbetween(&job.this, &job.next, job.width, job.height, near, setting(0) >= 0.5);
-    1
-}
-
-/// Row `y` of the frame between, into the row.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_between_out(y: i32) {
-    let mut guard = JOB.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(job) = guard.as_mut() else { return };
-    let row = job.width * 4;
-    let Ok(y) = usize::try_from(y) else { return };
-    if let Some(from) = job.between.get(y * row..(y + 1) * row) {
-        job.row.copy_from_slice(from);
-    }
-}
+kit::inbetween!(|this, next, width, height| {
+    let near = CONTROLS.get(1).clamp(0.05, 0.95);
+    Some(inbetween(this, next, width, height, near, CONTROLS.on(0)))
+});
 
 /// What counts as drawn, of 255.
 const DRAWN: u8 = 8;
@@ -225,16 +153,15 @@ mod tests {
         // (the app writes and reads the row through the answer, a place in the module's memory; here
         // the job's row itself)
         procraft_between_begin(W as i32, W as i32);
-        let row = |f: &dyn Fn(&mut Vec<u8>)| f(&mut JOB.lock().unwrap().as_mut().unwrap().row);
         for (frame, pixels) in [&a, &b].into_iter().enumerate() {
             for y in 0..W {
-                row(&|r| r.copy_from_slice(&pixels[y * W * 4..(y + 1) * W * 4]));
+                kit::BETWEEN.lock().unwrap().as_mut().unwrap().row.copy_from_slice(&pixels[y * W * 4..(y + 1) * W * 4]);
                 procraft_between_row(frame as i32, y as i32);
             }
         }
         assert_eq!(procraft_between_run(), 1);
         procraft_between_out(28);
-        let out = JOB.lock().unwrap().as_ref().unwrap().row.clone();
+        let out = kit::BETWEEN.lock().unwrap().as_ref().unwrap().row.clone();
         assert_eq!((out[28 * 4 + 3], out[8 * 4 + 3]), (255, 0));
     }
 }

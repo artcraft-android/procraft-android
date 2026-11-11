@@ -131,31 +131,46 @@ for a hook it didn't list is never called.
 
 ### The crate
 
+The plugin kit in `plugins/kit` writes the calls for you, so a plugin is ordinary Rust: its controls
+kept as the app tells them, and a macro for each hook that hands pictures, sounds, text and files back
+and forth.
+
+```toml
+[dependencies]
+kit = { package = "procraft-plugin-kit", path = "../kit" }
+```
+
+```rust
+/// The controls, by their place in the manifest, as they start.
+static CONTROLS: kit::Controls<1> = kit::Controls::new([0.0]);
+kit::controls!(CONTROLS);
+
+// where a sample lands: moved across by the control
+kit::position!(|x, y| (x + CONTROLS.get(0), y));
+```
+
+The macros: `controls!` (with a closure, also told each control as it changes), `yes!` for hooks that
+only ask yes or no (`kit::yes!(procraft_pin_panels)`), `answer!` for a whole number, `position!`, `stroke_sound!` and
+`sound_prepare!`, `brush!` and `brush_control!`, `files!`, `inbetween!` and `quickshape_curve!`. The
+kit uses the standard library; for the smallest plugins, `default-features = false` keeps only
+`Controls`, `controls!`, `yes!`, `answer!` (a whole number) and `position!`, and the crate is `#![no_std]` with a panic handler of its own:
+
 ```rust
 #![no_std]
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
-static ACROSS: AtomicU32 = AtomicU32::new(0);
-
-/// A control's value, by its place in the manifest.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_control(_index: i32, value: f32) {
-    ACROSS.store(value.to_bits(), Ordering::Relaxed);
-}
-
-/// Where a sample at (x, y) lands: x's bits in the low half, y's in the high.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_position(x: f32, y: f32) -> i64 {
-    let moved = x + f32::from_bits(ACROSS.load(Ordering::Relaxed));
-    (u64::from(moved.to_bits()) | u64::from(y.to_bits()) << 32) as i64
-}
+static CONTROLS: kit::Controls<1> = kit::Controls::new([0.0]);
+kit::controls!(CONTROLS);
+kit::yes!(procraft_pin_panels, || CONTROLS.on(0));
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 ```
+
+Without the kit, a plugin exports the functions itself, with exactly the types each hook below names.
+A plugin built with the kit is packed again whenever the kit changes (its packed file is checked
+against the kit too).
 
 The crate is a `cdylib`, kept out of the app's workspace by an empty `[workspace]` table, and its name
 is its folder's. Copy the `Cargo.toml` of a sample: its release profile keeps the module small, and a

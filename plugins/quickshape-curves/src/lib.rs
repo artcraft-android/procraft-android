@@ -1,58 +1,25 @@
 //! QuickShape curves: a stroke that bends more than once, held, snaps to a curve through its bends
 //! rather than a polyline, its points there to reshape it. The app hands over the stroke's points
-//! and what QuickShape found first; this finds the bends and lays a chain of cubics through them,
+//! and what QuickShape found first (the plugin kit passes them); this finds the bends and lays a chain of cubics through them,
 //! each anchor's controls leaning the way the stroke came and went so the joins are smooth. The app
 //! draws the curve and lets it be reshaped. It's a plugin, not part of the app:
 //! `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
 //! The interface is written down at the top of `crates/core/src/plugin_run.rs`.
 
-use std::sync::Mutex;
-
 /// A stroke's bend is a corner when the path strays this far (as a part of the stroke's size) from
 /// the straight line between its neighbours.
 const CORNER_TOLERANCE: f32 = 0.08;
-/// QuickShape's kinds as the app numbers them: the polyline, and a curve asked for by name.
-const POLYLINE: i32 = 1;
-const ASKED: i32 = -1;
 
-struct Job {
-    best: i32,
-    /// The stroke's points as they come in (x, y), and the curve's nodes as they go out.
-    points: Vec<f32>,
-    nodes: Vec<f32>,
-}
+kit::quickshape_curve!(offer);
 
-static JOB: Mutex<Option<Job>> = Mutex::new(None);
-
-/// A stroke of `count` points snapping, QuickShape having found `best` first: where the points go.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_curve_begin(count: i32, best: i32) -> i32 {
-    let mut guard = JOB.lock().unwrap_or_else(|e| e.into_inner());
-    let job = guard.insert(Job { best, points: vec![0.0; count.max(0) as usize * 2], nodes: Vec::new() });
-    job.points.as_mut_ptr() as i32
-}
-
-/// The curve, if there is one to offer: how many nodes it has (0: none). A stroke QuickShape takes
-/// for a polyline bends more than once, and gets a curve; one asked for by name gets one whatever.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_curve_run() -> i32 {
-    let mut guard = JOB.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(job) = guard.as_mut() else { return 0 };
-    if job.best != POLYLINE && job.best != ASKED {
-        return 0;
+/// The curve offered for a stroke of `points`, QuickShape having found `found` first: one for a
+/// polyline (it bends more than once) or when a curve is asked for by name (none found), else none.
+fn offer(points: &[P], found: Option<kit::ShapeKind>) -> Option<Vec<P>> {
+    match found {
+        None | Some(kit::ShapeKind::Polyline) => Some(fit(points)).filter(|nodes| nodes.len() >= 4),
+        Some(_) => None,
     }
-    let points: Vec<(f32, f32)> = job.points.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-    let nodes = fit(&points);
-    job.nodes = nodes.iter().flat_map(|&(x, y)| [x, y]).collect();
-    if nodes.len() >= 4 { nodes.len() as i32 } else { 0 }
-}
-
-/// Where the curve's nodes are (x, y each).
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_curve_nodes() -> i32 {
-    let mut guard = JOB.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_mut().map_or(0, |job| job.nodes.as_mut_ptr() as i32)
 }
 
 type P = (f32, f32);
@@ -171,16 +138,11 @@ mod tests {
     }
 
     #[test]
-    fn the_calls_offer_a_curve_for_a_polyline_or_when_asked_and_not_otherwise() {
+    fn a_curve_is_offered_for_a_polyline_or_when_asked_and_not_otherwise() {
         let stroke = zigzag();
-        let mut offer = |best: i32| {
-            procraft_curve_begin(stroke.len() as i32, best);
-            JOB.lock().unwrap().as_mut().unwrap().points = stroke.iter().flat_map(|&(x, y)| [x, y]).collect();
-            procraft_curve_run()
-        };
-        assert!(offer(POLYLINE) >= 10);
-        assert!(offer(ASKED) >= 10);
-        assert_eq!(offer(0), 0, "a line");
-        assert_eq!(offer(4), 0, "an ellipse");
+        assert!(offer(&stroke, Some(kit::ShapeKind::Polyline)).is_some_and(|n| n.len() >= 10));
+        assert!(offer(&stroke, None).is_some_and(|n| n.len() >= 10));
+        assert_eq!(offer(&stroke, Some(kit::ShapeKind::Line)), None);
+        assert_eq!(offer(&stroke, Some(kit::ShapeKind::Ellipse)), None);
     }
 }

@@ -1,8 +1,8 @@
 //! Brush sounds: a sound as you draw, behaving as Krita's Brush SFX plugin does: each brush the
 //! sound its kind takes, louder the faster and harder you go. The app tells this how the stroke
-//! moves, what the brush is called and what is picked in its rows, and plays what this hands back;
-//! everything about the sound itself is here ([`voice`]). It's a plugin, not part of the app:
-//! `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
+//! moves, what the brush is called and what is picked in its rows, and plays what this hands back
+//! (the plugin kit passes it all); everything about the sound itself is here ([`voice`]). It's a
+//! plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
 //! The interface is written down at the top of `crates/core/src/plugin_run.rs`.
 
@@ -21,15 +21,66 @@ const SOUND: usize = 1;
 const ERASER_ON: usize = 2;
 const ERASER_SOUND: usize = 3;
 const RECORDINGS: usize = 4;
-const CONTROLS: usize = RECORDINGS + 6;
 
-/// What the app says of the stroke, as bits: a stroke is open, the pen hovers, the tool erases.
-const PRESSED: i32 = 1;
-const HOVERING: i32 = 2;
-const ERASING: i32 = 4;
+static CONTROLS: kit::Controls<10> = kit::Controls::new([1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+
+// a recording let go plays the sound's own again
+kit::controls!(CONTROLS, |index, value| {
+    if let Some(k) = index.checked_sub(RECORDINGS).filter(|k| *k < 6 && value < 0.5) {
+        with(|s| {
+            s.recordings[k] = None;
+            s.fit(k);
+        });
+    }
+});
+
+kit::sound_prepare!(|rate| {
+    with(|s| {
+        s.rate = rate;
+        s.voice.prepare(rate);
+        for k in 0..6 {
+            s.fit(k);
+        }
+    })
+});
+
+kit::stroke_sound!(|stroke, frames, rate| {
+    with(|s| {
+        let pressed = stroke.since_ms.is_some();
+        let since = stroke.since_ms.unwrap_or(f32::MAX);
+        let motion = Motion {
+            speed: stroke.speed,
+            pressure: stroke.pressure,
+            pressed,
+            moving: pressed && since <= STILL_MS,
+            sprayed: pressed && since <= STILL_MS + SPRAY_GRACE_MS,
+            hover: stroke.hover,
+            height: stroke.height,
+        };
+        let kind = s.kind(stroke.erasing);
+        s.voice.render(frames, rate, kind, motion, CONTROLS.get(VOLUME).clamp(0.0, 1.0))
+    })
+});
+
+kit::brush!(|name, set| with(|s| s.brush = (name.to_owned(), set.to_owned())));
+
+// the brush's own sound, its one row in the brush studio
+kit::brush_control!(|index, value| {
+    if index == 0 {
+        with(|s| s.brush_own = value);
+    }
+});
+
+// a recording picked for one of the six sounds
+kit::files!(|index, file| {
+    let Some(k) = index.checked_sub(RECORDINGS).filter(|k| *k < 6) else { return };
+    with(|s| {
+        s.recordings[k] = file.and_then(wav::read_wav).map(|(samples, rate)| (samples, rate as f32));
+        s.fit(k);
+    });
+});
 
 struct State {
-    controls: [f32; CONTROLS],
     voice: Voice,
     /// The rate the sounds are made at, once the app has said.
     rate: f32,
@@ -39,33 +90,17 @@ struct State {
     brush_own: f32,
     /// Each sound's recording as picked: its samples and their rate.
     recordings: [Option<(Vec<f32>, f32)>; 6],
-    /// Where text and files come in, and where the samples go out.
-    text: Vec<u8>,
-    file: Vec<u8>,
-    out: Vec<f32>,
 }
 
 impl State {
     fn new() -> State {
-        let mut controls = [0.0; CONTROLS];
-        controls[VOLUME] = 1.0;
-        controls[ERASER_ON] = 1.0;
-        controls[ERASER_SOUND] = 1.0;
         State {
-            controls,
             voice: Voice::default(),
             rate: 0.0,
             brush: (String::new(), String::new()),
             brush_own: 0.0,
             recordings: Default::default(),
-            text: Vec::new(),
-            file: Vec::new(),
-            out: Vec::new(),
         }
-    }
-
-    fn control(&self, i: usize) -> f32 {
-        self.controls.get(i).copied().unwrap_or(0.0)
     }
 
     /// The sound the stroke makes now: the brush's own if it has one (none for no sound); else
@@ -77,9 +112,9 @@ impl State {
             own => return KINDS.get(own - 1).copied(),
         }
         if erasing {
-            return (self.control(ERASER_ON) >= 0.5).then(|| one_of(self.control(ERASER_SOUND)).unwrap_or(Kind::Eraser));
+            return CONTROLS.on(ERASER_ON).then(|| one_of(CONTROLS.get(ERASER_SOUND)).unwrap_or(Kind::Eraser));
         }
-        one_of(self.control(SOUND)).or_else(|| Some(voice::kind_of(&self.brush.0, &self.brush.1)))
+        one_of(CONTROLS.get(SOUND)).or_else(|| Some(voice::kind_of(&self.brush.0, &self.brush.1)))
     }
 
     /// Recording `k`'s sound plays it, fitted to the rate the sounds are made at (none: its own).
@@ -107,131 +142,6 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     f(guard.get_or_insert_with(State::new))
 }
 
-/// A control's value, by its place in the manifest. A recording let go plays the sound's own.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_control(index: i32, value: f32) {
-    let Ok(i) = usize::try_from(index) else { return };
-    if !value.is_finite() {
-        return;
-    }
-    with(|s| {
-        if let Some(slot) = s.controls.get_mut(i) {
-            *slot = value;
-        }
-        if let Some(k) = i.checked_sub(RECORDINGS).filter(|k| *k < 6 && value < 0.5) {
-            if let Some(slot) = s.recordings.get_mut(k) {
-                *slot = None;
-            }
-            s.fit(k);
-        }
-    });
-}
-
-/// The sounds are to be made at `rate` a second: each one's loop made now, and the recordings
-/// fitted to it. Not 0 when done.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_sound_prepare(rate: i32) -> i32 {
-    with(|s| {
-        s.rate = rate.max(1) as f32;
-        s.voice.prepare(s.rate);
-        for k in 0..6 {
-            s.fit(k);
-        }
-    });
-    1
-}
-
-/// The next `frames` samples at `rate` a second, for the stroke moving at `speed` (window heights a
-/// second) with `pressure`, its last input `since_ms` ago (below 0: none), as `state` says (bits:
-/// [`PRESSED`], [`HOVERING`], [`ERASING`]), the pen hovering at (`hover_x`, `hover_y`) in a window
-/// `height` tall: where they are (32-bit floats, -1 to 1).
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub extern "C" fn procraft_stroke_sound(
-    frames: i32,
-    rate: i32,
-    speed: f32,
-    pressure: f32,
-    since_ms: f32,
-    state: i32,
-    hover_x: f32,
-    hover_y: f32,
-    height: f32,
-) -> i32 {
-    with(|s| {
-        let pressed = state & PRESSED != 0 && since_ms >= 0.0;
-        let motion = Motion {
-            speed: if speed.is_finite() { speed.max(0.0) } else { 0.0 },
-            pressure: if pressure.is_finite() { pressure.clamp(0.0, 1.0) } else { 1.0 },
-            pressed,
-            moving: pressed && since_ms <= STILL_MS,
-            sprayed: pressed && since_ms <= STILL_MS + SPRAY_GRACE_MS,
-            hover: (state & HOVERING != 0).then_some((hover_x, hover_y)),
-            height: height.max(1.0),
-        };
-        let kind = s.kind(state & ERASING != 0);
-        let volume = s.control(VOLUME).clamp(0.0, 1.0);
-        s.out = s.voice.render(frames.clamp(0, 48_000) as usize, rate.max(1) as f32, kind, motion, volume);
-        s.out.as_ptr() as i32
-    })
-}
-
-/// Where the current brush's name (and its set's after it) goes, `len` bytes.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_text_buffer(len: i32) -> i32 {
-    with(|s| {
-        s.text = vec![0; len.max(0) as usize];
-        s.text.as_mut_ptr() as i32
-    })
-}
-
-/// The current brush is the one named in the text: its name's `name_len` bytes, then its set's
-/// `set_len` (UTF-8).
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_brush(name_len: i32, set_len: i32) {
-    with(|s| {
-        let (name_len, set_len) = (name_len.max(0) as usize, set_len.max(0) as usize);
-        let name = s.text.get(..name_len).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
-        let set = s.text.get(name_len..name_len + set_len).map(|b| String::from_utf8_lossy(b).into_owned());
-        s.brush = (name, set.unwrap_or_default());
-    });
-}
-
-/// The current brush's row `index` (in the brush studio, by its place in the manifest) is at
-/// `value`: the brush's own sound.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_brush_control(index: i32, value: f32) {
-    if index == 0 && value.is_finite() {
-        with(|s| s.brush_own = value);
-    }
-}
-
-/// Where the file picked for control `index` goes, `len` bytes.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_file_buffer(_index: i32, len: i32) -> i32 {
-    with(|s| {
-        s.file = vec![0; len.max(0) as usize];
-        s.file.as_mut_ptr() as i32
-    })
-}
-
-/// The file picked for control `index` is in, `len` bytes of it (0: none is picked): a recording,
-/// played in place of its sound's own.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_file(index: i32, len: i32) {
-    let Some(k) = usize::try_from(index).ok().and_then(|i| i.checked_sub(RECORDINGS)).filter(|k| *k < 6) else {
-        return;
-    };
-    with(|s| {
-        let read = s.file.get(..len.max(0) as usize).and_then(wav::read_wav);
-        if let Some(slot) = s.recordings.get_mut(k) {
-            *slot = read.map(|(samples, rate)| (samples, rate as f32));
-        }
-        s.file = Vec::new();
-        s.fit(k);
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,21 +152,28 @@ mod tests {
     fn fresh() -> std::sync::MutexGuard<'static, ()> {
         let turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         *STATE.lock().unwrap() = Some(State::new());
+        for (i, start) in [1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0].into_iter().enumerate() {
+            CONTROLS.told(i as i32, start);
+        }
         turn
     }
 
-    /// The text written as the app writes it, through the job's own buffer.
     fn tell_brush(name: &str, set: &str) {
-        procraft_text_buffer((name.len() + set.len()) as i32);
-        with(|s| {
-            s.text[..name.len()].copy_from_slice(name.as_bytes());
-            s.text[name.len()..].copy_from_slice(set.as_bytes());
-        });
-        procraft_brush(name.len() as i32, set.len() as i32);
+        with(|s| s.brush = (name.to_owned(), set.to_owned()));
     }
 
     fn kind(erasing: bool) -> Option<Kind> {
         with(|s| s.kind(erasing))
+    }
+
+    /// The samples the sound hook hands out for the stroke so (as the app would read them).
+    fn heard(frames: i32, since_ms: f32) -> Vec<f32> {
+        procraft_stroke_sound(frames, 48_000, 3.0, 1.0, since_ms, i32::from(since_ms >= 0.0), 0.0, 0.0, 1_000.0);
+        kit::SOUND.with(|bytes| bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+    }
+
+    fn rms(v: &[f32]) -> f32 {
+        (v.iter().map(|x| x * x).sum::<f32>() / v.len().max(1) as f32).sqrt()
     }
 
     #[test]
@@ -287,27 +204,21 @@ mod tests {
         let _turn = fresh();
         tell_brush("Soft Airbrush", "Airbrushing");
         assert_eq!(procraft_sound_prepare(48_000), 1);
-        let loud = |since_ms: f32| {
-            procraft_stroke_sound(4_800, 48_000, 3.0, 1.0, since_ms, PRESSED, 0.0, 0.0, 1_000.0);
-            let out = with(|s| s.out.clone());
-            (out.iter().map(|x| x * x).sum::<f32>() / out.len() as f32).sqrt()
-        };
-        let _ = loud(10.0);
-        assert!(loud(10.0) > 0.005, "pressed: heard");
-        procraft_stroke_sound(48_000, 48_000, 0.0, 1.0, -1.0, 0, 0.0, 0.0, 1_000.0);
-        assert!(loud(-1.0) < 1e-4, "no stroke: quiet");
+        let _ = heard(4_800, 10.0);
+        assert!(rms(&heard(4_800, 10.0)) > 0.005, "pressed: heard");
+        let _ = heard(48_000, -1.0);
+        assert!(rms(&heard(4_800, -1.0)) < 1e-4, "no stroke: quiet");
         // a recording of a 440 Hz tone for the airbrush: what is heard crosses zero 880 times a second
-        let tone: Vec<f32> = (0..22_050).map(|i| 0.7 * (std::f32::consts::TAU * 440.0 * i as f32 / 44_100.0).sin()).collect();
+        let tone: Vec<f32> =
+            (0..22_050).map(|i| 0.7 * (std::f32::consts::TAU * 440.0 * i as f32 / 44_100.0).sin()).collect();
         let file = wav::write_wav(&tone, 44_100);
         procraft_control((RECORDINGS + 4) as i32, 1.0);
-        procraft_file_buffer((RECORDINGS + 4) as i32, file.len() as i32);
-        with(|s| s.file.copy_from_slice(&file));
+        kit::FILE.with(|bytes| *bytes = file.clone());
         procraft_file((RECORDINGS + 4) as i32, file.len() as i32);
         assert_eq!(with(|s| s.voice.own_rate(Kind::Airbrush)), Some(48_000.0));
-        let _ = loud(10.0);
-        procraft_stroke_sound(48_000, 48_000, 3.0, 1.0, 10.0, PRESSED, 0.0, 0.0, 1_000.0);
-        let heard = with(|s| s.out.clone());
-        let crossings = heard.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
+        let _ = heard(4_800, 10.0);
+        let tone_heard = heard(48_000, 10.0);
+        let crossings = tone_heard.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
         assert!((800..960).contains(&crossings), "{crossings}");
         // let go: its own again
         procraft_control((RECORDINGS + 4) as i32, 0.0);

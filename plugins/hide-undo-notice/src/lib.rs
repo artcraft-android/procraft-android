@@ -2,17 +2,14 @@
 //! what they took back or brought back. It's a plugin, not part of the app: `tools/pack_plugin.py`
 //! makes a `.procraft-plugin` file of it.
 //!
-//! The app asks one question and gives it nothing else. Undo and redo stay the app's: this only
-//! says whether their notice shows. The interface is written down at the top of
-//! `crates/core/src/plugin_run.rs`.
+//! The app asks one question and gives it nothing else (the plugin kit answers it). Undo and redo
+//! stay the app's: this only says whether their notice shows. The interface is written down at the
+//! top of `crates/core/src/plugin_run.rs`.
 
 #![no_std]
 
-/// Whether undo and redo go by without their notice: always, while the plugin is on.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_hide_undo_notice() -> i32 {
-    1
-}
+// always, while the plugin is on
+kit::yes!(procraft_hide_undo_notice);
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {

@@ -78,6 +78,18 @@ mod tests {
         sha256(&all)
     }
 
+    /// What a plugin's packed file is made from, as `tools/pack_plugin.py` digests it: its folder,
+    /// and the plugin kit too when it is built with it.
+    fn source_digest(folder: &Path) -> String {
+        let mine = digest(folder);
+        let cargo = std::fs::read_to_string(folder.join("Cargo.toml")).unwrap_or_default();
+        if cargo.contains("path = \"../kit\"") {
+            sha256(format!("{mine}{}", digest(&plugins_folder().join("kit"))).as_bytes())
+        } else {
+            mine
+        }
+    }
+
     #[test]
     fn each_holds_up_as_a_plugin_file_and_is_its_folder_as_it_is_now() {
         let root = plugins_folder();
@@ -104,7 +116,7 @@ mod tests {
             let code = package.file(crate::plugin_run::MODULE).is_some();
             assert_eq!(code, package.manifest.holds.contains(&PluginPart::Hooks), "{name}");
             // its code can't be built here, so the folder as it was packed, all of it, is checked
-            let line = format!("{name} {}", digest(&folder));
+            let line = format!("{name} {}", source_digest(&folder));
             assert!(sources.lines().any(|kept| kept == line), "plugins/{name} has changed: {REPACK}");
             ids.push(package.manifest.id);
         }

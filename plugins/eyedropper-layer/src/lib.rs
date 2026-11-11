@@ -1,27 +1,19 @@
 //! Eyedropper picks from layer: the eyedropper reads the current layer alone, not the whole canvas.
-//! It's a plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
+//! It's a plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of
+//! it.
 //!
-//! The app asks one question and gives it nothing else. Reading a pixel stays the app's: this only
-//! says which pixel. The interface is written down at the top of `crates/core/src/plugin_run.rs`.
+//! The app asks one question and gives it nothing else (the plugin kit answers it). Reading a pixel
+//! stays the app's: this only says which pixel. The interface is written down at the top of
+//! `crates/core/src/plugin_run.rs`.
 
 #![no_std]
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 /// Its one switch.
-static LAYER: AtomicBool = AtomicBool::new(false);
+static CONTROLS: kit::Controls<1> = kit::Controls::new([0.0]);
+kit::controls!(CONTROLS);
 
-/// The switch's value (the only control, so `index` says nothing).
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_control(_index: i32, value: f32) {
-    LAYER.store(value != 0.0, Ordering::Relaxed);
-}
-
-/// Whether the eyedropper reads the current layer.
-#[unsafe(no_mangle)]
-pub extern "C" fn procraft_pick_layer() -> i32 {
-    i32::from(LAYER.load(Ordering::Relaxed))
-}
+// whether the eyedropper reads the current layer: as the switch says
+kit::yes!(procraft_pick_layer, || CONTROLS.on(0));
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {

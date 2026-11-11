@@ -72,6 +72,17 @@ def digest(folder):
     return sha.hexdigest()
 
 
+def source_digest(name):
+    """What `name`'s packed file is made from: its folder, and the plugin kit too when it is built
+    with it (a change to the kit is a change to it). The core's tests work it out the same way."""
+    folder = os.path.join(PLUGINS, name)
+    mine = digest(folder)
+    cargo = os.path.join(folder, 'Cargo.toml')
+    if os.path.isfile(cargo) and 'path = "../kit"' in open(cargo, encoding='utf-8').read():
+        return hashlib.sha256(f'{mine}{digest(os.path.join(PLUGINS, "kit"))}'.encode()).hexdigest()
+    return mine
+
+
 def pack(name, out):
     """The file `name`, of what its folder's manifest says it holds."""
     folder = os.path.join(PLUGINS, name)
@@ -105,7 +116,7 @@ def bundle(names):
     for name in names:
         pack(name, BUNDLED)
     with open(os.path.join(BUNDLED, SOURCES), 'w', encoding='utf-8', newline='') as f:
-        f.writelines(f'{name} {digest(os.path.join(PLUGINS, name))}\n' for name in names)
+        f.writelines(f'{name} {source_digest(name)}\n' for name in names)
 
 
 def main():
