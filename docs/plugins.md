@@ -387,17 +387,28 @@ none); and for each row calls `out` and reads it back from the same place. It is
 by the area, with up to 256 MB of memory; one that runs out stops. The Tweening plugin the app comes
 with slides each drawing from its own place and size toward the other's and fades between them.
 
-### `quickshape_curves`
+### `quickshape_curve`
 
-Whether a stroke that bends more than once snaps to a curve (not 0): a chain of curves through its
-bends, with an anchor at each and two controls pulling on the curve either side. The polyline it would
-have been is still among the kinds to switch to. Dragging a control moves its pair the other way, so
-the curve stays smooth there; tapping an anchor sets it free (each control on its own), then a corner,
-then smooth again.
+A curve QuickShape may snap to. When a held stroke snaps, the app hands the plugin the stroke's points
+and the kind QuickShape found first; the plugin may offer a curve, which then comes first among the
+kinds to switch to (what QuickShape found still there). When Curve is picked from the kinds again,
+the plugin is asked for one by name. The app draws the curve and lets it be reshaped: dragging a
+control moves its pair the other way, so the curve stays smooth there; tapping an anchor sets it free
+(each control on its own), then a corner, then smooth again.
 
 ```
-procraft_quickshape_curves() -> i32
+procraft_curve_begin(count: i32, best: i32) -> i32
+procraft_curve_run() -> i32
+procraft_curve_nodes() -> i32
 ```
+
+`begin` answers where the stroke's `count` points go (x and y, 32-bit floats each, window pixels);
+`best` is the kind QuickShape found first, by its place among line, polyline, arc, curve, ellipse,
+circle, triangle, equilateral triangle, quadrilateral, rectangle and square, or -1 when a curve is
+asked for by name. `run` answers how many nodes the curve has, 0 for none: an anchor, then two
+controls and an anchor for each span (4, 7, 10 ...). `nodes` answers where they are, as the points
+came. The QuickShape curves plugin the app comes with offers one for a polyline: an anchor at each
+corner, each anchor's controls leaning the way the stroke came and went.
 
 ### `stroke_sound`
 

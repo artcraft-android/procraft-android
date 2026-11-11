@@ -8,9 +8,7 @@ use procraft_engine::brush::Brush;
 use procraft_engine::document::LayerId;
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::Sample;
-use procraft_engine::quickshape::{
-    Anchor, Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, with_curve, without_end_hook,
-};
+use procraft_engine::quickshape::{Anchor, Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, without_end_hook};
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_gpu::{Canvas, StrokeStyle};
 
@@ -402,11 +400,39 @@ impl State {
         })
     }
 
-    /// What a stroke snapped to: the shapes it looks like, a curve first where a plugin asks for
-    /// one and it bends more than once.
+    /// What a stroke snapped to: the shapes it looks like, a curve first where a plugin offers one.
     fn recognised(&self, line: &[Vec2]) -> Vec<Shape> {
-        let found = recognise(line);
-        if self.hooks.as_ref().is_some_and(|hooks| hooks.quickshape_curves()) { with_curve(found, line) } else { found }
+        let mut found = recognise(line);
+        let best = found.first().map_or(-1, |s| shape_number(s.kind));
+        if let Some(curve) = self.plugin_curve(line, best) {
+            found.insert(0, curve);
+        }
+        found
+    }
+
+    /// The curve a plugin offers for the stroke `line`, QuickShape having found `best` first (-1:
+    /// a curve asked for by name), if one does.
+    fn plugin_curve(&self, line: &[Vec2], best: i32) -> Option<Shape> {
+        let points: Vec<(f32, f32)> = line.iter().filter(|p| p.is_finite()).map(|p| (p.x, p.y)).collect();
+        let nodes = self.hooks.as_ref()?.quickshape_curve(&points, best)?;
+        Some(Shape { kind: ShapeKind::Curve, nodes: nodes.into_iter().map(|(x, y)| Vec2::new(x, y)).collect() })
+    }
+}
+
+/// A shape's kind as a plugin is told it: its place among the kinds.
+fn shape_number(kind: ShapeKind) -> i32 {
+    match kind {
+        ShapeKind::Line => 0,
+        ShapeKind::Polyline => 1,
+        ShapeKind::Arc => 2,
+        ShapeKind::Curve => 3,
+        ShapeKind::Ellipse => 4,
+        ShapeKind::Circle => 5,
+        ShapeKind::Triangle => 6,
+        ShapeKind::EquilateralTriangle => 7,
+        ShapeKind::Quadrilateral => 8,
+        ShapeKind::Rectangle => 9,
+        ShapeKind::Square => 10,
     }
 }
 
@@ -666,8 +692,24 @@ impl CanvasSession {
         edit.held = None;
         let current = edit.shape.kind;
         let before = edit.shape.clone();
-        // a kind already shown keeps its edits; another is fitted to the stroke as drawn
-        edit.shape = edit.shape.as_kind(kind.into(), &edit.drawn);
+        // a kind already shown keeps its edits; another is fitted to the stroke as drawn (a curve by
+        // the plugin that offers them)
+        let to: ShapeKind = kind.into();
+        let curve = (to == ShapeKind::Curve && current != to).then(|| edit.drawn.clone());
+        edit.shape = edit.shape.as_kind(to, &edit.drawn);
+        if let Some(drawn) = curve {
+            drop(guard);
+            let offered = self.shared.lock().plugin_curve(&drawn, -1);
+            guard = self.shared.lock();
+            let st = &mut *guard;
+            let edit = st.shape.as_mut()?;
+            match offered {
+                Some(curve) => edit.shape = curve,
+                None => return st.shape_info(),
+            }
+        }
+        let st = &mut *guard;
+        let edit = st.shape.as_mut()?;
         if edit.shape.kind == current && ShapeKind::from(kind) != current {
             return st.shape_info();
         }

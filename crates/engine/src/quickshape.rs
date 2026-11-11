@@ -11,7 +11,7 @@ pub enum ShapeKind {
     Line,
     Polyline,
     Arc,
-    /// A chain of cubics through the stroke's bends (a plugin's: see [`with_curve`]).
+    /// A chain of cubics through the stroke's bends (a plugin fits it, on the core's curve hook).
     Curve,
     Ellipse,
     Circle,
@@ -266,7 +266,8 @@ impl Shape {
             ShapeKind::EquilateralTriangle => equilateral(&polygon(stroke, 3).unwrap_or_else(|| self.clone())),
             ShapeKind::Line => line_of(stroke),
             ShapeKind::Arc => fit_arc(stroke).unwrap_or_else(|| self.clone()),
-            ShapeKind::Curve => fit_curve(stroke),
+            // fitted by a plugin, never here
+            ShapeKind::Curve => self.clone(),
             ShapeKind::Polyline => {
                 Shape { kind: ShapeKind::Polyline, nodes: simplify(stroke, CORNER_TOLERANCE * size(stroke)) }
             }
@@ -844,9 +845,9 @@ fn fit_arc(pts: &[Vec2]) -> Option<Shape> {
     nodes.iter().all(|p| p.is_finite()).then_some(Shape { kind: ShapeKind::Arc, nodes })
 }
 
-/// `shapes` as [`recognise`] gave them for `stroke`, with a curve first where a polyline was (a
-/// stroke that bends more than once), the polyline still there to be shown instead: what a plugin
-/// asks for.
+/// `shapes` with the curve through `stroke`'s bends first, where the first is a polyline (as the
+/// QuickShape curves plugin offers one).
+#[cfg(test)]
 pub fn with_curve(mut shapes: Vec<Shape>, stroke: &[Vec2]) -> Vec<Shape> {
     if shapes.first().is_some_and(|s| s.kind == ShapeKind::Polyline) {
         let pts: Vec<Vec2> = stroke.iter().copied().filter(|p| p.is_finite()).collect();
@@ -856,7 +857,9 @@ pub fn with_curve(mut shapes: Vec<Shape>, stroke: &[Vec2]) -> Vec<Shape> {
 }
 
 /// The curve through the stroke's bends: a chain of cubics meeting at its corners, each anchor's
-/// controls leaning the way the stroke came and went, so the joins are smooth.
+/// controls leaning the way the stroke came and went, so the joins are smooth. (A plugin fits
+/// curves; this one is for the tests of reshaping them.)
+#[cfg(test)]
 fn fit_curve(pts: &[Vec2]) -> Shape {
     let mut anchors = simplify(pts, CORNER_TOLERANCE * size(pts));
     if anchors.len() < 2 {

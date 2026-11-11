@@ -199,11 +199,19 @@ impl Hooks {
         self.has(Hook::StrokeSound)
     }
 
-    /// The curves hook: whether QuickShape snaps a stroke that bends more than once to a curve
-    /// (its polyline still there to be shown instead).
-    pub(crate) fn quickshape_curves(&self) -> bool {
-        self.has(Hook::QuickshapeCurves)
-            && self.through(Hook::QuickshapeCurves, false, |running, said| Ok(said | running.quickshape_curves()?))
+    /// The curve hook: the curve the first plugin on it offers for a snapping stroke of `points`
+    /// (window pixels), QuickShape having found `best` first (-1: a curve asked for): its nodes.
+    /// None with none on it, if it offers none, or if it stops.
+    pub(crate) fn quickshape_curve(&self, points: &[(f32, f32)], best: i32) -> Option<Vec<(f32, f32)>> {
+        let (id, running) = self.long_calls(Hook::QuickshapeCurve).into_iter().next()?;
+        let offered = at_work(&running).quickshape_curve(points, best);
+        match offered {
+            Ok(nodes) => nodes,
+            Err(stop) => {
+                self.stopped(&id, stop);
+                None
+            }
+        }
     }
 
     /// The triangle hook: whether the colour panel's Classic shows a triangle in place of its
@@ -777,13 +785,10 @@ pub(crate) mod tests {
         use crate::{QuickShapeAnchor, QuickShapeKind};
         let Some(s) = session() else { return };
         let dir = store("curves");
-        let module =
-            wat::parse_str(r#"(module (func (export "procraft_quickshape_curves") (result i32) (i32.const 1)))"#)
-                .unwrap();
         let plugins = Plugins::with_store(dir.clone());
-        let mut manifest = coded(ID, &module);
-        manifest["hooks"] = json!(["quickshape_curves"]);
-        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "quickshape-curves").unwrap();
+        assert_eq!(plugins.install(bytes.to_vec()), None);
+        const ID: &str = "io.github.artcraftandroid.quickshape-curves";
         s.use_plugins(Arc::clone(&plugins));
         // a zigzag: across, back and across again, as a hand draws one
         let zigzag = |s: &CanvasSession, t0: f64| {
@@ -819,6 +824,9 @@ pub(crate) mod tests {
         assert_eq!(shape.anchors[1], QuickShapeAnchor::Corner);
         // a control is no anchor
         assert!(s.quickshape_cycle_anchor(1).is_none());
+        // shown as the polyline, then as a curve again: the plugin fits it afresh
+        assert_eq!(s.quickshape_choose(QuickShapeKind::Polyline).map(|i| i.kind), Some(QuickShapeKind::Polyline));
+        assert_eq!(s.quickshape_choose(QuickShapeKind::Curve).map(|i| i.kind), Some(QuickShapeKind::Curve));
         s.quickshape_done();
         s.stroke_end(vec![]);
         let _ = std::fs::remove_dir_all(&dir);
