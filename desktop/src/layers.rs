@@ -1302,13 +1302,13 @@ impl Layers {
             },
             backdrops,
             |ui| {
-                let mut places = menu::option_rows(rect.left(), rect.top() + 7.0, rect.width(), count);
-                for (row, r) in places.by_ref().zip(&rows) {
+                let places: Vec<_> = menu::option_rows(rect.left(), rect.top() + 7.0, rect.width(), count).collect();
+                for (&row, r) in places.iter().zip(&rows) {
                     if menu::option(ui, look, row, &r.label, r.switch_on.unwrap_or(false), r.enabled, false) {
                         chosen = Some(r.option);
                     }
                 }
-                for (row, a) in places.zip(&actions) {
+                for (&row, a) in places.iter().skip(rows.len()).zip(&actions) {
                     if menu::option(ui, look, row, &a.label, false, true, false) {
                         action = Some(a.key.clone());
                     }
