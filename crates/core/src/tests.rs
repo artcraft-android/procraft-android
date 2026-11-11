@@ -939,6 +939,60 @@ fn dump_brush_comparisons() {
     std::fs::write(format!("{root}/summary.txt"), summary).unwrap();
 }
 
+/// Each brush of a file as it paints on a canvas, not in its preview: a stroke in white across a
+/// clear layer, at three sizes, with the pen's pressure rising and falling, as `<brush>.png` in
+/// `PROCRAFT_DUMP` (beside the file's own thumbnail, `<brush>-thumbnail.png`, when it has one).
+/// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p procraft-core dump_brush_strokes -- --ignored`
+#[test]
+#[ignore]
+fn dump_brush_strokes() {
+    use procraft_engine::brushfile;
+    let Ok(path) = std::env::var("BRUSH_SET") else { return };
+    let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
+    let Some(s) = session(1024, 1024) else { return };
+    let set = s.import_brushes(std::fs::read(path).unwrap()).unwrap();
+    let brushes: Vec<(u32, String)> =
+        s.brush_library()[set as usize].brushes.iter().map(|b| (b.index, b.name.clone())).collect();
+    for (index, name) in brushes {
+        // a set's folder entries aren't brushes
+        if name.starts_with('\u{1F4C2}') {
+            continue;
+        }
+        let file_name = name.replace(['/', '\\'], "-");
+        let file = brushfile::read(&s.brush_as_file(set, index).unwrap()).unwrap();
+        if let Some((w, h, own)) = file.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
+            std::fs::write(format!("{root}/{file_name}-thumbnail.png"), crate::project::rgba_png(w, h, &own)).unwrap();
+        }
+        let layer = s.add_layer();
+        assert!(s.select_brush(set, index));
+        // settings changed first, to see what each does (`BRUSH_SETTINGS=burnt_edges=0,wet_edges=0`)
+        if let Ok(changes) = std::env::var("BRUSH_SETTINGS") {
+            s.studio_begin();
+            for change in changes.split(',').filter(|c| !c.is_empty()) {
+                let (key, value) = change.split_once('=').unwrap();
+                s.set_studio_setting(key.to_owned(), value.parse().unwrap());
+            }
+            s.studio_end(true);
+        }
+        s.set_color(1.0, 1.0, 1.0);
+        for (row, size) in [0.3_f32, 0.6, 1.0].into_iter().enumerate() {
+            s.set_brush_size(size);
+            let y = 200.0 + row as f32 * 300.0;
+            let at = |i: usize| {
+                let t = i as f32 / 120.0;
+                let mut p = sample(100.0 + t * 820.0, y + (t * 6.0).sin() * 25.0, i as f64 * 8.0);
+                p.pressure = (std::f32::consts::PI * t).sin().max(0.05);
+                p
+            };
+            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            s.stroke_add((1..120).map(at).collect());
+            s.stroke_end(vec![at(120)]);
+        }
+        let rgba = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        std::fs::write(format!("{root}/{file_name}.png"), crate::project::rgba_png(1024, 1024, &rgba)).unwrap();
+    }
+}
+
 #[test]
 fn smudge_tool_moves_paint_and_is_one_undo_step() {
     let Some(s) = session(100, 100) else { return };
