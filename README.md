@@ -119,7 +119,7 @@ ProCraft is in beta, on Android tablets and on the desktop (Windows and Linux).
 | 3D painting: OBJ and USDZ models, texture sets, painting on the mesh, lights and environments | 🚧 |
 | Desktop: Windows and Linux, the same interface with a mouse, a pen tablet and keyboard shortcuts; an installer, an AppImage and a .deb | 🚧 beta |
 | Plugins: `.procraft-plugin` files you import in Prefs › Plugins, each off until you turn it on and gone without a trace when you turn it off. Filters (a few lines of WGSL, under Adjustments) and sandboxed WebAssembly that changes how the app behaves, such as Interface size, Touch offset and ColorDrop gap closing. How to write one: [docs/plugins.md](docs/plugins.md) | 🚧 experimental |
-| More for plugins: panels and tools of their own, and plugins that can use the app's commands | ⬜ |
+| More for plugins: buttons that change the artwork (asking permission first), panels of their own, the colour picker drawn their way, and kinds of artwork of their own, such as Vector canvas | 🚧 experimental |
 | Phones: their own app, ProCraft Pocket (this one is for tablets) | ⬜ |
 
 <sub>✅ works today · 🚧 in progress · ⬜ not started · 🚫 not planned</sub>

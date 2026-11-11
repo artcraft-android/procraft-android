@@ -12,11 +12,15 @@ For now the samples in [`plugins/`](../plugins) also come inside the app, packed
 A plugin holds one or both of these:
 
 - **Code**, which changes how the app behaves. It's a WebAssembly module, run under limits by an
-  interpreter, that the app asks at named places called [hooks](#hooks).
+  interpreter, that the app asks at named places called [hooks](#hooks). Code can also add buttons
+  that change the artwork ([actions](#actions)), show a [panel](#panels) of its own, draw the colour
+  panel's Classic picker ([`picker`](#picker)), or make a kind of artwork of its own
+  ([artworks of its own](#artworks-of-its-own)).
 - **A [filter](#filters)**, which adds a new adjustment. It's a function the GPU runs over a layer.
 
 The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with code and `gap-closing`
-the largest. `extract-lines`, `posterise` and `outline` are filters.
+the largest. `extract-lines`, `posterise` and `outline` are filters. `grid-layer` has an action,
+`colour-triangle` is a picker, and `vector-canvas` makes artworks of its own.
 
 ## What you write
 
@@ -52,7 +56,9 @@ or both. The file has to hold exactly that. The import screen tells people what 
 plugin do.
 
 `hooks` lists the hooks the code uses, and only a plugin that holds `"hooks"` may have it. Code
-needs at least one hook or one action (see [Actions](#actions)).
+needs at least one hook, one action (see [Actions](#actions)) or one kind of artwork (see
+[Artworks of its own](#artworks-of-its-own)). `interface` is 1 here; actions, permissions, panels,
+the `picker` hook and kinds of artwork need 2.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -122,8 +128,9 @@ Where they show depends on what the plugin holds:
 
 ## Hooks
 
-A hook is a place in the app that asks a plugin something. All the code can do is hand back an
-answer, and the app checks that answer before using it.
+A hook is a place in the app that asks a plugin something. At a hook, all the code can do is hand
+back an answer, and the app checks that answer before using it. Changing the artwork is for
+[actions](#actions).
 
 ### What code can reach
 
@@ -787,9 +794,9 @@ and have `Plugins::with_bundled` add none. What was added stays, as if imported.
 
 `interface` in `compat` is the version of all this: the hooks and what they call, the template around
 a filter's function, what a filter is given, the kinds of control, and the app's functions. Interface
-2 added actions and permissions. What a hook calls stays as it's
-written here, and the app keeps every interface's template, so a plugin goes on working as it was
-written.
+2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork. What a
+hook calls stays as it's written here, and the app keeps every interface's template, so a plugin goes
+on working as it was written.
 
 Something that needs more uses a newer interface number, and an older app says it needs a newer
 ProCraft. So does an app that doesn't have a hook a plugin lists, or something `holds` names.
