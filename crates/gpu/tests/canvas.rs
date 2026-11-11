@@ -2474,6 +2474,54 @@ fn a_dual_brush_s_wet_paint_is_cut_by_its_second() {
 }
 
 #[test]
+fn a_dual_brush_in_a_height_mode_leaves_no_clear_pixel_where_both_painted() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // dots of 64 strengths, wet edged, through a deep grain taken as a height (which takes most of
+    // them to full), all under a second that is full everywhere, by Height and by Linear Height:
+    // each dot shows whole (a coverage a rounding past full once gave a clear pixel)
+    for mode in [27, 28] {
+        let mut doc = Document::new(128, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let first = StrokeStyle {
+            wet_edges: 1.0,
+            grain: Some(0),
+            grain_mode: procraft_engine::brush::GrainMode::Texturized,
+            grain_depth: 1.0,
+            grain_scale: 64.0,
+            grain_blend: 27,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        let second = procraft_gpu::SecondStroke {
+            style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
+            mode,
+            threshold: -1.0,
+        };
+        let at = |i: u32| (4 + (i % 16) * 8, 4 + (i / 16) * 8 + 16);
+        canvas.begin_dual_stroke(doc.current(), first, second);
+        let dots: Vec<Stamp> = (0..64)
+            .map(|i| {
+                let (x, y) = at(i);
+                Stamp::round(Vec2::new(x as f32 + 0.5, y as f32 + 0.5), 3.0, (i + 1) as f32 / 64.0)
+            })
+            .collect();
+        canvas.add_stamps(&dots);
+        canvas.add_second_stamps(&[Stamp::round(Vec2::new(64.0, 32.0), 100.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let clear: Vec<(u32, u32)> = (12..64)
+            .flat_map(|i| {
+                let (x, y) = at(i);
+                [(x, y), (x + 1, y), (x, y + 1), (x - 1, y), (x, y - 1)]
+            })
+            .filter(|&(x, y)| pixel(&layer, 128, x, y)[3] == 0)
+            .collect();
+        assert!(clear.is_empty(), "mode {mode}: clear at {clear:?}");
+    }
+}
+
+#[test]
 fn a_dual_brush_s_second_adds_nothing_where_the_first_is_not() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

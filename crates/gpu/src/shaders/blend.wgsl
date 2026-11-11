@@ -174,10 +174,19 @@ const DUAL_LINEAR_HEIGHT: u32 = 28u;
 // the first stroke's amount `a` cut by the second's `b` as a height: where the second is thin
 // (under 0.2) the first rises (most where it is near none or full), and the second's coverage
 // lifts what the first has
-fn dual_height(a: f32, b: f32) -> f32 {
+fn dual_height(amount: f32, b: f32) -> f32 {
+    // (held to 0..1: out of the grain it can be a rounding past 1, and then `mid` a hair below 0)
+    let a = clamp(amount, 0.0, 1.0);
     let mid = 2.0 * (0.5 - abs(a - 0.5));
-    let rise = 40.0 * max(0.2 - b, 0.0) * (pow(a, 6.0) + pow(mid, 6.0));
+    let rise = 40.0 * max(0.2 - b, 0.0) * (sixth(a) + sixth(mid));
     return clamp(max(rise + 0.5 * a, (rise - a) * b + 2.0 * a), 0.0, 1.0);
+}
+
+// `x` to the sixth power, multiplied out: pow is undefined below 0 (NaN on most GPUs, which a
+// stroke then draws as clear)
+fn sixth(x: f32) -> f32 {
+    let x2 = x * x;
+    return x2 * x2 * x2;
 }
 
 // a dual brush's first stroke's coverage `a` and its second's `b` combined by the brush's dual
