@@ -414,6 +414,11 @@ impl Interface {
         &self.prefs.plugins
     }
 
+    /// The plugins, to keep: what opens a plugin's artwork holds them.
+    pub fn plugins_shared(&self) -> Arc<procraft_core::Plugins> {
+        Arc::clone(&self.prefs.plugins)
+    }
+
     /// Tap Assistance is on (Advanced settings).
     pub fn tap_assistance(&self) -> bool {
         self.prefs.tap_assistance
@@ -2370,6 +2375,7 @@ impl Interface {
                     model: self.model,
                     model_flat: self.model && session.model_flat(),
                     paint_through: self.model && session.paint_through(),
+                    svg: session.exports_svg(),
                 };
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);

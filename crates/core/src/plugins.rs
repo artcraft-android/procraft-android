@@ -203,6 +203,8 @@ pub struct PluginInfo {
     pub brush_controls: Vec<PluginBrushControl>,
     /// What it does when tapped, while it is on, and what it may reach then.
     pub actions: Vec<PluginAction>,
+    /// The kinds of artwork it makes, while it is on (the gallery's + lists them).
+    pub kinds: Vec<crate::PluginKind>,
     pub permissions: Vec<crate::plugin_commands::PluginPermission>,
 }
 
@@ -379,6 +381,7 @@ fn from_file(manifest: Manifest) -> PluginInfo {
         controls: if only_filter { Vec::new() } else { manifest.controls },
         brush_controls: manifest.brush_controls,
         actions: manifest.actions,
+        kinds: manifest.kinds,
         permissions: manifest.permissions,
     }
 }
@@ -979,6 +982,60 @@ impl Plugins {
         }
     }
 
+    /// The kinds of artwork the plugins on make, for the gallery's +.
+    pub fn kinds(&self) -> Vec<crate::PluginKind> {
+        let list = self.listed();
+        let on = list.files.iter().filter(|p| p.on && p.problem.is_none());
+        on.flat_map(|p| p.kinds.iter().cloned()).collect()
+    }
+
+    /// An artwork of kind `kind` (`<id>.<key>`) opened, in a copy of its plugin's code of its own:
+    /// a new one `width` × `height`, or the one its saved `data` holds. None if no plugin on makes
+    /// that kind, or it couldn't (one that stops goes off, and says why).
+    pub fn open_canvas(
+        &self,
+        kind: String,
+        width: u32,
+        height: u32,
+        data: Option<Vec<u8>>,
+    ) -> Option<Arc<crate::PluginCanvas>> {
+        let found = {
+            let list = self.listed();
+            list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
+                p.kinds.iter().any(|k| k.key == kind).then(|| {
+                    let values: Vec<f32> = p.controls.iter().map(PluginControl::number).collect();
+                    (p.id.clone(), p.version.clone(), values, p.permissions.clone())
+                })
+            })
+        };
+        let (id, version, values, permissions) = found?;
+        let code = self.store.as_deref().and_then(|store| plugin_file::read_code(store, &id, &version));
+        let started = code
+            .ok_or(Stop::Damaged)
+            .and_then(|(hooks, bytes)| Running::start_on(&bytes, &values, &hooks, &permissions));
+        let running = match started {
+            Ok(running) => running,
+            Err(stop) => {
+                self.hooks.stopped(&id, stop);
+                return None;
+            }
+        };
+        match crate::PluginCanvas::open(id.clone(), Arc::clone(&self.hooks), running, width, height, data.as_deref()) {
+            Ok(canvas) => {
+                let canvas = Arc::new(canvas);
+                // told its plugin's controls as they change
+                self.hooks.keep_canvas(&id, &canvas);
+                Some(canvas)
+            }
+            Err(stop) => {
+                if let Some(stop) = stop {
+                    self.hooks.stopped(&id, stop);
+                }
+                None
+            }
+        }
+    }
+
     /// The panel a plugin's action showed, while it is open.
     pub fn panel(&self) -> Option<crate::PluginPanel> {
         self.open_panel().as_ref().map(|open| open.shows.clone())
@@ -1223,6 +1280,7 @@ mod tests {
         PluginInfo {
             brush_controls: Vec::new(),
             actions: Vec::new(),
+            kinds: Vec::new(),
             permissions: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),
@@ -1906,6 +1964,72 @@ mod tests {
         let next = app_at(&dir);
         assert_eq!(next.plugins(), cards);
         assert!(next.filters().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_artwork_of_a_plugin_s_kind_takes_touches_draws_saves_and_loads() {
+        let dir = store("canvas-kind");
+        let plugins = Plugins::with_store(dir.clone());
+        let id = "org.example.dots";
+        let file = crate::plugin_file::tests::dots_file(id, serde_json::json!([{ "key": "dots", "label": "Dots" }]));
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.kinds().is_empty(), "off until turned on");
+        assert!(plugins.set_on(id.to_owned(), true));
+        let kind = format!("{id}.dots");
+        assert_eq!(plugins.kinds(), [crate::PluginKind { key: kind.clone(), label: "Dots".to_owned() }]);
+        let canvas = plugins.open_canvas(kind.clone(), 40, 30, None).expect("opened");
+        assert_eq!((canvas.width(), canvas.height()), (40, 30));
+        let red_at = |c: &crate::PluginCanvas, x: usize, y: usize| {
+            let rgba = c.picture();
+            rgba[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4] == [255, 0, 0, 255]
+        };
+        assert!(!red_at(&canvas, 20, 15), "nothing yet");
+        assert!(canvas.touch(0, 20.0, 15.0, 1.0));
+        assert!(red_at(&canvas, 20, 15) && !red_at(&canvas, 2, 2));
+        // what it saved goes back, as undo does
+        let saved = canvas.save().expect("saved");
+        assert_eq!(saved.len(), 8);
+        assert!(canvas.touch(0, 6.0, 6.0, 1.0));
+        assert!(red_at(&canvas, 6, 6) && !red_at(&canvas, 20, 15));
+        assert!(canvas.load(saved.clone()));
+        assert!(red_at(&canvas, 20, 15) && !red_at(&canvas, 6, 6));
+        // and opens as it was
+        let again = plugins.open_canvas(kind.clone(), 40, 30, Some(saved)).expect("reopened");
+        assert!(red_at(&again, 20, 15));
+        // a kind no plugin on makes opens nothing
+        assert!(plugins.open_canvas(format!("{id}.other"), 40, 30, None).is_none());
+        assert!(plugins.set_on(id.to_owned(), false));
+        assert!(plugins.open_canvas(kind, 40, 30, None).is_none());
+        assert!(plugins.kinds().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugin_whose_artwork_crashes_goes_off_and_says_why() {
+        let dir = store("canvas-crash");
+        let plugins = Plugins::with_store(dir.clone());
+        let id = "org.example.dots";
+        let touch = "(f32.store (i32.const 0) (local.get 1)) (f32.store (i32.const 4) (local.get 2)) (i32.const 1))";
+        let text = crate::plugin_run::tests::DOTS.replace(touch, "(unreachable))");
+        assert_ne!(text, crate::plugin_run::tests::DOTS);
+        let module = wat::parse_str(text).unwrap();
+        let mut manifest = crate::plugin_file::tests::coded(id, &module);
+        manifest["compat"]["procraft"]["interface"] = serde_json::json!(2);
+        manifest["hooks"] = serde_json::json!([]);
+        manifest["kinds"] = serde_json::json!([{ "key": "dots", "label": "Dots" }]);
+        let file = crate::plugin_file::tests::pack(&manifest, &[(crate::plugin_run::MODULE, &module)]);
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.set_on(id.to_owned(), true));
+        let canvas = plugins.open_canvas(format!("{id}.dots"), 40, 30, None).unwrap();
+        assert!(!canvas.touch(0, 5.0, 5.0, 1.0));
+        assert_eq!(canvas.problem().as_deref(), Some("Switched off: it crashed."));
+        let card = plugins.plugins().into_iter().find(|p| p.id == id).unwrap();
+        assert!(!card.on);
+        assert_eq!(card.problem.as_deref(), Some("Switched off: it crashed."));
+        // and it takes nothing more
+        assert!(!canvas.touch(0, 6.0, 6.0, 1.0));
+        assert!(canvas.save().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

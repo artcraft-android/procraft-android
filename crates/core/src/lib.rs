@@ -48,6 +48,8 @@ mod modes;
 mod palettes;
 mod pick;
 mod pickers;
+mod plugin_artwork;
+mod plugin_canvas;
 mod plugin_commands;
 mod plugin_file;
 mod plugin_filter;
@@ -143,6 +145,7 @@ pub use pickers::{
     disc_picture, disc_to_square, disc_to_square_point, harmony_wheel, p3_hsv_of, p3_hsv_to_rgb, rgb_to_p3_hsv,
     square_to_disc, square_to_disc_point, triangle_picture, triangle_point, triangle_sv,
 };
+pub use plugin_canvas::{PluginCanvas, PluginKind};
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
 pub use plugin_panel::{PanelRow, PluginPanel};
@@ -411,6 +414,11 @@ pub(crate) struct State {
     pub(crate) brush_on_screen: bool,
     /// What samples go through on their way to a stroke, if anything.
     pub(crate) hooks: Option<Arc<hooks::Hooks>>,
+    /// A plugin's own artwork shown here, if this session shows one: its strokes go to it.
+    pub(crate) plugin_artwork: Option<plugin_artwork::PluginArtwork>,
+    /// Opened from a folder holding a plugin's artwork: its kind and its data, until the app opens
+    /// it with its plugin.
+    pub(crate) plugin_opened: Option<plugin_artwork::PluginOpened>,
     /// The picker plugin's picture, compiled for this session's GPU: whose it is, and its code.
     pub(crate) picker_program: Option<(String, Arc<str>, Arc<procraft_gpu::PictureProgram>)>,
     /// When the stroke's input was last heard, for a sound plugin.
@@ -1289,6 +1297,8 @@ impl CanvasSession {
             brush_on_screen: false,
             hooks: None,
             picker_program: None,
+            plugin_artwork: None,
+            plugin_opened: None,
             sound_heard: None,
             sound_hover: None,
             input: procraft_engine::stroke::InputSettings::default(),
@@ -1487,6 +1497,11 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // a plugin's own artwork takes its strokes itself
+        if st.plugin_touch(plugin_artwork::Phase::Down, &samples) {
+            self.shared.frame(st);
+            return;
+        }
         // radial symmetry in as many parts as a plugin says, for this stroke
         st.doc.guide.radial = st.hooks.as_ref().and_then(|hooks| hooks.radial_segments());
         // a fill still spreading in shows all of itself before anything is drawn over it
@@ -1600,6 +1615,10 @@ impl CanvasSession {
     pub fn stroke_add(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.plugin_touch(plugin_artwork::Phase::Moved, &samples) {
+            self.shared.frame(st);
+            return;
+        }
         if st.scene_shown() {
             st.scene_stroke_add(&samples, false);
             self.shared.frame(st);
@@ -1652,6 +1671,10 @@ impl CanvasSession {
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.plugin_touch(plugin_artwork::Phase::Up, &samples) {
+            self.shared.frame(st);
+            return;
+        }
         // a paint stroke's colour goes into the history (painting an adjustment on uses none)
         if st.tool == ToolKind::Paint
             && !st.adjusting
@@ -1696,6 +1719,10 @@ impl CanvasSession {
     pub fn stroke_cancel(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.plugin_touch(plugin_artwork::Phase::Off, &[]) {
+            self.shared.frame(st);
+            return;
+        }
         if st.scene_shown() {
             st.scene_stroke_cancel();
             self.shared.frame(st);
@@ -1970,6 +1997,11 @@ impl CanvasSession {
 
     /// Undoes the last step; returns what it was called, if it was named.
     pub fn undo(&self) -> Option<String> {
+        // a plugin's own artwork goes back through what it kept; the canvas's own steps (an action's,
+        // say) once it has none
+        if self.plugin_undo(true) == Some(true) {
+            return None;
+        }
         self.await_pour();
         self.shared.lock().end_reveal();
         // transforming, the transform's own last change goes back: the canvas's steps wait until
@@ -2014,6 +2046,9 @@ impl CanvasSession {
 
     /// Redoes the last step undone; returns what it was called, if it was named.
     pub fn redo(&self) -> Option<String> {
+        if self.plugin_undo(false) == Some(true) {
+            return None;
+        }
         self.await_pour();
         self.shared.lock().end_reveal();
         // transforming, nothing is redone until it ends
@@ -2099,8 +2134,9 @@ impl CanvasSession {
             size: sliders.size,
             opacity: sliders.opacity,
             brush_diameter: st.brush(st.tool).diameter(sliders.size) * st.brush_scale(),
-            // an open shape is kept, then undone
-            can_undo: st.canvas.as_ref().is_some_and(Canvas::can_undo)
+            // an open shape is kept, then undone; a plugin's artwork goes by its own steps
+            can_undo: st.plugin_steps().is_some_and(|(undo, _)| undo)
+                || st.canvas.as_ref().is_some_and(Canvas::can_undo)
                 || st.crop_undo.is_some()
                 || st.shape.is_some()
                 || st.adjust.touched()
@@ -2109,7 +2145,8 @@ impl CanvasSession {
             can_redo: st.shape.as_ref().map_or_else(
                 || st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready() || st.shape_to_redo(),
                 quickshape::ShapeEdit::can_redo,
-            ) || st.text_edit.as_ref().is_some_and(|e| e.has_step(false)),
+            ) || st.text_edit.as_ref().is_some_and(|e| e.has_step(false))
+                || st.plugin_steps().is_some_and(|(_, redo)| redo),
             zoom: st.view.map_or(1.0, |v| v.zoom()),
             frames: st.frames,
             frame_interval_ms: st.frame_interval_ms,

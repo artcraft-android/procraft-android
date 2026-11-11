@@ -178,6 +178,20 @@ const MEMORY: &str = "memory";
 const CONTROL: &str = "procraft_control";
 const ACTION: &str = "procraft_action";
 const PANEL_EVENT: &str = "procraft_panel_event";
+const CANVAS_NEW: &str = "procraft_canvas_new";
+const CANVAS_TOUCH: &str = "procraft_canvas_touch";
+const CANVAS_DRAW: &str = "procraft_canvas_draw";
+const CANVAS_OUT: &str = "procraft_canvas_out";
+const CANVAS_SAVE: &str = "procraft_canvas_save";
+const CANVAS_IN: &str = "procraft_canvas_in";
+const CANVAS_LOAD: &str = "procraft_canvas_load";
+const CANVAS_TOOL: &str = "procraft_canvas_tool";
+/// What a call on a plugin's own artwork may spend (its drawing, its saving), and how long; a touch,
+/// which comes with each sample while the canvas waits, far less.
+const CANVAS_FUEL: u64 = 800_000_000;
+const MOST_CANVAS_TIME: Duration = Duration::from_secs(5);
+const TOUCH_FUEL: u64 = 20_000_000;
+const MOST_TOUCH_TIME: Duration = Duration::from_millis(250);
 /// What an action may spend and how long it may take: it does the plugin's work on the artwork.
 const ACTION_FUEL: u64 = 4_000_000_000;
 const MOST_ACTION_TIME: Duration = Duration::from_secs(20);
@@ -414,7 +428,7 @@ fn has_memory(module: &Module) -> bool {
 /// [`can_act`] for a plugin with no actions that may reach nothing.
 #[cfg(test)]
 pub(crate) fn can_run(bytes: &[u8], hooks: &[Hook], controls: bool) -> bool {
-    can_act(bytes, hooks, controls, false, &[])
+    can_act(bytes, hooks, controls, false, &[], false)
 }
 
 /// Whether `bytes` is a module a plugin on `hooks` can be: valid, wanting from outside only the
@@ -426,6 +440,7 @@ pub(crate) fn can_act(
     controls: bool,
     actions: bool,
     permissions: &[PluginPermission],
+    kinds: bool,
 ) -> bool {
     if bytes.len() > MOST_MODULE || !code_counts_hold(bytes) {
         return false;
@@ -437,7 +452,8 @@ pub(crate) fn can_act(
             && (!controls || exports(&module, CONTROL, &[ValType::I32, ValType::F32], &[]))
             && (!actions || exports(&module, ACTION, &[ValType::I32], &[ValType::I32]))
             && (!permissions.contains(&PluginPermission::Panel)
-                || exports(&module, PANEL_EVENT, &[ValType::I32, ValType::F32], &[ValType::I32])))
+                || exports(&module, PANEL_EVENT, &[ValType::I32, ValType::F32], &[ValType::I32]))
+            && (!kinds || has_canvas(&module)))
     });
     fits.unwrap_or(false)
 }
@@ -459,6 +475,32 @@ struct BetweenCalls {
     row: TypedFunc<(i32, i32), ()>,
     run: TypedFunc<(), i32>,
     out: TypedFunc<i32, ()>,
+}
+
+/// What a plugin's own artwork is reached through (`plugin_canvas.rs`).
+struct CanvasCalls {
+    new: TypedFunc<(i32, i32), i32>,
+    touch: TypedFunc<(i32, f32, f32, f32), i32>,
+    draw: TypedFunc<(), i32>,
+    out: TypedFunc<(), i32>,
+    save: TypedFunc<(), i32>,
+    input: TypedFunc<i32, i32>,
+    load: TypedFunc<(), i32>,
+    /// Told the tool, colour, size and opacity as a stroke starts, if it asks to be.
+    tool: Option<TypedFunc<(i32, i32, f32, f32), ()>>,
+}
+
+/// Whether `module` exports what a plugin's own artwork is reached through.
+fn has_canvas(module: &Module) -> bool {
+    use ValType::{F32, I32};
+    exports(module, CANVAS_NEW, &[I32, I32], &[I32])
+        && exports(module, CANVAS_TOUCH, &[I32, F32, F32, F32], &[I32])
+        && exports(module, CANVAS_DRAW, &[], &[I32])
+        && exports(module, CANVAS_OUT, &[], &[I32])
+        && exports(module, CANVAS_SAVE, &[], &[I32])
+        && exports(module, CANVAS_IN, &[I32], &[I32])
+        && exports(module, CANVAS_LOAD, &[], &[I32])
+        && has_memory(module)
 }
 
 struct FillCalls {
@@ -539,6 +581,7 @@ pub(crate) struct Running {
     control: Option<TypedFunc<(i32, f32), ()>>,
     action: Option<TypedFunc<i32, i32>>,
     panel_event: Option<TypedFunc<(i32, f32), i32>>,
+    canvas: Option<CanvasCalls>,
 }
 
 impl Running {
@@ -648,6 +691,18 @@ impl Running {
             let control = instance.get_typed_func(&store, CONTROL).ok();
             let action = instance.get_typed_func(&store, ACTION).ok();
             let panel_event = instance.get_typed_func(&store, PANEL_EVENT).ok();
+            let canvas = (|| {
+                Some(CanvasCalls {
+                    new: instance.get_typed_func(&store, CANVAS_NEW).ok()?,
+                    touch: instance.get_typed_func(&store, CANVAS_TOUCH).ok()?,
+                    draw: instance.get_typed_func(&store, CANVAS_DRAW).ok()?,
+                    out: instance.get_typed_func(&store, CANVAS_OUT).ok()?,
+                    save: instance.get_typed_func(&store, CANVAS_SAVE).ok()?,
+                    input: instance.get_typed_func(&store, CANVAS_IN).ok()?,
+                    load: instance.get_typed_func(&store, CANVAS_LOAD).ok()?,
+                    tool: instance.get_typed_func(&store, CANVAS_TOOL).ok(),
+                })
+            })();
             Ok(Running {
                 store,
                 position,
@@ -682,6 +737,7 @@ impl Running {
                 control,
                 action,
                 panel_event,
+                canvas,
             })
         })?;
         for (index, value) in controls.iter().enumerate() {
@@ -719,6 +775,79 @@ impl Running {
         let ran = guarded(|| long_call(store, panel_event, (row, value), &mut left, until).map(|_| ()));
         store.data_mut().session = None;
         ran
+    }
+
+    /// A new artwork of its own, `width` × `height`: whether it made one (false with no canvas).
+    pub(crate) fn canvas_new(&mut self, width: u32, height: u32) -> Result<bool, Stop> {
+        let Running { store, canvas, .. } = self;
+        let Some(calls) = canvas.as_ref() else { return Ok(false) };
+        let size =
+            (i32::try_from(width).map_err(|_| Stop::Nonsense)?, i32::try_from(height).map_err(|_| Stop::Nonsense)?);
+        let (mut left, until) = (CANVAS_FUEL, Instant::now() + MOST_CANVAS_TIME);
+        Ok(guarded(|| long_call(store, &calls.new, size, &mut left, until))? == 0)
+    }
+
+    /// A touch on its artwork: whether what it draws changed.
+    pub(crate) fn canvas_touch(&mut self, phase: u32, x: f32, y: f32, pressure: f32) -> Result<bool, Stop> {
+        let Running { store, canvas, .. } = self;
+        let Some(calls) = canvas.as_ref() else { return Ok(false) };
+        let (mut left, until) = (TOUCH_FUEL, Instant::now() + MOST_TOUCH_TIME);
+        let said = guarded(|| long_call(store, &calls.touch, (phase as i32, x, y, pressure), &mut left, until))?;
+        Ok(said != 0)
+    }
+
+    /// Tells its artwork the tool (0 paint, 1 erase, 2 smudge), the colour (0xRRGGBBAA), the size
+    /// (the brush's width, canvas pixels) and the opacity a stroke starts with.
+    pub(crate) fn canvas_tool(&mut self, tool: u32, rgba: u32, size: f32, opacity: f32) -> Result<(), Stop> {
+        let Running { store, canvas, .. } = self;
+        let Some(call) = canvas.as_ref().and_then(|c| c.tool.as_ref()) else { return Ok(()) };
+        guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            call.call(&mut *store, (tool as i32, rgba as i32, size, opacity)).map_err(|e| stop_of(&e))
+        })
+    }
+
+    /// What it draws now, as its draw list's bytes.
+    pub(crate) fn canvas_draw(&mut self) -> Result<Vec<u8>, Stop> {
+        self.canvas_out(|calls| &calls.draw, crate::plugin_canvas::MOST_DATA)
+    }
+
+    /// Its artwork as its own data.
+    pub(crate) fn canvas_save(&mut self) -> Result<Vec<u8>, Stop> {
+        self.canvas_out(|calls| &calls.save, crate::plugin_canvas::MOST_DATA)
+    }
+
+    /// What `call` leaves at `procraft_canvas_out()`, as long as it says (at most `most` bytes).
+    fn canvas_out(&mut self, call: fn(&CanvasCalls) -> &TypedFunc<(), i32>, most: usize) -> Result<Vec<u8>, Stop> {
+        let Running { store, canvas, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (canvas.as_ref(), memory.as_ref()) else { return Ok(Vec::new()) };
+        let (mut left, until) = (CANVAS_FUEL, Instant::now() + MOST_CANVAS_TIME);
+        guarded(|| {
+            let len =
+                usize::try_from(long_call(store, call(calls), (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            if len > most {
+                return Err(Stop::Nonsense);
+            }
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut bytes = vec![0_u8; len];
+            memory.read(&*store, at, &mut bytes).map_err(|_| Stop::Nonsense)?;
+            Ok(bytes)
+        })
+    }
+
+    /// `data` handed to it as its artwork: whether it took it.
+    pub(crate) fn canvas_load(&mut self, data: &[u8]) -> Result<bool, Stop> {
+        let Running { store, canvas, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (canvas.as_ref(), memory.as_ref()) else { return Ok(false) };
+        let len = i32::try_from(data.len()).map_err(|_| Stop::Nonsense)?;
+        let (mut left, until) = (CANVAS_FUEL, Instant::now() + MOST_CANVAS_TIME);
+        guarded(|| {
+            let at =
+                usize::try_from(long_call(store, &calls.input, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, at, data).map_err(|_| Stop::Nonsense)?;
+            Ok(long_call(store, &calls.load, (), &mut left, until)? == 0)
+        })
     }
 
     /// The panel it asked to show since last asked (none if it didn't), and whether it asked to
@@ -1158,6 +1287,11 @@ impl Running {
 pub(crate) mod tests {
     use super::*;
 
+    /// [`can_act`] for code that makes no artworks of its own.
+    fn acts(bytes: &[u8], hooks: &[Hook], controls: bool, actions: bool, permissions: &[PluginPermission]) -> bool {
+        can_act(bytes, hooks, controls, actions, permissions, false)
+    }
+
     /// A picker that flips each answer upside down: a point (x, y) picks (x, 1 - y), and (s, v) sits at
     /// (s, 1 - v).
     pub(crate) const PICKS: &str = r#"(module
@@ -1167,6 +1301,45 @@ pub(crate) mod tests {
                 (i64.shl (i64.extend_i32_u (i32.reinterpret_f32 (f32.sub (f32.const 1) (local.get 1)))) (i64.const 32))))
         (func (export "procraft_picker_pick") (param f32 f32) (result i64) (call $flip (local.get 0) (local.get 1)))
         (func (export "procraft_picker_point") (param f32 f32) (result i64) (call $flip (local.get 0) (local.get 1))))"#;
+
+    /// An artwork of its own: a dot where it was last touched, drawn as a red square 10 a side; it
+    /// saves the dot's place (8 bytes).
+    pub(crate) const DOTS: &str = r#"(module
+        (memory (export "memory") 1)
+        (func (export "procraft_canvas_new") (param i32 i32) (result i32)
+            (f32.store (i32.const 0) (f32.const -100)) (f32.store (i32.const 4) (f32.const -100)) (i32.const 0))
+        (func (export "procraft_canvas_touch") (param i32 f32 f32 f32) (result i32)
+            (f32.store (i32.const 0) (local.get 1)) (f32.store (i32.const 4) (local.get 2)) (i32.const 1))
+        (func $word (param $at i32) (param $w i32) (i32.store (local.get $at) (local.get $w)))
+        (func $num (param $at i32) (param $n f32) (f32.store (local.get $at) (local.get $n)))
+        (func (export "procraft_canvas_draw") (result i32)
+            (local $x f32) (local $y f32)
+            (local.set $x (f32.load (i32.const 0))) (local.set $y (f32.load (i32.const 4)))
+            (call $word (i32.const 1024) (i32.const 1))
+            (call $word (i32.const 1028) (i32.const 0xFF0000FF))
+            (call $word (i32.const 1032) (i32.const 0))
+            (call $num (i32.const 1036) (f32.const 0))
+            (call $word (i32.const 1040) (i32.const 0))
+            (call $word (i32.const 1044) (i32.const 2))
+            (call $num (i32.const 1048) (f32.sub (local.get $x) (f32.const 5)))
+            (call $num (i32.const 1052) (f32.sub (local.get $y) (f32.const 5)))
+            (call $word (i32.const 1056) (i32.const 3))
+            (call $num (i32.const 1060) (f32.add (local.get $x) (f32.const 5)))
+            (call $num (i32.const 1064) (f32.sub (local.get $y) (f32.const 5)))
+            (call $word (i32.const 1068) (i32.const 3))
+            (call $num (i32.const 1072) (f32.add (local.get $x) (f32.const 5)))
+            (call $num (i32.const 1076) (f32.add (local.get $y) (f32.const 5)))
+            (call $word (i32.const 1080) (i32.const 3))
+            (call $num (i32.const 1084) (f32.sub (local.get $x) (f32.const 5)))
+            (call $num (i32.const 1088) (f32.add (local.get $y) (f32.const 5)))
+            (call $word (i32.const 1092) (i32.const 5))
+            (i32.const 72))
+        (func (export "procraft_canvas_out") (result i32) (i32.const 1024))
+        (func (export "procraft_canvas_save") (result i32)
+            (i64.store (i32.const 1024) (i64.load (i32.const 0))) (i32.const 8))
+        (func (export "procraft_canvas_in") (param i32) (result i32) (i32.const 2048))
+        (func (export "procraft_canvas_load") (result i32)
+            (i64.store (i32.const 0) (i64.load (i32.const 2048))) (i32.const 0)))"#;
 
     /// A picture: red across, green down, the hue in blue.
     pub(crate) const PICTURE: &str =
@@ -1195,10 +1368,10 @@ pub(crate) mod tests {
     fn a_plugin_imports_only_what_its_permissions_give() {
         let bytes = wat::parse_str(ACTS).unwrap();
         let write = [PluginPermission::ArtworkWrite];
-        assert!(can_act(&bytes, &[], false, true, &write));
+        assert!(acts(&bytes, &[], false, true, &write));
         // without the permission it can't run, nor with only others
         assert!(!can_run(&bytes, &[], false));
-        assert!(!can_act(&bytes, &[], false, true, &[PluginPermission::ArtworkRead, PluginPermission::Brush]));
+        assert!(!acts(&bytes, &[], false, true, &[PluginPermission::ArtworkRead, PluginPermission::Brush]));
         // nor what it imports from elsewhere, or with other types
         let importing = |import: &str| {
             let text = format!(
@@ -1206,33 +1379,21 @@ pub(crate) mod tests {
             );
             wat::parse_str(text).unwrap()
         };
-        assert!(can_act(
-            &importing(r#"(import "procraft" "add_layer" (func (result i64)))"#),
-            &[],
-            false,
-            true,
-            &write
-        ));
-        assert!(!can_act(&importing(r#"(import "env" "add_layer" (func (result i64)))"#), &[], false, true, &write));
-        assert!(!can_act(
-            &importing(r#"(import "procraft" "add_layer" (func (result i32)))"#),
-            &[],
-            false,
-            true,
-            &write
-        ));
-        assert!(!can_act(&importing(r#"(import "procraft" "memory" (memory 1))"#), &[], false, true, &write));
+        assert!(acts(&importing(r#"(import "procraft" "add_layer" (func (result i64)))"#), &[], false, true, &write));
+        assert!(!acts(&importing(r#"(import "env" "add_layer" (func (result i64)))"#), &[], false, true, &write));
+        assert!(!acts(&importing(r#"(import "procraft" "add_layer" (func (result i32)))"#), &[], false, true, &write));
+        assert!(!acts(&importing(r#"(import "procraft" "memory" (memory 1))"#), &[], false, true, &write));
         // a panel needs its touches' export
         let panel = [PluginPermission::Panel];
         let shows = r#"(import "procraft" "show_panel" (func (param i32 i32) (result i32)))"#;
-        assert!(!can_act(&importing(shows), &[], false, true, &panel));
+        assert!(!acts(&importing(shows), &[], false, true, &panel));
         let touches =
             format!(r#"{shows} (func (export "procraft_panel_event") (param i32 f32) (result i32) (i32.const 0))"#);
-        assert!(can_act(&importing(&touches), &[], false, true, &panel));
+        assert!(acts(&importing(&touches), &[], false, true, &panel));
         // actions need theirs exported
         let none = position_module("", "(i64.const 0)");
-        assert!(can_act(&none, &[Hook::Position], false, false, &write));
-        assert!(!can_act(&none, &[Hook::Position], false, true, &write));
+        assert!(acts(&none, &[Hook::Position], false, false, &write));
+        assert!(!acts(&none, &[Hook::Position], false, true, &write));
     }
 
     /// Moves a sample by its two controls, as a plugin of real use does.

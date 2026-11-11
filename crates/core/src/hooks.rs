@@ -48,6 +48,8 @@ pub(crate) struct Hooks {
     working: Mutex<Working>,
     /// Where a stop is written down, to stay off through a restart.
     store: Option<PathBuf>,
+    /// The plugins' own artworks open, each by its plugin: told its controls as they change.
+    canvases: Mutex<Vec<(String, std::sync::Weak<crate::PluginCanvas>)>>,
 }
 
 impl std::fmt::Debug for Hooks {
@@ -420,14 +422,33 @@ impl Hooks {
 
     /// Tells `id`, if it is on, control `index` has `value`.
     pub(crate) fn control(&self, id: &str, index: usize, value: f32) {
-        let mut working = self.working();
-        let Some(at) = working.on.iter().position(|p| p.id == id) else { return };
-        let told = working.on.get(at).map(|p| at_work(&p.running).control(index, value));
-        if let Some(Err(stop)) = told {
-            let gone = working.on.remove(at);
-            self.note_stop(&mut working, gone.id, stop);
-            self.rehook(&working);
+        {
+            let mut working = self.working();
+            if let Some(at) = working.on.iter().position(|p| p.id == id) {
+                let told = working.on.get(at).map(|p| at_work(&p.running).control(index, value));
+                if let Some(Err(stop)) = told {
+                    let gone = working.on.remove(at);
+                    self.note_stop(&mut working, gone.id, stop);
+                    self.rehook(&working);
+                }
+            }
         }
+        // its artworks open too, once the list is let go (a canvas telling of a stop takes it)
+        let open: Vec<Arc<crate::PluginCanvas>> = {
+            let mut canvases = self.canvases.lock().unwrap_or_else(|e| e.into_inner());
+            canvases.retain(|(_, canvas)| canvas.strong_count() > 0);
+            canvases.iter().filter(|(of, _)| of == id).filter_map(|(_, canvas)| canvas.upgrade()).collect()
+        };
+        for canvas in open {
+            canvas.control(index, value);
+        }
+    }
+
+    /// `canvas`, an artwork of `id`'s open, told `id`'s controls as they change from now on.
+    pub(crate) fn keep_canvas(&self, id: &str, canvas: &Arc<crate::PluginCanvas>) {
+        let mut canvases = self.canvases.lock().unwrap_or_else(|e| e.into_inner());
+        canvases.retain(|(_, canvas)| canvas.strong_count() > 0);
+        canvases.push((id.to_owned(), Arc::downgrade(canvas)));
     }
 
     /// Writes down that `id` couldn't start, as if it had stopped.
@@ -809,6 +830,192 @@ pub(crate) mod tests {
         let card = plugins.plugins().into_iter().find(|p| p.id == ID).unwrap();
         assert!(!card.on);
         assert_eq!(card.problem.as_deref(), Some("Switched off: it took too long."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_showing_a_plugin_s_artwork_sends_it_strokes_and_undoes_by_its_steps() {
+        let Some(s) = session() else { return };
+        let dir = store("plugin-artwork");
+        let plugins = Plugins::with_store(dir.clone());
+        let file = crate::plugin_file::tests::dots_file(ID, json!([{ "key": "dots", "label": "Dots" }]));
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let kind = format!("{ID}.dots");
+        let canvas = plugins.open_canvas(kind.clone(), 200, 200, None).unwrap();
+        // only a canvas its size
+        let small = plugins.open_canvas(kind.clone(), 100, 100, None).unwrap();
+        assert!(!s.attach_plugin_canvas(kind.clone(), small));
+        assert!(s.attach_plugin_canvas(kind.clone(), canvas));
+        assert_eq!(s.plugin_kind(), Some(kind));
+        let red_at = |s: &CanvasSession, x: usize, y: usize| {
+            picture(s)[(y * 200 + x) * 4..(y * 200 + x) * 4 + 4] == [255, 0, 0, 255]
+        };
+        // a stroke goes to it, not to the brush: the dot follows the pen and the brush draws nothing
+        s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 40.0, 0.0)]);
+        s.stroke_add(vec![sample(60.0, 40.0, 8.0)]);
+        s.stroke_end(vec![sample(100.0, 120.0, 16.0)]);
+        assert!(red_at(&s, 100, 120), "the dot where the stroke ended");
+        assert!(!red_at(&s, 40, 40) && !red_at(&s, 60, 40), "nothing else drawn");
+        assert!(s.info().can_undo);
+        let first = s.plugin_data().unwrap();
+        // another, then undone back to the first, and redone
+        s.stroke_begin(PointerKind::Stylus, vec![sample(30.0, 160.0, 0.0)]);
+        s.stroke_end(vec![]);
+        assert!(red_at(&s, 30, 160) && !red_at(&s, 100, 120));
+        s.undo();
+        assert!(red_at(&s, 100, 120) && !red_at(&s, 30, 160));
+        assert_eq!(s.plugin_data().unwrap(), first);
+        assert!(s.info().can_redo);
+        s.redo();
+        assert!(red_at(&s, 30, 160));
+        // saved, its kind named and its data beside; opened again, its plugin takes it back
+        let folder = store("plugin-artwork-saved");
+        s.save(folder.clone()).unwrap();
+        let json = std::fs::read_to_string(std::path::Path::new(&folder).join("artwork.json")).unwrap();
+        assert!(json.contains(&format!("\"plugin\":\"{ID}.dots\"")), "{json}");
+        let data = std::fs::read(std::path::Path::new(&folder).join(crate::project::PLUGIN_DATA)).unwrap();
+        assert_eq!(Some(data.clone()), s.plugin_data());
+        let opened = CanvasSession::open(folder.clone()).unwrap();
+        assert_eq!(opened.plugin_kind(), Some(format!("{ID}.dots")));
+        assert!(opened.open_plugin_artwork(Arc::clone(&plugins)));
+        assert_eq!(opened.plugin_data(), Some(data));
+        // its plugin off, it opens as what it last drew, the plugin's kind and data kept through a save
+        let again = CanvasSession::open(folder.clone()).unwrap();
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert!(!again.open_plugin_artwork(Arc::clone(&plugins)));
+        again.save(folder.clone()).unwrap();
+        let json = std::fs::read_to_string(std::path::Path::new(&folder).join("artwork.json")).unwrap();
+        assert!(json.contains(&format!("{ID}.dots")));
+        let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_vector_canvas_plugin_draws_strokes_in_the_brush_colour_and_undoes_them() {
+        let Some(s) = session() else { return };
+        let dir = store("vector-canvas");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
+        assert_eq!(plugins.install(file.to_vec()), None);
+        let id = "io.github.artcraftandroid.vector-canvas";
+        assert!(plugins.set_on(id.to_owned(), true));
+        let kind = plugins.kinds().into_iter().find(|k| k.key == format!("{id}.vector")).expect("listed").key;
+        let canvas = plugins.open_canvas(kind.clone(), 200, 200, None).unwrap();
+        assert!(s.attach_plugin_canvas(kind, canvas));
+        s.set_color(0.0, 0.0, 1.0);
+        s.set_brush_size(0.5);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 100.0, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(40.0 + i as f32 * 4.0, 100.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(160.0, 100.0, 248.0)]);
+        let rgba = picture(&s);
+        let at = |x: usize, y: usize| rgba[(y * 200 + x) * 4..(y * 200 + x) * 4 + 4].to_vec();
+        assert_eq!(at(100, 100), [0, 0, 255, 255], "a blue stroke through the middle");
+        assert_eq!(at(100, 40)[3], 0, "and nothing far from it");
+        // a second stroke is drawn over the first's picture: both show, as drawn whole
+        s.set_color(1.0, 0.0, 0.0);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 40.0, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(100.0, 40.0 + i as f32 * 4.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(100.0, 160.0, 248.0)]);
+        let both = picture(&s);
+        let at2 = |x: usize, y: usize| both[(y * 200 + x) * 4..(y * 200 + x) * 4 + 4].to_vec();
+        assert_eq!(at2(60, 100), [0, 0, 255, 255], "the first still there");
+        assert_eq!(at2(100, 60), [255, 0, 0, 255], "the second over it");
+        s.undo();
+        assert_eq!(picture(&s)[(60 * 200 + 100) * 4 + 3], 0, "the second undone");
+        // shared as SVG, its shapes kept in its colour
+        assert!(s.exports_svg());
+        let svg = std::path::Path::new(&dir).join("artwork.svg");
+        s.export_svg(svg.to_string_lossy().into_owned()).unwrap();
+        let text = std::fs::read_to_string(&svg).unwrap();
+        assert!(text.starts_with("<svg ") && text.contains("fill=\"#0000ff\""), "{text}");
+        s.undo();
+        assert_eq!(picture(&s)[(100 * 200 + 100) * 4 + 3], 0, "undone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugin_s_artwork_keeps_its_layer_its_steps_and_its_data_honestly() {
+        let Some(s) = session() else { return };
+        let dir = store("plugin-artwork-honest");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
+        assert_eq!(plugins.install(file.to_vec()), None);
+        let id = "io.github.artcraftandroid.vector-canvas";
+        assert!(plugins.set_on(id.to_owned(), true));
+        let kind = format!("{id}.vector");
+        let canvas = plugins.open_canvas(kind.clone(), 200, 200, None).unwrap();
+        assert!(s.attach_plugin_canvas(kind.clone(), canvas));
+        let art_layer = s.layers().iter().find(|l| l.current).unwrap().id;
+        // a stroke called off leaves no step to undo
+        s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 100.0, 0.0)]);
+        s.stroke_add(vec![sample(60.0, 100.0, 8.0)]);
+        s.stroke_cancel();
+        assert!(!s.info().can_undo, "nothing to undo after a stroke called off");
+        // with no step of its own, undo takes back the canvas's (a layer added)
+        let before = s.layers().len();
+        s.add_layer();
+        assert_eq!(s.layers().len(), before + 1);
+        s.undo();
+        assert_eq!(s.layers().len(), before, "the layer added undone");
+        // a layer added keeps the plugin's picture where it was, through a save
+        let added = s.add_layer();
+        s.set_color(0.0, 0.0, 1.0);
+        s.set_brush_size(0.5);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 100.0, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(40.0 + i as f32 * 4.0, 100.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(160.0, 100.0, 248.0)]);
+        let alpha_on = |s: &CanvasSession, layer: u64| {
+            let mut st = s.shared.lock();
+            st.layer_pixels(procraft_engine::document::LayerId(layer)).unwrap()[(100 * 200 + 100) * 4 + 3]
+        };
+        assert_eq!(alpha_on(&s, art_layer), 255, "drawn on the plugin's layer");
+        assert_eq!(alpha_on(&s, added), 0, "not on the layer added");
+        let folder = store("plugin-artwork-honest-saved");
+        s.save(folder.clone()).unwrap();
+        let opened = CanvasSession::open(folder.clone()).unwrap();
+        assert!(opened.open_plugin_artwork(Arc::clone(&plugins)));
+        assert_eq!(opened.shared.lock().plugin_artwork.as_ref().map(|a| a.layer.0), Some(art_layer));
+        // its data gone, it opens as what it last drew, not as a new, empty artwork
+        std::fs::remove_file(std::path::Path::new(&folder).join(crate::project::PLUGIN_DATA)).unwrap();
+        let bare = CanvasSession::open(folder.clone()).unwrap();
+        assert!(!bare.open_plugin_artwork(Arc::clone(&plugins)));
+        let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_eraser_cuts_a_vector_stroke_on_the_canvas() {
+        let Some(s) = session() else { return };
+        let dir = store("vector-eraser");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
+        assert_eq!(plugins.install(file.to_vec()), None);
+        let id = "io.github.artcraftandroid.vector-canvas";
+        assert!(plugins.set_on(id.to_owned(), true));
+        let kind = format!("{id}.vector");
+        assert!(s.attach_plugin_canvas(kind.clone(), plugins.open_canvas(kind, 200, 200, None).unwrap()));
+        s.set_color(0.0, 0.0, 1.0);
+        s.set_brush_size(0.5);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 100.0, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(40.0 + i as f32 * 4.0, 100.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(160.0, 100.0, 248.0)]);
+        let alpha = |s: &CanvasSession, x: usize| picture(s)[(100 * 200 + x) * 4 + 3];
+        assert_eq!((alpha(&s, 60), alpha(&s, 100), alpha(&s, 140)), (255, 255, 255));
+        // the eraser down across the middle: the middle goes, the ends stay; one undo brings it back
+        s.set_tool(crate::ToolKind::Erase);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 80.0, 0.0)]);
+        s.stroke_add((1..10).map(|i| sample(100.0, 80.0 + i as f32 * 4.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(100.0, 120.0, 88.0)]);
+        assert_eq!((alpha(&s, 60), alpha(&s, 100), alpha(&s, 140)), (255, 0, 255));
+        s.undo();
+        assert_eq!(alpha(&s, 100), 255);
+        // its switch turned on with the artwork open: the eraser takes the whole stroke at once
+        assert!(plugins.set_switch(format!("{id}.whole"), true));
+        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 80.0, 0.0)]);
+        s.stroke_add((1..10).map(|i| sample(100.0, 80.0 + i as f32 * 4.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(100.0, 120.0, 88.0)]);
+        assert_eq!((alpha(&s, 60), alpha(&s, 100), alpha(&s, 140)), (0, 0, 0), "all of it gone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.vector-canvas",
+  "name": "Vector canvas",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "A new kind of artwork whose strokes are kept as curves, not pixels: New canvas lists Vector artwork.",
+  "compat": { "procraft": { "interface": 2 } },
+  "permissions": [],
+  "hooks": [],
+  "kinds": [
+    { "key": "vector", "label": "Vector artwork" }
+  ],
+  "controls": [
+    { "key": "whole", "type": "switch", "label": "Eraser takes whole strokes", "starts": false }
+  ]
+}

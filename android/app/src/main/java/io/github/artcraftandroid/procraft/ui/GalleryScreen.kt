@@ -514,6 +514,11 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     newCanvas = false
                     vm.newPresetArtwork(it)
                 },
+                kinds = vm.plugins.kinds(),
+                onKind = { kind, w, h ->
+                    newCanvas = false
+                    vm.newArtwork(w, h, kind.key)
+                },
             ) { w, h ->
                 newCanvas = false
                 vm.newArtwork(w, h)
@@ -1614,7 +1619,8 @@ private fun Thumbnail(a: Artwork, version: Int, chosen: Boolean? = null, wash: B
 
 /**
  * The new-canvas list: the screen's size first, then the presets, each with its colour profile and
- * size; a preset row swiped left shows Edit and Delete.
+ * size; a preset row swiped left shows Edit and Delete. Under them, a row for each kind of artwork a
+ * plugin on makes, the screen's size.
  */
 @Composable
 private fun NewCanvasPanel(
@@ -1625,6 +1631,8 @@ private fun NewCanvasPanel(
     onEdit: (Int) -> Unit,
     onDelete: (Int) -> Unit,
     onPick: (CanvasPreset) -> Unit,
+    kinds: List<io.github.artcraftandroid.procraft.core.PluginKind> = emptyList(),
+    onKind: (io.github.artcraftandroid.procraft.core.PluginKind, Int, Int) -> Unit = { _, _, _ -> },
     onScreenSize: (Int, Int) -> Unit,
 ) {
     // the screen as it is turned now (2560 x 1600 in landscape, 1600 x 2560 upright)
@@ -1661,7 +1669,7 @@ private fun NewCanvasPanel(
         PresetRow("Screen Size", "$sw × ${sh}px", CanvasPreset.P3, Modifier.padding(horizontal = 9.dp).height(38.dp).clip(CircleShape).background(Pc.LightRowStrong)) { onScreenSize(sw, sh) }
         // the presets scroll past 376 tall
         Column(
-            Modifier.padding(start = 9.dp, end = 9.dp, top = 9.5.dp, bottom = 30.dp).heightIn(max = 376.dp).clip(RoundedCornerShape(24.dp)).background(Pc.LightRow)
+            Modifier.padding(start = 9.dp, end = 9.dp, top = 9.5.dp, bottom = if (kinds.isEmpty()) 30.dp else 0.dp).heightIn(max = 376.dp).clip(RoundedCornerShape(24.dp)).background(Pc.LightRow)
                 .verticalScroll(rememberScrollState()),
         ) {
             presets.forEachIndexed { i, p ->
@@ -1680,6 +1688,14 @@ private fun NewCanvasPanel(
                     if (opened != null) opened = null else onPick(p)
                 }
             }
+        }
+        // the plugins' kinds of artwork, each the screen's size
+        kinds.forEachIndexed { k, kind ->
+            val bottom = if (k == kinds.lastIndex) 30.dp else 0.dp
+            PresetRow(
+                kind.label, "$sw × ${sh}px", CanvasPreset.P3,
+                Modifier.padding(start = 9.dp, end = 9.dp, top = 9.5.dp, bottom = bottom).height(38.dp).clip(CircleShape).background(Pc.LightRowStrong),
+            ) { onKind(kind, sw, sh) }
         }
     }
 }

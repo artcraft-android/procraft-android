@@ -150,6 +150,8 @@ macro_rules! picker {
 #[cfg(feature = "std")]
 pub mod app;
 #[cfg(feature = "std")]
+pub mod canvas;
+#[cfg(feature = "std")]
 mod with_std;
 #[cfg(feature = "std")]
 pub use with_std::*;

@@ -815,6 +815,8 @@ impl App {
                 Some(zoom) => zoom.over_gallery(ui.ctx()),
                 None => zoom::Zoom::end(ui.ctx()),
             }
+            // the New canvas list offers the kinds of artwork the plugins on make
+            gallery.kinds = interface.plugins().kinds();
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
             // a pen's buttons do nothing here, and nothing in the artwork opened next either
             crate::pen::take_button_presses();
@@ -875,6 +877,24 @@ impl App {
                     let dir = self.gallery.store.new_folder(folder);
                     self.open_artwork(session, dir);
                     self.ui.started_new();
+                }
+            }
+            // a plugin's kind of artwork, the screen's size, its plugin keeping it
+            Some(gallery::Asked::PluginKind(kind, folder)) => {
+                let (w, h) = self.gallery.screen_px;
+                let canvas = self.ui.plugins_shared().open_canvas(kind.clone(), w, h, None);
+                match canvas {
+                    Some(canvas) if !busy => {
+                        let session = CanvasSession::new(w, h);
+                        session.set_new_profile(procraft_core::P3.into());
+                        if session.attach_plugin_canvas(kind, canvas) {
+                            let dir = self.gallery.store.new_folder(folder);
+                            self.open_artwork(session, dir);
+                            self.ui.started_new();
+                        }
+                    }
+                    Some(_) => {}
+                    None => files::say("The plugin couldn't make this artwork."),
                 }
             }
             Some(gallery::Asked::Share(list, format)) => {
@@ -967,6 +987,10 @@ impl App {
     }
 
     fn open_artwork(&mut self, session: Arc<CanvasSession>, dir: String) {
+        // a plugin's own artwork goes to its plugin (on); else it shows what it last drew
+        if session.plugin_kind().is_some() && !session.open_plugin_artwork(self.ui.plugins_shared()) {
+            log::warn!("an artwork of a plugin's that isn't on opened as what it last drew");
+        }
         self.ui.artwork_dir = Some(dir.clone());
         // kept saved as it changes, as the tablet's
         Arc::clone(&session).start_autosave(dir.clone());

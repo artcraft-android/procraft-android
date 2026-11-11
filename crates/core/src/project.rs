@@ -68,7 +68,17 @@ struct ArtworkFile {
         skip_serializing_if = "Option::is_none"
     )]
     reference: Option<procraft_engine::reference_window::ReferenceWindow>,
+    /// The kind of artwork it is, if a plugin makes it (`<id>.<key>`): the plugin's data is beside
+    /// it in `plugin-data.bin`, and the layers are what it drew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin: Option<String>,
+    /// The layer a plugin's artwork's picture is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin_layer: Option<u64>,
 }
+
+/// A plugin's artwork's data in its folder.
+pub(crate) const PLUGIN_DATA: &str = "plugin-data.bin";
 
 /// A view kept with an artwork: the canvas point in the middle of the window, the zoom and the
 /// rotation (radians).
@@ -168,6 +178,8 @@ pub(crate) struct SaveSnapshot {
     gpu: Option<procraft_gpu::Gpu>,
     /// The Reference window's picture, if it has one.
     reference_picture: Option<Arc<Vec<u8>>>,
+    /// A plugin's artwork's data, if it is one.
+    plugin_data: Option<Vec<u8>>,
 }
 
 /// How much of a save's layers may still be on their way back from the GPU when the lock is let
@@ -242,6 +254,7 @@ impl crate::State {
     /// Nothing under way that saving would end or cut short.
     pub(crate) fn idle(&self) -> bool {
         self.stroke.is_none()
+            && self.plugin_artwork.as_ref().is_none_or(|a| !a.down)
             && self.transform.is_none()
             && !self.adjusting
             && self.text_edit.is_none()
@@ -288,6 +301,17 @@ impl crate::State {
                 .or(self.saved_view),
             model: model.as_ref().map(|m| m.saved.clone()),
             reference: Some(self.reference_window.clone()).filter(|w| !w.is_unused()),
+            // (opened with its plugin off, it stays the plugin's: its kind and data kept as they were)
+            plugin: self
+                .plugin_artwork
+                .as_ref()
+                .map(|a| a.kind.clone())
+                .or_else(|| self.plugin_opened.as_ref().map(|o| o.kind.clone())),
+            plugin_layer: self
+                .plugin_artwork
+                .as_ref()
+                .map(|a| a.layer.0)
+                .or_else(|| self.plugin_opened.as_ref().and_then(|o| o.layer)),
         };
         let mut layers = Vec::new();
         let mut reading = Vec::new();
@@ -355,6 +379,11 @@ impl crate::State {
         }
         let gpu = self.gpu.clone();
         let reference_picture = self.reference_picture.clone();
+        let plugin_data = self
+            .plugin_artwork
+            .as_ref()
+            .map(|a| a.kept.clone())
+            .or_else(|| self.plugin_opened.as_ref().and_then(|o| o.data.clone()));
         Ok(SaveSnapshot {
             changed: changed_ids,
             file,
@@ -366,6 +395,7 @@ impl crate::State {
             model,
             gpu,
             reference_picture,
+            plugin_data,
         })
     }
 }
@@ -467,8 +497,19 @@ impl CanvasSession {
 /// Writes a save into `dir` (made if missing): the layers that changed since the last save there,
 /// the thumbnail and the document.
 fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Result<(), MobileError> {
-    let SaveSnapshot { file, mut layers, reading, files, composite, unshown, model, gpu, reference_picture, .. } =
-        snapshot;
+    let SaveSnapshot {
+        file,
+        mut layers,
+        reading,
+        files,
+        composite,
+        unshown,
+        model,
+        gpu,
+        reference_picture,
+        plugin_data,
+        ..
+    } = snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
     for (id, read) in reading {
         let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
@@ -553,6 +594,13 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
                 fs::write(p, png).map_err(|e| file_error("writing the reference picture", e))
             });
             stage(written, picture_path, &mut staged)?;
+        }
+        // a plugin's artwork's own data, whole, before the document that names its kind
+        if let Some(data) = plugin_data.as_deref() {
+            let path = dir.join(PLUGIN_DATA);
+            let written =
+                write_beside(&path, |p| fs::write(p, data).map_err(|e| file_error("writing the plugin's artwork", e)));
+            stage(written, path, &mut staged)?;
         }
         let json = serde_json::to_string(&file).map_err(|e| file_error("writing the artwork", e))?;
         let doc = dir.join("artwork.json");
@@ -712,6 +760,12 @@ impl CanvasSession {
             st.scene = scene;
             st.reference_window = file.reference.unwrap_or_default();
             st.reference_picture = reference_picture.map(Arc::new);
+            // a plugin's artwork: its kind and data, for the app to open it with its plugin
+            st.plugin_opened = file.plugin.map(|kind| crate::plugin_artwork::PluginOpened {
+                kind,
+                data: fs::read(dir.join(PLUGIN_DATA)).ok(),
+                layer: file.plugin_layer,
+            });
         }
         Ok(session)
     }

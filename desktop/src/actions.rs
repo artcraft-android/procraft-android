@@ -264,6 +264,8 @@ pub struct Showing {
     pub model: bool,
     pub model_flat: bool,
     pub paint_through: bool,
+    /// The artwork is a plugin's: Share Image offers SVG too.
+    pub svg: bool,
 }
 
 /// The groups of rows of tab `tab`.
@@ -325,7 +327,10 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 Button("JPEG", None, Some(Act::Share(Format::Jpeg))),
                 Button("PNG", None, Some(Act::Share(Format::Png))),
                 Button("TIFF", None, Some(Act::Share(Format::Tiff))),
-            ],
+            ]
+            .into_iter()
+            .chain(showing.svg.then_some(Button("SVG", None, Some(Act::Share(Format::Svg)))))
+            .collect(),
             vec![
                 Heading("Share Layers"),
                 Button("PDF", None, Some(Act::Share(Format::LayersPdf))),
@@ -1946,6 +1951,7 @@ mod tests {
         let stranger = PluginInfo {
             brush_controls: Vec::new(),
             actions: Vec::new(),
+            kinds: Vec::new(),
             permissions: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),

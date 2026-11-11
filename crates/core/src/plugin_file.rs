@@ -123,6 +123,8 @@ pub(crate) struct Manifest {
     pub brush_controls: Vec<PluginBrushControl>,
     /// What it does when tapped, and what it may reach then.
     pub actions: Vec<crate::plugins::PluginAction>,
+    /// The kinds of artwork it makes.
+    pub kinds: Vec<crate::plugin_canvas::PluginKind>,
     pub permissions: Vec<crate::plugin_commands::PluginPermission>,
     files: Vec<Listed>,
 }
@@ -186,7 +188,19 @@ struct RawManifest {
     brush_controls: Vec<RawBrushControl>,
     #[serde(default)]
     actions: Vec<RawAction>,
+    #[serde(default)]
+    kinds: Vec<RawKind>,
 }
+
+/// A kind of artwork a plugin makes: its key and its name in the gallery's menu.
+#[derive(Deserialize)]
+struct RawKind {
+    key: String,
+    label: String,
+}
+
+/// The most kinds of artwork a plugin may make.
+const MOST_KINDS: usize = 4;
 
 /// Something a plugin does when tapped: its key, the words on its row, and where else it's listed.
 #[derive(Deserialize)]
@@ -538,8 +552,8 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
             }
             hooks.push(hook);
         }
-        // code steps in somewhere, or does something when tapped
-        if hooks.is_empty() && raw.actions.is_empty() {
+        // code steps in somewhere, does something when tapped, or makes artworks of its own
+        if hooks.is_empty() && raw.actions.is_empty() && raw.kinds.is_empty() {
             return Err(Refusal::Described);
         }
     } else if !raw.hooks.is_empty() {
@@ -570,9 +584,18 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     let plain = |text: &String| !text.trim().is_empty() && shows_plainly(text, 40);
     let actions_fit = raw.actions.len() <= MOST_ACTIONS
         && raw.actions.iter().all(|a| valid_key(&a.key) && plain(&a.label) && action_keys.insert(a.key.clone()));
-    if !actions_fit || (!code && (!raw.actions.is_empty() || !permissions.is_empty())) {
+    let mut kind_keys = HashSet::new();
+    let kinds_fit = raw.kinds.len() <= MOST_KINDS
+        && raw.kinds.iter().all(|k| valid_key(&k.key) && plain(&k.label) && kind_keys.insert(k.key.clone()));
+    let extras = !raw.actions.is_empty() || !permissions.is_empty() || !raw.kinds.is_empty();
+    if !actions_fit || !kinds_fit || (!code && extras) {
         return Err(Refusal::Described);
     }
+    let kinds: Vec<crate::plugin_canvas::PluginKind> = raw
+        .kinds
+        .into_iter()
+        .map(|k| crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label })
+        .collect();
     // a place this app doesn't have is for a newer one
     let mut actions = Vec::new();
     for a in raw.actions {
@@ -594,6 +617,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         controls,
         brush_controls,
         actions,
+        kinds,
         permissions,
         files,
     })
@@ -620,8 +644,9 @@ fn code_refused(manifest: &Manifest, path: &str, data: &[u8]) -> Option<Refusal>
         return refused.then_some(Refusal::Code);
     }
     let code = manifest.holds.contains(&PluginPart::Hooks) && path == MODULE;
-    let (controls, actions) = (!manifest.controls.is_empty(), !manifest.actions.is_empty());
-    (code && !plugin_run::can_act(data, &manifest.hooks, controls, actions, &manifest.permissions))
+    let (controls, actions, kinds) =
+        (!manifest.controls.is_empty(), !manifest.actions.is_empty(), !manifest.kinds.is_empty());
+    (code && !plugin_run::can_act(data, &manifest.hooks, controls, actions, &manifest.permissions, kinds))
         .then_some(Refusal::Code)
 }
 
@@ -1682,6 +1707,37 @@ pub(crate) mod tests {
         manifest["files"].as_array_mut().unwrap().push(listed);
         let file = pack(&manifest, &[(MODULE, &module), (PICTURE_CODE, picture.as_bytes())]);
         assert_eq!(refusal(&file), Refusal::Described);
+    }
+
+    /// A plugin that makes dots (`DOTS`), its kinds as `kinds` says.
+    pub(crate) fn dots_file(id: &str, kinds: Value) -> Vec<u8> {
+        let module = wat::parse_str(crate::plugin_run::tests::DOTS).unwrap();
+        let mut manifest = coded(id, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        manifest["hooks"] = json!([]);
+        manifest["kinds"] = kinds;
+        pack(&manifest, &[(MODULE, &module)])
+    }
+
+    #[test]
+    fn a_plugin_lists_the_kinds_of_artwork_it_makes() {
+        let dots = json!([{ "key": "dots", "label": "Dots" }]);
+        let package = read_package(&dots_file("org.example.dots", dots)).unwrap();
+        let kind =
+            crate::plugin_canvas::PluginKind { key: "org.example.dots.dots".to_owned(), label: "Dots".to_owned() };
+        assert_eq!(package.manifest.kinds, [kind]);
+        // each key once, words to show, not too many
+        let twice = json!([{ "key": "a", "label": "A" }, { "key": "a", "label": "B" }]);
+        assert_eq!(refusal(&dots_file("org.example.dots", twice)), Refusal::Described);
+        assert_eq!(refusal(&dots_file("org.example.dots", json!([{ "key": "a", "label": "" }]))), Refusal::Described);
+        let many: Vec<Value> = (0..5).map(|i| json!({ "key": format!("k{i}"), "label": "K" })).collect();
+        assert_eq!(refusal(&dots_file("org.example.dots", json!(many))), Refusal::Described);
+        // and code that makes none can't say it does
+        let module = a_module();
+        let mut manifest = coded("org.example.plugin", &module);
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        manifest["kinds"] = json!([{ "key": "dots", "label": "Dots" }]);
+        assert_eq!(refusal(&a_coded_file(&manifest, &module)), Refusal::Code);
     }
 
     #[test]

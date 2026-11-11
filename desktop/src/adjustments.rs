@@ -613,6 +613,7 @@ mod tests {
             controls: Vec::new(),
             brush_controls: Vec::new(),
             actions: Vec::new(),
+            kinds: Vec::new(),
             permissions: Vec::new(),
         }
     }

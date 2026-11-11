@@ -1290,18 +1290,28 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         io.github.artcraftandroid.procraft.core.layersFor(width.coerceAtLeast(1).toUInt(), height.coerceAtLeast(1).toUInt())
             .coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
 
-    /** A new artwork of `width` × `height` pixels (the screen's size), in Display P3, opened on the canvas. */
-    fun newArtwork(width: Int, height: Int) {
+    /** A new artwork of `width` × `height` pixels (the screen's size), in Display P3, opened on the canvas; of a plugin's [kind] (`<id>.<key>`), its plugin keeping it. */
+    fun newArtwork(width: Int, height: Int, kind: String? = null) {
         if (opening || session != null) return
         opening = true
         viewModelScope.launch {
             val s = withContext(Dispatchers.IO) {
-                CanvasSession(width.coerceAtLeast(1).toUInt(), height.coerceAtLeast(1).toUInt()).also {
+                val made = CanvasSession(width.coerceAtLeast(1).toUInt(), height.coerceAtLeast(1).toUInt()).also {
                     it.setNewProfile(io.github.artcraftandroid.procraft.gallery.CanvasPreset.P3)
                     loadBrushes(it)
                 }
+                if (kind == null) {
+                    made
+                } else {
+                    val canvas = plugins.openCanvas(kind, width.coerceAtLeast(1).toUInt(), height.coerceAtLeast(1).toUInt(), null)
+                    made.takeIf { canvas != null && it.attachPluginCanvas(kind, canvas) }
+                }
             }
             opening = false
+            if (s == null) {
+                message = "The plugin couldn't make this artwork."
+                return@launch
+            }
             start(s, store.newFolder(galleryDir), brushesLoaded = true)
             startedNew()
         }
@@ -2247,7 +2257,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         opening = true
         val cell = thumbAt[a.dir.name]
         viewModelScope.launch {
-            val s = withContext(Dispatchers.IO) { runCatching { CanvasSession.open(a.dir.path).also(::loadBrushes) } }
+            val s = withContext(Dispatchers.IO) {
+                runCatching {
+                    CanvasSession.open(a.dir.path).also {
+                        loadBrushes(it)
+                        // a plugin's own artwork goes to its plugin (on); else it shows what it last drew
+                        if (it.pluginKind() != null) it.openPluginArtwork(plugins)
+                    }
+                }
+            }
             opening = false
             s.onSuccess {
                 if (!orientationMemory) it.forgetSavedView()
@@ -5483,6 +5501,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         MODEL_RENDER("png", "image/png"),
         MODEL_JPEG("jpg", "image/jpeg"),
         MODEL_TIFF("tif", "image/tiff"),
+        /** A plugin's artwork, its shapes kept. */
+        SVG("svg", "image/svg+xml"),
     }
 
     /**
@@ -5549,6 +5569,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     Export.MODEL_RENDER -> s.exportModelRender(file.path, false)
                     Export.MODEL_JPEG -> s.exportModelJpeg(file.path)
                     Export.MODEL_TIFF -> s.exportModelTiff(file.path)
+                    Export.SVG -> s.exportSvg(file.path)
                     Export.MODEL_TEXTURES -> {
                         val folder = File(dir, base).apply { deleteRecursively(); mkdirs() }
                         return@withContext s.exportModelTextures(folder.path).map { File(it) }

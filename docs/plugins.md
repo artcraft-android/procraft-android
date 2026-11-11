@@ -611,6 +611,50 @@ kit::panel!(|row, value| {
 });
 ```
 
+## Artworks of its own
+
+Code can make a kind of artwork of its own: a vector drawing, say. The plugin keeps the artwork in
+its own format. The app hands it the strokes, shows what it draws, and keeps what it saves after each
+stroke as a step for undo and redo. The manifest lists the kinds (interface 2):
+
+```json
+  "kinds": [{ "key": "vector", "label": "Vector artwork" }]
+```
+
+While the plugin is on, the gallery's New canvas list has a row for each kind under the presets,
+the screen's size. Such an artwork's folder keeps the plugin's data in `plugin-data.bin`, its kind in
+`artwork.json`, and what it last drew as its layer. Opened with the plugin off, it shows that, and the
+plugin's data stays as it was. Share Image offers SVG for it too, written from its draw list, so its
+shapes stay shapes. A plugin can list up to four kinds. Its module exports:
+
+```
+procraft_canvas_new(width: i32, height: i32) -> i32           // 0 if it made one that size
+procraft_canvas_touch(phase: i32, x: f32, y: f32, pressure: f32) -> i32
+procraft_canvas_draw() -> i32                                  // the draw list's length
+procraft_canvas_save() -> i32                                  // its data's length
+procraft_canvas_out() -> i32                                   // where either of those is
+procraft_canvas_in(len: i32) -> i32                            // where `len` bytes of data go
+procraft_canvas_load() -> i32                                  // 0 if it took them
+procraft_canvas_tool(tool: i32, colour: i32, size: f32, opacity: f32)   // if it exports it
+```
+
+`procraft_canvas_tool` is told what each stroke starts with: the tool (0 paint, 1 erase, 2 smudge),
+the colour (`0xRRGGBBAA`), the brush's width in canvas pixels, and its opacity (0 to 1).
+
+- A touch's `phase` is 0 down, 1 moved, 2 up, or 3 called off (a second finger made it a gesture).
+  Coordinates are canvas pixels. The touch answers not 0 if what it draws changed.
+- The draw list is little-endian 32-bit words. `1 fill stroke width flags` starts a path. Fill and
+  stroke are `0xRRGGBBAA`, straight, with alpha 0 for none. The width is a float. Flags 1 makes the
+  ends and corners round, and 2 fills by the even-odd rule. Then `2 x y` moves, `3 x y` draws a line,
+  `4 x1 y1 x2 y2 x y` draws a cubic curve, and `5` closes. A list that doesn't hold up stops the
+  plugin.
+- Data is at most 64 MiB. A touch may take 20,000,000 steps, for at most a quarter of a second; the
+  other calls 800,000,000, for at most 5 seconds.
+
+The kit's `canvas` module writes it: an `Artwork` (new, the brush a stroke starts with, touch, draw
+into a `DrawList`, save, load) and `kit::canvas!(MyArtwork)`. `plugins/vector-canvas` is one to start
+from.
+
 ## Filters
 
 A filter shows under Adjustments in a Plugins row while its plugin is on. It redraws the current layer

@@ -246,7 +246,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             listOf(Act("Canvas information") { vm.canvasInfoOpen = true }),
         )
         2 -> listOf(
-            listOf(
+            listOfNotNull(
                 Heading("Share Image"),
                 // ours first, then the same package named for the other app
                 Act(CanvasViewModel.OWN_LABEL) { sharePackage(CanvasViewModel.OWN_EXTENSION) },
@@ -256,6 +256,8 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("JPEG") { share(jpeg = true) },
                 Act("PNG") { share(jpeg = false) },
                 Act("TIFF") { share(CanvasViewModel.Export.TIFF) },
+                // a plugin's artwork, its shapes kept
+                Act("SVG") { share(CanvasViewModel.Export.SVG) }.takeIf { vm.session?.exportsSvg() == true },
             ),
             listOf(
                 Heading("Share Layers"),

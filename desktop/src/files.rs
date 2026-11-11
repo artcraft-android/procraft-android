@@ -37,6 +37,8 @@ pub enum Format {
     ModelTiff,
     ModelTextures,
     ModelArtwork,
+    /// A plugin's artwork, its shapes kept.
+    Svg,
 }
 
 impl Format {
@@ -53,6 +55,7 @@ impl Format {
             Format::Jpeg | Format::ModelJpeg => "JPEG",
             Format::ModelObj => "OBJ",
             Format::ModelUsdz => "USDZ",
+            Format::Svg => "SVG",
         }
     }
 
@@ -73,6 +76,7 @@ impl Format {
             Format::Tiff | Format::ModelTiff => "tiff",
             Format::Jpeg | Format::ModelJpeg => "jpg",
             Format::ModelObj => "zip",
+            Format::Svg => "svg",
             Format::ModelUsdz => "usdz",
         }
     }
@@ -768,6 +772,7 @@ pub fn export(
             Format::ModelUsdz => session.export_model_usdz(at),
             Format::ModelRender => session.export_model_render(at, false),
             Format::ModelTiff => session.export_model_tiff(at),
+            Format::Svg => session.export_svg(at),
             Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => Ok(()),
         }?;
         Ok(vec![part])
