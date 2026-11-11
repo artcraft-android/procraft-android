@@ -4441,6 +4441,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         keepBrushLibrary(s)
     }
 
+    /** The brushes the app comes with that were deleted, back where they ship; said how many. */
+    fun restoreShippedBrushes() {
+        val s = session ?: return
+        val back = s.restoreShippedBrushes().toInt()
+        if (back > 0) libraryChanged()
+        message = when (back) {
+            0 -> "Every brush ProCraft comes with is in the library."
+            1 -> "1 brush is back."
+            else -> "$back brushes are back."
+        }
+    }
+
     fun duplicateBrush(b: BrushInfo) {
         session?.duplicateBrush(b.set, b.index) ?: return
         libraryChanged()

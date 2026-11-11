@@ -1395,6 +1395,51 @@ impl CanvasSession {
         Self::shipped_counts(&st.shipped)
     }
 
+    /// The brushes the app comes with that were deleted, back: each into the set its fellows are
+    /// in (the one of the shipped set's name first), where it ships among them; a set whose
+    /// brushes are all gone comes back whole at the end. Brushes changed, moved or kept are left as
+    /// they are. How many came back.
+    pub fn restore_shipped_brushes(&self) -> u32 {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let mut back = 0u32;
+        for set in LibrarySet::shipped(&st.shipped) {
+            let Some(s) = set.origins.first().copied().flatten().map(|(s, _)| s) else { continue };
+            let fellows = |l: &LibrarySet| l.origins.iter().flatten().any(|&(from, _)| from == s);
+            let home = st
+                .library
+                .iter()
+                .position(|l| l.name == set.name && fellows(l))
+                .or_else(|| st.library.iter().position(fellows));
+            let Some(home) = home else {
+                back += set.brushes.len() as u32;
+                st.library.push(set);
+                continue;
+            };
+            for (brush, origin) in set.brushes.into_iter().zip(set.origins) {
+                let Some(origin) = origin else { continue };
+                if st.library.iter().any(|l| l.origins.contains(&Some(origin))) {
+                    continue;
+                }
+                let Some(entry) = st.library.get_mut(home) else { break };
+                // after the last of its fellows that ships before it
+                let at = entry
+                    .origins
+                    .iter()
+                    .rposition(|o| o.is_some_and(|(from, i)| from == s && i < origin.1))
+                    .map_or(0, |p| p + 1)
+                    .min(entry.brushes.len());
+                entry.brushes.insert(at, brush);
+                if at <= entry.origins.len() {
+                    entry.origins.insert(at, Some(origin));
+                }
+                back += 1;
+                st.move_brush_refs(|(rs, ri)| Some(if rs == home && ri >= at { (rs, ri + 1) } else { (rs, ri) }));
+            }
+        }
+        back
+    }
+
     /// How many brushes each set ships with.
     pub fn shipped_brush_counts(&self) -> Vec<u32> {
         Self::shipped_counts(&self.shared.lock().shipped)
@@ -1585,6 +1630,37 @@ mod keeping {
             }
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_brushes_the_app_comes_with_come_back_where_they_ship_once_deleted() {
+        let s = CanvasSession::new(32, 32);
+        let before = s.brush_library();
+        let names = |s: &CanvasSession, set: usize| -> Vec<String> {
+            s.brush_library()
+                .get(set)
+                .map(|set| set.brushes.iter().map(|b| b.name.clone()).collect())
+                .unwrap_or_default()
+        };
+        let first = names(&s, 0);
+        assert!(first.len() >= 3);
+        // nothing gone: nothing comes back
+        assert_eq!(s.restore_shipped_brushes(), 0);
+        // the second brush of the first set, and the whole last set, deleted; a brush kept changed
+        assert!(s.delete_brush(0, 1));
+        let last = before.len() as u32 - 1;
+        let last_name = before[last as usize].name.clone();
+        assert!(s.delete_brush_set(last));
+        assert!(s.rename_brush_set(0, "Mine".into()));
+        let back = s.restore_shipped_brushes();
+        assert_eq!(back as usize, 1 + before[last as usize].brushes.len());
+        // back where it ships, in its set (renamed, it is still where its fellows are)
+        assert_eq!(names(&s, 0), first);
+        let library = s.brush_library();
+        assert_eq!(library.len(), before.len());
+        assert_eq!(library.last().map(|set| set.name.clone()), Some(last_name));
+        assert_eq!(library[0].name, "Mine");
+        assert_eq!(s.restore_shipped_brushes(), 0, "all there now");
     }
 
     #[test]

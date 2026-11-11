@@ -174,6 +174,9 @@ pub struct Library {
     wanted: Vec<((u32, u32), String)>,
     drawing: Option<std::sync::mpsc::Receiver<DrawnPreview>>,
     plus_menu: Menu,
+    /// The title's menu (the brushes the app comes with, back), and what it says it did.
+    title_menu: Menu,
+    told: Alert,
     /// The shown set's menu, and which set it is for.
     set_menu: Menu,
     set_menu_for: Option<usize>,
@@ -224,6 +227,8 @@ impl Library {
     /// A menu or question of the library's is up: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
         self.plus_menu.is_open()
+            || self.title_menu.is_open()
+            || self.told.is_open()
             || self.set_menu.is_open()
             || self.recent_menu.is_open()
             || self.icon_picker.is_open()
@@ -363,6 +368,7 @@ impl Library {
         let mut recent_tapped = false;
         let mut brush_tapped = None;
         let mut swipe_chose = None;
+        let mut title_row = Rect::NOTHING;
         egui::Area::new(egui::Id::unique("brush library")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
             ctx,
             |ui| {
@@ -375,7 +381,12 @@ impl Library {
                     ToolKind::Smudge => "Smudge library",
                     ToolKind::Paint => "Brush library",
                 };
-                panel::header(ui, look, body, title, 20.0, true, false);
+                let (title_tapped, row) =
+                    panel::header_title(ui, look, body, title, 20.0, true, self.title_menu.is_open());
+                title_row = row;
+                if title_tapped {
+                    self.title_menu.open();
+                }
                 // the plus: new brushes and sets, and importing
                 plus = Rect::from_min_size(pos2(body.right() - 12.0 - 41.0, body.top() + 12.0), vec2(41.0, 40.0));
                 if self.picked.is_empty() {
@@ -651,6 +662,8 @@ impl Library {
             }
         }
         self.plus_menu(ctx, look, session, plus, shown, backdrops);
+        self.title_menu(ctx, look, session, title_row, backdrops);
+        self.told.show(ctx, look);
         self.set_menu(ctx, look, session, &library, backdrops);
         if let Some(row) = recent_row {
             self.recent_menu(ctx, look, session, row, backdrops);
@@ -723,6 +736,48 @@ impl Library {
     /// The plus's menu, hanging below it, their right edges in line: a new brush, a new set, or
     /// brushes from a file.
     #[allow(clippy::too_many_arguments)]
+    /// The title's menu, hanging under it: Restore default brushes.
+    fn title_menu(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &Arc<CanvasSession>,
+        title: Rect,
+        backdrops: &mut Vec<f32>,
+    ) {
+        let entries = [Entry::Item(&icons::MENU_RESTORE, "Restore default brushes", menu::INK)];
+        let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
+        let screen = ctx.content_rect();
+        let left = (title.center().x - size.x / 2.0).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
+        let rect = Rect::from_min_size(pos2(left, title.bottom()), size);
+        let mut tapped = None;
+        self.title_menu.show(
+            ctx,
+            "library title menu",
+            rect,
+            pos2(rect.center().x, rect.top()),
+            menu::OVER_A_PANEL,
+            backdrops,
+            |ui| {
+                tapped = menu::entries(ui, look, rect, &entries);
+            },
+        );
+        if tapped.is_none() {
+            return;
+        }
+        self.title_menu.close();
+        let back = session.restore_shipped_brushes();
+        if back > 0 {
+            self.library_changed();
+        }
+        let said = match back {
+            0 => "Every brush ProCraft comes with is in the library.".to_owned(),
+            1 => "1 brush is back.".to_owned(),
+            n => format!("{n} brushes are back."),
+        };
+        self.told.tell("Restore default brushes", &said, Some(&icons::MENU_RESTORE));
+    }
+
     fn plus_menu(
         &mut self,
         ctx: &egui::Context,
