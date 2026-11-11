@@ -1670,6 +1670,11 @@ pub(crate) mod tests {
         };
         let package = placed("adjustments").unwrap();
         assert_eq!(package.manifest.actions[0].place, crate::plugins::PluginPlace::Adjustments);
+        for (name, place) in
+            [("layer", crate::plugins::PluginPlace::Layer), ("frame", crate::plugins::PluginPlace::Frame)]
+        {
+            assert_eq!(placed(name).unwrap().manifest.actions[0].place, place);
+        }
         assert_eq!(placed("toolbar").err(), Some(Refusal::Newer));
         // a filter neither acts nor reaches anything, nor code written before there were actions
         let filter = with(a_filter(), "/permissions", json!(["brush"]));

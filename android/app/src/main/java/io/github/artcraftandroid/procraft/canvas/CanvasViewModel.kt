@@ -7349,6 +7349,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** A plugin's action [key] from the frame options, run with that frame's layer current. */
+    fun runFrameAction(key: String) {
+        frameOptionsOpen = false
+        val layer = currentFrameLayer() ?: return
+        session?.selectLayer(layer.id)
+        runPluginAction(key)
+    }
+
     /** The frame deleted; on a held place it is held one frame less. */
     fun deleteFrame() {
         frameOptionsOpen = false

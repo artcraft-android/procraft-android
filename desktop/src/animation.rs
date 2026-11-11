@@ -78,6 +78,10 @@ struct Playing {
 pub struct AnimationBar {
     /// Whether a plugin draws in-betweens: the frame options offer In-between.
     pub tweens: bool,
+    /// The plugins' actions for the frame options, and the one tapped there, to run (with that
+    /// frame's layer current).
+    pub frame_actions: Vec<procraft_core::PluginAction>,
+    pub run_action: Option<String>,
     settings_open: bool,
     options_open: bool,
     /// The onion skins' colours page, editing the colour after the current frame (else before).
@@ -695,8 +699,10 @@ impl AnimationBar {
         let hold_rows = if a.pages { 0.0 } else { 4.0 + 55.0 + 10.0 };
         // a plugin's in-betweens: a frame drawn between this one and the next
         let inbetween = self.tweens && !a.pages && place == 0 && index + 1 < frames.len();
-        let actions: &[&str] =
-            if inbetween { &["Duplicate", "Delete", "In-between"] } else { &["Duplicate", "Delete"] };
+        let own: &[&str] = if inbetween { &["Duplicate", "Delete", "In-between"] } else { &["Duplicate", "Delete"] };
+        // a plugin's actions for the frame, after the app's own
+        let mut actions: Vec<&str> = own.to_vec();
+        actions.extend(self.frame_actions.iter().map(|a| a.label.as_str()));
         let rows = actions.len() as f32;
         let content = 11.0 + TITLE_LINE + 15.0 + hold_rows + 44.0 * rows + 2.0 * (rows - 1.0) + ends;
         let height = 8.0 + content + 8.0 + panel::ARROW_HEIGHT;
@@ -745,6 +751,13 @@ impl AnimationBar {
                     self.options_open = false;
                     // on a held place it splits there, or is held one frame less
                     match (i, place) {
+                        // a plugin's, run with this frame's layer current
+                        _ if i >= own.len() => {
+                            let key = self.frame_actions.get(i - own.len()).map(|a| a.key.clone());
+                            if key.is_some() && session.select_layer(id) {
+                                self.run_action = key;
+                            }
+                        }
                         (2, _) => {
                             if session.add_inbetween(id).is_none() {
                                 crate::files::say(

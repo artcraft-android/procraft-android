@@ -149,6 +149,11 @@ pub enum PluginPlace {
     Card,
     /// In the Adjustments menu's Plugins list, with the filters.
     Adjustments,
+    /// In the current layer's options, after the app's own.
+    Layer,
+    /// In Animation Assist's frame options, after the app's own; run with that frame's layer
+    /// current.
+    Frame,
 }
 
 impl PluginPlace {
@@ -157,6 +162,8 @@ impl PluginPlace {
         match name {
             "card" => Some(PluginPlace::Card),
             "adjustments" => Some(PluginPlace::Adjustments),
+            "layer" => Some(PluginPlace::Layer),
+            "frame" => Some(PluginPlace::Frame),
             _ => None,
         }
     }

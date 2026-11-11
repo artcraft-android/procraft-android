@@ -529,9 +529,15 @@ undo takes back.
 ```
 
 A plugin can have up to eight actions. Each `key` is used once, and each `label` is the row's words.
-Its card lists them all; `"place": "adjustments"` lists one in the Adjustments menu's Plugins list
-too, after the filters, for something done to the artwork as an adjustment is. A place this app
-doesn't have makes the file one for a newer ProCraft. Actions need interface 2. The import screen
+Its card lists them all; `"place"` lists one somewhere else too:
+
+- `"adjustments"`: in the Adjustments menu's Plugins list, after the filters, for something done
+  to the artwork as an adjustment is;
+- `"layer"`: in the current layer's options, after the app's own rows;
+- `"frame"`: in Animation Assist's frame options, after the app's own rows, run with that frame's
+  layer current.
+
+A place this app doesn't have makes the file one for a newer ProCraft. Actions need interface 2. The import screen
 says what each permission lets the plugin do.
 
 | Permission | The functions it gives |

@@ -837,7 +837,11 @@ impl Interface {
         // a full-screen page covers the timeline, as it covers the canvas
         if self.canvas_info.is_none() && !self.gesture_controls.open {
             self.animation.tweens = self.prefs.plugins.tweens();
+            self.animation.frame_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Frame);
             let said = self.animation.show(&ctx, &mut self.look, session, &self.colours.palettes, self.colours.harmony);
+            if let Some(key) = self.animation.run_action.take() {
+                self.run_plugin_action(&ctx, session, key);
+            }
             if let Some(crate::animation::Said::NoRoom) = said {
                 crate::files::no_room(session);
             }
@@ -2296,7 +2300,11 @@ impl Interface {
             }
             Popover::Layers if self.background_pick.is_some() => self.background_panel(ctx, session, button, backdrops),
             Popover::Layers => {
+                self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
                 let shown = self.layers.show(ctx, &mut self.look, session, &mut self.colours, button, backdrops);
+                if let Some(key) = self.layers.run_action.take() {
+                    self.run_plugin_action(ctx, session, key);
+                }
                 if let Some((text, warning)) = self.layers.notice.take() {
                     self.overlays.notice(text, warning);
                 }

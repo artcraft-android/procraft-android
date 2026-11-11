@@ -170,6 +170,9 @@ pub struct Layers {
     pub copied: Option<ThumbnailImage>,
     pub share: bool,
     pub edit_text: Option<u64>,
+    /// The plugins' actions for the current layer's options, and the one tapped there, to run.
+    pub plugin_actions: Vec<procraft_core::PluginAction>,
+    pub run_action: Option<String>,
     /// Layer Opacity asked for the current layer (two fingers tapped on its row).
     pub layer_opacity: bool,
     /// The background's colour asked for: its row tapped anywhere but on its box.
@@ -1275,13 +1278,17 @@ impl Layers {
         backdrops: &mut Vec<f32>,
     ) {
         let rows: Vec<LayerOptionRow> = session.layer_options(l.id);
+        // a plugin's actions for the layer, after the app's own
+        let actions = std::mem::take(&mut self.plugin_actions);
+        let count = rows.len() + actions.len();
         // as measured, an empty one (a locked group's or mask's) is a pill 64 tall
-        let height = (7.0 * 2.0 + menu::OPTION_HEIGHT * rows.len() as f32).max(64.0);
+        let height = (7.0 * 2.0 + menu::OPTION_HEIGHT * count as f32).max(64.0);
         let screen = ctx.content_rect();
         let lowest = (screen.bottom() - height).max(screen.top() + OPTIONS_TOP);
         let top = (row_y - height / 2.0).clamp(screen.top() + OPTIONS_TOP, lowest);
         let rect = Rect::from_min_size(pos2(panel.left() + OPTIONS_LEFT, top), vec2(OPTIONS_WIDTH, height));
         let mut chosen = None;
+        let mut action = None;
         self.options_menu.show(
             ctx,
             "layer options",
@@ -1290,19 +1297,29 @@ impl Layers {
             // empty, as measured, the frost alone, untinted
             menu::Glass {
                 corner: OPTIONS_CORNER,
-                fill: if rows.is_empty() { Themed(0, 0) } else { menu::FROSTED.fill },
+                fill: if count == 0 { Themed(0, 0) } else { menu::FROSTED.fill },
                 ..menu::FROSTED
             },
             backdrops,
             |ui| {
-                let places = menu::option_rows(rect.left(), rect.top() + 7.0, rect.width(), rows.len());
-                for (row, r) in places.zip(&rows) {
+                let mut places = menu::option_rows(rect.left(), rect.top() + 7.0, rect.width(), count);
+                for (row, r) in places.by_ref().zip(&rows) {
                     if menu::option(ui, look, row, &r.label, r.switch_on.unwrap_or(false), r.enabled, false) {
                         chosen = Some(r.option);
                     }
                 }
+                for (row, a) in places.zip(&actions) {
+                    if menu::option(ui, look, row, &a.label, false, true, false) {
+                        action = Some(a.key.clone());
+                    }
+                }
             },
         );
+        if let Some(key) = action {
+            self.options_menu.close();
+            self.run_action = Some(key);
+            return;
+        }
         // every row closes the menu, a switch's too (it shows ticked next time)
         let Some(does) = chosen else { return };
         self.options_menu.close();

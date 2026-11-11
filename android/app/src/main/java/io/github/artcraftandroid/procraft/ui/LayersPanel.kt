@@ -994,7 +994,9 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
             // frosted over the canvas, as the library's menus are; empty (a locked group's or
             // mask's), as measured, a pill 64 tall with the frost alone, untinted
             val rows = vm.layerOptions(l)
-            val tint = if (rows.isEmpty()) Color.Transparent else Pc.GlassMenu
+            // a plugin's actions for the layer, after the app's own
+            val actions = remember { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.LAYER) }
+            val tint = if (rows.isEmpty() && actions.isEmpty()) Color.Transparent else Pc.GlassMenu
             val room = with(density) { OptionsShadowRoom.toPx() }
             // the room round it for its shadow: a tap there closes it, as one further out does
             Box(
@@ -1028,6 +1030,9 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         LayerOption.MERGE_MASK -> { { vm.mergeMask(l) } }
                     }
                     Option(r.label, checked = r.switchOn, enabled = r.enabled, onClick = { act(); onDone() })
+                }
+                for (action in actions) {
+                    Option(action.label, onClick = { onDone(); vm.runPluginAction(action.key) })
                 }
             }
             }

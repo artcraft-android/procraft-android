@@ -419,6 +419,14 @@ private fun ColumnScope.FrameOptionsPage(vm: CanvasViewModel) {
                 Text("In-between", color = Pc.PanelTitle, fontSize = 17.sp)
             }
         }
+        // a plugin's actions for the frame, after the app's own
+        val actions = remember { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.FRAME) }
+        for (action in actions) {
+            RowLine()
+            Row(Modifier.fillMaxWidth().height(44.dp).clickable { vm.runFrameAction(action.key) }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(action.label, color = Pc.PanelTitle, fontSize = 17.sp)
+            }
+        }
     }
     // (a held place has neither)
     val foreground = !a.pages && index == last && vm.heldPlace == 0
