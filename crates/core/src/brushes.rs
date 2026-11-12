@@ -354,7 +354,12 @@ impl CanvasSession {
         }
     }
 
-    fn drawn_preview(&self, brush: procraft_engine::brush::Brush, width: u32, height: u32) -> Option<ThumbnailImage> {
+    pub(crate) fn drawn_preview(
+        &self,
+        brush: procraft_engine::brush::Brush,
+        width: u32,
+        height: u32,
+    ) -> Option<ThumbnailImage> {
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
         let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
         // the preview it came with, while it is as it came: a blank file preview (some imported

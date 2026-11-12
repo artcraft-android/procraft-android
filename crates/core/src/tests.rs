@@ -981,6 +981,16 @@ fn dump_brush_strokes() {
         if let Some((w, h, own)) = file.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
             std::fs::write(format!("{root}/{file_name}-thumbnail.png"), crate::project::rgba_png(w, h, &own)).unwrap();
         }
+        // with DUMP_PREVIEW, our own sample stroke as the thumbnail was drawn (the same stroke,
+        // pressure and canvas; the file's own preview left out), to set beside it
+        if std::env::var_os("DUMP_PREVIEW").is_some() {
+            let brush = s.shared.lock().library[set as usize].brushes[index as usize].clone();
+            let (w, h) = (procraft_engine::preview::CANVAS.0 as u32, procraft_engine::preview::CANVAS.1 as u32);
+            if let Some(p) = s.drawn_preview(procraft_engine::brush::Brush { thumbnail: None, ..brush }, w, h) {
+                let png = crate::project::rgba_png(p.width, p.height, &p.rgba);
+                std::fs::write(format!("{root}/{file_name}-preview.png"), png).unwrap();
+            }
+        }
         let layer = s.add_layer();
         assert!(s.select_brush(set, index));
         // settings changed first, to see what each does (`BRUSH_SETTINGS=burnt_edges=0,wet_edges=0`)
@@ -1005,6 +1015,9 @@ fn dump_brush_strokes() {
             Err(_) => vec![start, 0.3, 1.0],
         };
         let rows = sizes.len() as f32;
+        // at full opacity, as a thumbnail is drawn (the opacity a brush file keeps is where its
+        // slider was left)
+        s.set_brush_opacity(1.0);
         for (row, size) in sizes.into_iter().enumerate() {
             s.set_brush_size(size);
             let y = 1024.0 * (row as f32 + 0.5) / rows;
