@@ -109,6 +109,13 @@ pub struct KritaTexture {
     pub picture: KritaPicture,
     pub scale: f32,
     pub strength: f32,
+    /// The strength by the pen's pressure (points 0..1 from the left), if it follows it.
+    pub strength_pressure: Option<Vec<Vec2>>,
+    /// Krita's soft texturing: the strength takes the mask towards none (multiplied, a stamp
+    /// times the mask taken towards 1; subtracted, the mask times the strength taken off), where
+    /// otherwise it takes the paint (a stamp times the mask times the strength; a stamp less the
+    /// mask and less what the strength falls short of 1).
+    pub soft: bool,
     pub invert: bool,
     /// Krita's number for how the mask combines with a stamp (0 multiply, 1 subtract...).
     pub mode: u32,
@@ -377,6 +384,8 @@ fn brush_of<'p>(
                 .or_else(|| value("Texture/Strength/Value"))
                 .unwrap_or(1.0)
                 .clamp(0.0, 1.0),
+            strength_pressure: pressure_curve(param, "Texture/Strength/", true),
+            soft: flag("Texture/Pattern/UseSoftTexturing"),
             invert: flag("Texture/Pattern/Invert"),
             mode: value("Texture/Pattern/TexturingMode").map_or(0, |m| m.clamp(0.0, 255.0) as u32),
             brightness: value("Texture/Pattern/Brightness").unwrap_or(0.0).clamp(-1.0, 1.0),
@@ -1191,6 +1200,8 @@ mod tests {
             picture: KritaPicture::Encoded(Vec::new()),
             scale: 1.0,
             strength: 1.0,
+            strength_pressure: None,
+            soft: false,
             invert: false,
             mode: 0,
             brightness: 0.0,
@@ -1497,6 +1508,12 @@ mod tests {
                 param("Texture/Pattern/Pattern", &twice),
                 param("Texture/Pattern/Scale", "0.35"),
                 param("Texture/Pattern/Strength", "0.8"),
+                param("PressureTexture/Strength/", "true"),
+                param(
+                    "Texture/Strength/Sensor",
+                    "<!DOCTYPE params> <params id=\"pressure\"> <curve>0,0;1,0.5;</curve> </params>",
+                ),
+                param("Texture/Pattern/UseSoftTexturing", "true"),
                 param("Texture/Pattern/Invert", "true"),
                 param("Texture/Pattern/TexturingMode", "1"),
                 param("Texture/Pattern/Brightness", "0.3"),
@@ -1512,6 +1529,9 @@ mod tests {
         );
         // how its mask is made and combines; what it doesn't say, as Krita leaves it
         assert_eq!((t.mode, t.brightness, t.contrast, t.neutral, t.cutoff), (1, 0.3, 1.0, 0.5, (2, 0.2, 1.0)));
+        // its strength by the pressure, and soft
+        assert_eq!(t.strength_pressure, Some(vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.5)]));
+        assert!(t.soft);
         // turned off: none
         let off = with(&[param("Texture/Pattern/Enabled", "false"), param("Texture/Pattern/Pattern", &twice)].concat());
         assert_eq!(read_preset(&kpp(&off), &|_| None).unwrap().texture, None);
@@ -1525,6 +1545,7 @@ mod tests {
         let (_, presets) = read_bundle(&z.finish()).unwrap();
         let t = presets[0].texture.as_ref().unwrap();
         assert_eq!((&t.picture, t.scale, t.strength, t.invert), (&KritaPicture::Encoded(picture), 1.0, 1.0, false));
+        assert!(t.strength_pressure.is_none() && !t.soft);
         // named and nowhere: none, and said so
         let b = read_preset(&kpp(&named), &|_| None).unwrap();
         assert_eq!((b.texture, b.missing), (None, vec!["paper.png".to_owned()]));

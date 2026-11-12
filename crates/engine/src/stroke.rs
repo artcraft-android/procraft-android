@@ -386,6 +386,8 @@ struct Extras {
     grain_depth_min: f32,
     /// A moving grain sized with the stamp (0) or fixed (1, cropped).
     grain_zoom: f32,
+    /// A grain fixed to the canvas going on stamp by stamp (see [`Brush::grain_each_stamp`]).
+    grain_each_stamp: bool,
     /// How blunt the pen's and the finger's taper ends are, 0 (sharp) to 1.
     pen_taper_tip: f32,
     touch_taper_tip: f32,
@@ -472,6 +474,7 @@ impl Extras {
             tilt_color: ["tilt_hue", "tilt_saturation", "tilt_brightness"].map(both),
             grain_movement: unit("grain_movement"),
             grain_offset_jitter: b.setting("grain_offset_jitter") >= 0.5,
+            grain_each_stamp: b.grain_each_stamp(),
             grain_rotation: both("grain_rotation"),
             pressure_flow: both("pressure_flow"),
             // the stamp's own pressure follows as the roundness does
@@ -2249,22 +2252,30 @@ impl StrokeBuilder {
         let reach_left = ((p.reach - 1.0) * thinned + 1.0) / p.reach.max(1.0);
         // a grain that follows the stamp's size follows what is left of it
         let tile = self.brush.grain.moving_tile(p.grain_square * thinned, p.grain_zoom, p.grain_scale_by);
+        let center = p.center - p.thrown * (1.0 - reach_left);
+        // a grain fixed to the canvas going on stamp by stamp is read where the stamp lands, at the
+        // brush's own tile and unturned, as it is read over a whole stroke
+        let (grain_offset, grain_turn, grain_size) = if self.extras.grain_each_stamp {
+            (center, 0.0, 1.0)
+        } else {
+            (p.grain_read * tile, p.grain_turn, (tile / self.brush.grain.scale.max(1.0)).max(1e-3))
+        };
         Stamp {
-            center: p.center - p.thrown * (1.0 - reach_left),
+            center,
             // a shape goes on showing on the quad that reaches past it however small it gets
             radius: (p.diameter * thinned * 0.5).max(if self.brush.round_tip() { 0.25 } else { 0.01 }),
             alpha: (p.alpha * alpha).clamp(0.0, 1.0),
             angle: p.angle,
             roundness,
-            grain_offset: p.grain_read * tile,
-            grain_turn: p.grain_turn,
+            grain_offset,
+            grain_turn,
             grain_press,
             grain_bleed,
             flip: p.flip,
             tint: p.tint,
             secondary: p.secondary,
             grain_depth: p.grain_depth,
-            grain_size: (tile / self.brush.grain.scale.max(1.0)).max(1e-3),
+            grain_size,
             gradation: p.gradation,
             taper: size.clamp(0.0, 1.0),
             transfer: p.transfer,

@@ -789,6 +789,14 @@ impl Brush {
         own.chain(others.flat_map(Brush::full_grains)).collect()
     }
 
+    /// Whether its grain, fixed to the canvas, goes on stamp by stamp, each stamp combined with it
+    /// as it lands and as deep as that stamp's depth (the depth's pressure curve, its jitter and its
+    /// least), rather than once over the whole stroke: as another app's brush that textures each
+    /// stamp does. Only a brush file of another app's sets it.
+    pub fn grain_each_stamp(&self) -> bool {
+        self.grain.mode == GrainMode::Texturized && self.setting("grain_each_stamp") >= 0.5
+    }
+
     /// The grain's tile on the canvas (pixels): fixed to the canvas, a brush file's image is as
     /// wide as the file's own times its scale over root two; else what the grain says.
     pub fn grain_tile(&self) -> f32 {

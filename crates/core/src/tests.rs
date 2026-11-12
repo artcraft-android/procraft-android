@@ -5529,6 +5529,73 @@ fn a_rolling_grain_stays_put_when_painting_wet() {
 }
 
 #[test]
+fn a_canvas_grain_laid_stamp_by_stamp_lands_where_it_does_over_the_stroke_and_follows_the_pressure() {
+    use procraft_engine::brush::{Brush, GRAIN_HEIGHT, Grain, GrainMode, PressureCurve};
+    use procraft_engine::curve::Curve;
+    let Some(s) = session(200, 200) else { return };
+    // a brush with a fine paper grain fixed to the canvas, keeping the strongest stamp at each
+    // pixel, its size and opacity not following the pressure
+    let paint = |each: bool, height: bool, pressure: f32| -> Vec<u8> {
+        let mut b = Brush {
+            grain: Grain {
+                image: Some(procraft_engine::textures::grain::NOISE),
+                mode: GrainMode::Texturized,
+                scale: 64.0,
+                depth: if height { 1.0 / 12.0 } else { 1.0 },
+                source: None,
+            },
+            ..Brush::round_pen()
+        };
+        b.hardness = 1.0;
+        for (key, value) in [("rendering_mode", 0.0), ("pressure_size", 0.0), ("pressure_opacity", 0.0), ("flow", 1.0)]
+        {
+            b.set_setting(key, value);
+        }
+        b.set_setting("grain_each_stamp", if each { 1.0 } else { 0.0 });
+        if height {
+            b.set_setting("grain_blend", GRAIN_HEIGHT as f32);
+        }
+        b.pressure_curves.set(PressureCurve::GrainDepth, Some(Curve::linear()));
+        {
+            let mut st = s.shared.lock();
+            let (set, index) = st.paint_brush;
+            st.library[set].brushes[index] = b;
+        }
+        s.set_brush_size(0.6);
+        s.set_color(0.0, 0.0, 0.0);
+        let at = |i: usize| PenSample { pressure, ..sample(40.0 + i as f32 * 3.0, 100.0, i as f64 * 8.0) };
+        s.stroke_begin(PointerKind::Stylus, (0..40).map(at).collect());
+        s.stroke_end(vec![]);
+        let pixels = {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            canvas.read_composite(gpu).unwrap()
+        };
+        assert!(s.undo().is_some());
+        pixels
+    };
+    // the reds of the band the stroke runs along
+    let band = |pixels: &[u8]| -> Vec<u8> {
+        (96..104).flat_map(|y| (60..140).map(move |x| (y * 200 + x) * 4)).map(|i| pixels[i]).collect()
+    };
+    // stamp by stamp, the grain shows where it does over the whole stroke, as strongly
+    let (over, by_stamp) = (band(&paint(false, false, 1.0)), band(&paint(true, false, 1.0)));
+    let most = over.iter().zip(&by_stamp).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    let mean = over.iter().map(|&v| f32::from(v)).sum::<f32>() / over.len() as f32;
+    let spread = (over.iter().map(|&v| (f32::from(v) - mean).powi(2)).sum::<f32>() / over.len() as f32).sqrt();
+    assert!(spread > 10.0 && most <= 3, "spread {spread}, most apart {most}");
+    // as a height, a light touch reaches only the grain's low places stamp by stamp (painted
+    // there: darker than the white paper); over the whole stroke its depth is fixed
+    let painted = |pixels: &[u8]| band(pixels).iter().filter(|&&v| v < 230).count() as f32;
+    let (light, full) = (painted(&paint(true, true, 0.4)), painted(&paint(true, true, 1.0)));
+    assert!(full > 300.0 && light < 0.6 * full, "light {light}, full {full}");
+    let (light, full) = (painted(&paint(false, true, 0.4)), painted(&paint(false, true, 1.0)));
+    assert!((light - full).abs() <= 0.05 * full, "light {light}, full {full}");
+}
+
+#[test]
 fn a_moving_grain_streaks_along_the_stroke_however_the_stamps_turn() {
     use procraft_engine::brush::{Brush, Grain, GrainMode};
     let Some(s) = session(200, 200) else { return };
@@ -6665,9 +6732,11 @@ fn a_krita_preset_becomes_a_round_brush_with_its_settings() {
     assert!((b.spacing - 0.2).abs() < 1e-6 && (b.hardness - hardness).abs() < 1e-6 && b.shape.roundness == 0.5);
     assert_eq!(b.pressure_size, 0.0);
     assert!(b.shape.source.is_none());
-    // the texture as paper grain: 70 % strong, its 100 px tiles at half size
+    // the texture as paper grain, its 100 px tiles at half size: multiplied whole, as Krita
+    // multiplies it, its 70 % strength in the paint laid
     assert!(b.grain.source.is_some());
-    assert_eq!((b.grain.depth, b.grain.scale), (0.7, 50.0));
+    assert_eq!((b.grain.depth, b.grain.scale), (1.0, 50.0));
+    assert!((b.flow - 0.7).abs() < 1e-6, "{}", b.flow);
 }
 
 #[test]

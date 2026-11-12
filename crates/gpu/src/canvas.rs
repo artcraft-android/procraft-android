@@ -308,7 +308,9 @@ impl StrokeStyle {
             preserve_alpha,
             shape: brush.shape.image,
             grain: brush.grain.image.filter(|_| brush.grain.depth > 0.0),
-            grain_mode: brush.grain.mode,
+            // a grain fixed to the canvas going on stamp by stamp goes the moving grain's way, each
+            // stamp reading it where it lands
+            grain_mode: if brush.grain_each_stamp() { GrainMode::Moving } else { brush.grain.mode },
             grain_scale: brush.grain_tile().max(1.0),
             grain_depth: brush.grain.depth.clamp(0.0, 1.0),
             rendering: brush.rendering,
