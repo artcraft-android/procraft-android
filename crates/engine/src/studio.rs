@@ -298,7 +298,7 @@ impl Brush {
             "scatter" => self.shape.scatter = unit * 2.0,
             "count" => self.shape.count = 1 + (unit * (MAX_COUNT - 1) as f32).round() as u32,
             "randomized" => self.shape.randomise = on,
-            "roundness" => self.shape.roundness = unit.max(0.05),
+            "roundness" => self.shape.roundness = unit.max(crate::stroke::LEAST_ROUNDNESS),
             "shape_angle" => self.shape.rotation = value.rem_euclid(1.0) * std::f32::consts::TAU,
             "grain_behavior" => self.grain.mode = if on { GrainMode::Texturized } else { GrainMode::Moving },
             "grain_scale" => self.grain.scale = (unit * MAX_GRAIN_SCALE).max(LEAST_GRAIN_SCALE),

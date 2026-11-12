@@ -8,6 +8,7 @@ use procraft_engine::brush::{
 };
 use procraft_engine::brushfile::{self, BrushFile, Pictures, Texture};
 use procraft_engine::curve::Curve;
+use procraft_engine::stroke::LEAST_ROUNDNESS;
 use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
 
 use crate::CanvasSession;
@@ -444,7 +445,7 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
         b.hardness = h.clamp(0.0, 1.0);
     }
     if let Some(r) = c.roundness {
-        b.shape.roundness = r.clamp(0.01, 1.0);
+        b.shape.roundness = r.clamp(LEAST_ROUNDNESS, 1.0);
     }
     if let Some(spacing) = c.spacing {
         b.spacing = Brush::spacing_within_reach(spacing);
@@ -851,8 +852,10 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
             b
         }
     };
+    // no thinner than the app's least (its stamps are drawn no thinner), so that it is the
+    // same read back from our own file
     if let Some(r) = a.roundness {
-        b.shape.roundness = r.clamp(0.01, 1.0);
+        b.shape.roundness = r.clamp(LEAST_ROUNDNESS, 1.0);
     }
     if let Some(spacing) = a.spacing {
         // half a pixel less, as a share of the tip's diameter: a small tip's stamps come closer,
@@ -944,7 +947,7 @@ fn generated_brush(g: &procraft_engine::gbr::Generated) -> Brush {
             let mut b = Brush { name: g.name.clone(), ..Brush::round_pen() };
             // ours paints half halfway between its hardness and its edge: where GIMP's does
             b.hardness = (2.0 * procraft_engine::gbr::generated_half(g.hardness) - 1.0).clamp(0.0, 1.0);
-            b.shape.roundness = (1.0 / g.aspect).clamp(0.01, 1.0);
+            b.shape.roundness = (1.0 / g.aspect).clamp(LEAST_ROUNDNESS, 1.0);
             b
         }
     };
@@ -995,7 +998,7 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     }
     if let KritaTip::Round { hardness, roundness } = k.tip {
         b.hardness = hardness.clamp(0.0, 1.0);
-        b.shape.roundness = roundness.clamp(0.05, 1.0);
+        b.shape.roundness = roundness.clamp(LEAST_ROUNDNESS, 1.0);
     }
     if let Some(spacing) = k.spacing {
         b.spacing = Brush::spacing_within_reach(spacing);
@@ -2524,6 +2527,10 @@ mod tests {
             },
         };
         let b = abr_brush(&round);
+        // a tip flatter than the app's least comes in at the least, as it is read back from our
+        // own file
+        let flat = abr_brush(&AbrBrush { roundness: Some(0.04), ..round.clone() });
+        assert_eq!(flat.shape.roundness, LEAST_ROUNDNESS);
         // most size 33% (as the file keeps it), the least 1%
         assert_eq!(
             ((b.max_size / b.size_unit() * 100.0).round(), (b.min_size / b.size_unit() * 100.0).round()),

@@ -337,6 +337,9 @@ const SPACING_FILE_SCALE: f32 = 10.0;
 /// wide).
 pub const MOST_ROUNDNESS: f32 = 20.0;
 
+/// The least a brush's roundness goes, as its control sets it: its stamps are never thinner.
+pub const LEAST_ROUNDNESS: f32 = 0.05;
+
 /// The lateral and linear jitter as brush files keep them: the control to the power 2.2, times
 /// this; each moves a stamp up to that many times half its diagonal (plus a pixel).
 pub const JITTER_FILE_SCALE: f32 = 3.0;
@@ -2075,7 +2078,7 @@ impl StrokeBuilder {
             let tall = squeezed(jitter_y * roundness_y_by, &mut self.random);
             let most = wide.max(tall).max(1e-3);
             let (wide, tall) = ((wide / most).max(0.05), tall / most);
-            let roundness = (base_roundness * tall / wide).clamp(0.05, MOST_ROUNDNESS);
+            let roundness = (base_roundness * tall / wide).clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS);
             let flip = [x.flip_x && self.random.next() < 0.5, x.flip_y && self.random.next() < 0.5];
             let [h, s, l, d] = x.stamp_color;
             let mut stamp_tint = self.color_jitter([h * hue_by, s * saturation_by, l * lightness_by, d * darkness_by]);

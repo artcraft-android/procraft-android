@@ -5,7 +5,7 @@ use procraft_engine::document::Document;
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::Pointer;
 use procraft_engine::preview;
-use procraft_engine::stroke::{Stamp, StrokeBuilder};
+use procraft_engine::stroke::{LEAST_ROUNDNESS, MOST_ROUNDNESS, Stamp, StrokeBuilder};
 use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
 
 use crate::CanvasSession;
@@ -117,8 +117,7 @@ impl CanvasSession {
         };
         // as a stamp is drawn: across its full size, squashed across, turned on the screen
         let (roundness, turn) = (f32::from_bits(roundness), f32::from_bits(rotation));
-        let roundness =
-            if roundness.is_finite() { roundness.clamp(0.05, procraft_engine::stroke::MOST_ROUNDNESS) } else { 1.0 };
+        let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
         let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
         let loops: Vec<Vec<f32>> = traced
             .iter()
@@ -166,8 +165,7 @@ impl CanvasSession {
             (None, Some(i)) => procraft_engine::textures::shapes().get(i as usize).map(|s| s.pixels.clone()),
             (None, None) => None,
         };
-        let roundness =
-            if roundness.is_finite() { roundness.clamp(0.05, procraft_engine::stroke::MOST_ROUNDNESS) } else { 1.0 };
+        let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
         let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
         let size = procraft_engine::textures::TEXTURE_SIZE;
         // averaged down to about the picture's size first, so a small picture keeps fine detail's
