@@ -2186,9 +2186,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     class GalleryZoom(
         val cell: androidx.compose.ui.geometry.Rect,
-        val canvas: androidx.compose.ui.geometry.Rect,
+        val canvas: CanvasPlace,
         val opening: Boolean,
         val picture: androidx.compose.ui.graphics.ImageBitmap? = null,
+    )
+
+    /**
+     * Where a canvas is on screen: its middle, its size as it is drawn (not turned; window pixels),
+     * how far its view turns it (radians, clockwise on screen) and whether it shows mirrored.
+     */
+    class CanvasPlace(
+        val centre: Offset,
+        val size: androidx.compose.ui.geometry.Size,
+        val angle: Float,
+        val mirrored: Boolean,
     )
 
     var galleryZoom by mutableStateOf<GalleryZoom?>(null)
@@ -2203,13 +2214,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var windowPx = androidx.compose.ui.unit.IntSize(1, 1)
 
     /** Where [s]'s canvas is on screen through the view [m] (as `viewMatrix` gives it), window pixels. */
-    private fun canvasRect(s: CanvasSession, m: List<Float>): androidx.compose.ui.geometry.Rect {
+    private fun canvasPlace(s: CanvasSession, m: List<Float>): CanvasPlace {
         val info = s.info()
         val (w, h) = info.width.toFloat() to info.height.toFloat()
-        val corners = listOf(Offset(0f, 0f), Offset(w, 0f), Offset(0f, h), Offset(w, h)).map { p ->
-            Offset(m[0] * p.x + m[2] * p.y + m[4], m[1] * p.x + m[3] * p.y + m[5])
-        }
-        return androidx.compose.ui.geometry.Rect(corners.minOf { it.x }, corners.minOf { it.y }, corners.maxOf { it.x }, corners.maxOf { it.y })
+        val centre = Offset(m[0] * w / 2f + m[2] * h / 2f + m[4], m[1] * w / 2f + m[3] * h / 2f + m[5])
+        // the canvas's down axis on screen gives its scale and turn whether or not it is mirrored
+        // (a mirror turns its across axis round)
+        val scale = kotlin.math.hypot(m[2], m[3])
+        val angle = kotlin.math.atan2(-m[2], m[3])
+        val mirrored = m[0] * m[3] - m[1] * m[2] < 0f
+        return CanvasPlace(centre, androidx.compose.ui.geometry.Size(w * scale, h * scale), angle, mirrored)
     }
 
     /**
@@ -2270,7 +2284,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             s.onSuccess {
                 if (!orientationMemory) it.forgetSavedView()
                 val m = it.openingViewMatrix(windowPx.width.toUInt(), windowPx.height.toUInt())
-                galleryZoom = cell?.let { c -> GalleryZoom(c, canvasRect(it, m), opening = true) }
+                galleryZoom = cell?.let { c -> GalleryZoom(c, canvasPlace(it, m), opening = true) }
                 start(it, a.dir, brushesLoaded = true)
                 then?.invoke()
             }.onFailure { message = "This artwork can't be opened." }
@@ -2404,7 +2418,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                 bitmap.asImageBitmap()
             }
-            GalleryZoom(c, canvasRect(s, s.viewMatrix()), opening = false, picture = picture)
+            GalleryZoom(c, canvasPlace(s, s.viewMatrix()), opening = false, picture = picture)
         }
         keepColour()
         // a plugin's panel goes with the artwork it was open over
