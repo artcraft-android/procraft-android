@@ -1404,7 +1404,19 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                 .filter(|_| source.is_none())
                 .zip(textures::stock_shape_tones(name, *inverted))
                 .and_then(|(i, tones)| {
-                    let shape = textures::shapes().into_iter().nth(i as usize)?;
+                    let mut shape = textures::shapes().into_iter().nth(i as usize)?;
+                    // its marks as fine as the real tip's: standing in for a tip we know nothing
+                    // else of, the grainy square (smooth for a solid one); any other shape of ours
+                    // takes them over itself
+                    if let Some(feature) = textures::stock_shape_feature(name) {
+                        let cover =
+                            tones.iter().map(|&t| f32::from(t)).sum::<f32>() / (tones.len().max(1) as f32 * 255.0);
+                        if i == shape::STOCK_GRAINY_SQUARE {
+                            shape.pixels = textures::grainy_square_of(feature, cover);
+                        } else if let Some(marked) = textures::textured_shape(&shape.pixels, feature, cover) {
+                            shape.pixels = marked;
+                        }
+                    }
                     // its streaks and gaps across the stroke first (and, standing in for a tip we
                     // know nothing else of, its outline across too)
                     let rows = textures::stock_shape_rows(name, *inverted);
@@ -1488,7 +1500,9 @@ fn stock_shape(n: &str) -> u32 {
         (&["dots"], shape::STOCK_DOTS),
         (&["brick"], shape::BLOCK),
         (&["spray", "mist", "aero", "speckle"], shape::SPRAY),
-        (&["splat", "flick", "spatter", "drip"], shape::SPLATTER),
+        // a blob with paint running down from it
+        (&["drip"], shape::DRIP),
+        (&["splat", "flick", "spatter"], shape::SPLATTER),
         (&["bristle", "fan", "hair", "fur"], shape::BRISTLES),
         // a flat brush's whole stroke, its bristles' streaks in it
         (&["flat-brush", "flat brush", "flatbrush"], shape::STOCK_FLAT_STROKE),
@@ -1611,10 +1625,16 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
                 _ => Some(grain::MOTTLED),
             };
             let image = named_grain(&n).map_or_else(unknown, Some);
-            // our pattern with the stock grain's own lights and darks, where they were measured
-            let source = image.zip(textures::stock_grain_tones(name)).and_then(|(i, tones)| {
+            // our pattern with the stock grain's own lights and darks, where they were measured;
+            // one drawn to the stock image's proportions as it is drawn (measured smaller, the
+            // stock image's fine lines and dots go grey, which would take the pattern's contrast)
+            let source = image.and_then(|i| {
                 let pattern = textures::grains().into_iter().nth(i as usize)?;
-                let mut pixels = textures::retoned(&pattern.pixels, &tones, &textures::TONE_SHARES);
+                let mut pixels = if textures::drawn_to_stock_size(i) {
+                    pattern.pixels
+                } else {
+                    textures::retoned(&pattern.pixels, &textures::stock_grain_tones(name)?, &textures::TONE_SHARES)
+                };
                 if *inverted {
                     pixels.iter_mut().for_each(|v| *v = 255 - *v);
                 }
@@ -1642,6 +1662,15 @@ pub(crate) fn material_for(t: &Texture) -> (Option<u32>, Option<Source>) {
 /// Our grain nearest to a stock image named `n` (lower case), if its name says what it is.
 fn named_grain(n: &str) -> Option<u32> {
     let table: &[(&[&str], u32)] = &[
+        // patterns named for the brushes that draw them (one of them has "stone" in its name):
+        // ours drawn to the same proportions
+        (&["homestead_grain"], grain::GRAPH_PAPER),
+        (&["ironstone_grain"], grain::DOT_GRID),
+        (&["snow_daisy_grain"], grain::DOTTED_STAR),
+        (&["brush-preset-diagonal"], grain::DIAGONAL_STRIPES),
+        (&["tessellated"], grain::LABYRINTH),
+        (&["brush-preset-grid"], grain::FINE_GRID),
+        (&["dof-dots-light"], grain::SOFT_DOTS),
         (&["recycled"], grain::RECYCLED),
         // a canvas painted on: rough, its weave showing through patches of paint
         (&["canvas"], grain::ROUGH_CANVAS),
@@ -1838,6 +1867,18 @@ mod tests {
     }
 
     #[test]
+    fn stock_pattern_grains_take_ours_drawn_to_their_proportions() {
+        assert_eq!(named_grain("library/homestead_grain.png"), Some(grain::GRAPH_PAPER));
+        assert_eq!(named_grain("brush-preset-grid.png"), Some(grain::FINE_GRID));
+        assert_eq!(named_grain("dof-dots-light.png"), Some(grain::SOFT_DOTS));
+        assert_eq!(named_grain("library/ironstone_grain.png"), Some(grain::DOT_GRID));
+        assert_eq!(named_grain("library/snow_daisy_grain.png"), Some(grain::DOTTED_STAR));
+        assert_eq!(named_grain("brush-preset-diagonal.png"), Some(grain::DIAGONAL_STRIPES));
+        assert_eq!(named_grain("tessellated.png"), Some(grain::LABYRINTH));
+        assert_eq!(named_grain("stone_wall.png"), Some(grain::CONCRETE));
+    }
+
+    #[test]
     fn a_stock_tip_named_for_a_brush_of_its_own_takes_its_outline_whatever_its_name_says() {
         // a bird's or a place's name says nothing of the tip ("ringtail" isn't a ring, nor
         // "starling" a star); a plain word does
@@ -1845,6 +1886,7 @@ mod tests {
         assert_eq!(stock_shape("folder/starling_secondary_shape.png"), shape::STOCK_GRAINY_SQUARE);
         assert_eq!(stock_shape("brush-preset-scribble.jpg"), shape::SCRIBBLE);
         assert_eq!(stock_shape("brush-preset-spike.png"), shape::STOCK_LINE);
+        assert_eq!(stock_shape("brush-artery-drip-2.jpg"), shape::DRIP);
         assert_eq!(stock_shape("brush-artery-cloud-shape.jpg"), shape::CLOUD);
         assert_eq!(textures::shapes()[shape::STOCK_LINE as usize].name, "Line");
     }

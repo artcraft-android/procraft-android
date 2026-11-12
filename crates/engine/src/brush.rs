@@ -806,6 +806,16 @@ impl Brush {
     /// known.
     fn stand_in_tile(&self) -> f32 {
         let (Some(stock), Some(index)) = (&self.stock.grain, self.grain.image) else { return 1.0 };
+        // a pattern drawn to the stock image's own proportions: fixed to the canvas, the tile that
+        // image would have, as wide as it times the file's scale over root two, as a brush file's
+        // own image is; moving, read as the image is stamp by stamp, whose tile doesn't go by its
+        // width
+        if let Some(width) = crate::textures::drawn_to_stock_width(index) {
+            if self.grain.mode == GrainMode::Moving {
+                return 1.0;
+            }
+            return width * self.grain.file_scale() / std::f32::consts::SQRT_2 / self.grain.scale.max(1e-3);
+        }
         let theirs = crate::textures::stock_grain_features(&stock.name)
             .map(|levels| crate::textures::feature_at_tile(&levels, self.grain.scale));
         stand_in_tile(theirs, crate::textures::grain_feature(index))
@@ -898,6 +908,14 @@ mod tests {
         assert_eq!(b.grain_tile(), 300.0);
         b.stock.grain = Some(StockImage { name: "no such grain.png".into(), inverted: false });
         assert_eq!(b.grain_tile(), 300.0);
+        // a pattern drawn to a stock image's proportions: that image's tile (2048 pixels wide at a
+        // file scale of 0.1024: 148 pixels)
+        b.grain.image = Some(crate::textures::grain::GRAPH_PAPER);
+        b.grain.scale = 81.92;
+        assert!((b.grain_tile() - 2048.0 * 0.1024 / std::f32::consts::SQRT_2).abs() < 0.01, "{}", b.grain_tile());
+        // moving, it goes by the moving grain's own tile, as the image's would
+        b.grain.mode = GrainMode::Moving;
+        assert_eq!(b.grain_tile(), 81.92);
     }
 
     #[test]

@@ -116,6 +116,32 @@ pub mod grain {
     pub const ROUGH_CANVAS: u32 = 36;
     pub const SPRAYED: u32 = 37;
     pub const DRY_PATCHES: u32 = 38;
+    pub const GRAPH_PAPER: u32 = 39;
+    pub const DOT_GRID: u32 = 40;
+    pub const DOTTED_STAR: u32 = 41;
+    pub const DIAGONAL_STRIPES: u32 = 42;
+    pub const FINE_GRID: u32 = 43;
+    pub const SOFT_DOTS: u32 = 44;
+    pub const LABYRINTH: u32 = 45;
+}
+
+/// How many pixels wide the stock image our grain `index` is drawn to the proportions of is (a
+/// pattern, not a texture like it), so that it stands in for it at the stock image's own tile
+/// rather than by feature size; none for any other grain. Only a grain fixed to the canvas goes by
+/// the width: one read stamp by stamp is read as the image is, at the moving grain's tile.
+pub fn drawn_to_stock_width(index: u32) -> Option<f32> {
+    match index {
+        grain::GRAPH_PAPER | grain::DOT_GRID | grain::DOTTED_STAR | grain::LABYRINTH => Some(2048.0),
+        grain::DIAGONAL_STRIPES | grain::FINE_GRID => Some(1024.0),
+        grain::SOFT_DOTS => Some(1792.0),
+        _ => None,
+    }
+}
+
+/// Whether our grain `index` is drawn to a stock image's proportions (see
+/// [`drawn_to_stock_width`]).
+pub fn drawn_to_stock_size(index: u32) -> bool {
+    drawn_to_stock_width(index).is_some()
 }
 
 /// The Coarse grain's tooth: below this the fibres darken it, by this much a unit.
@@ -163,6 +189,143 @@ pub fn stock_grain_features(name: &str) -> Option<[f32; 4]> {
     let key = name_key(name);
     let at = table.binary_search_by_key(&key, |&(k, _)| k).ok()?;
     table.get(at).map(|&(_, v)| v.map(|v| f32::from(v) / 65536.0))
+}
+
+/// How coarse the texture of the stock shape a brush file names `name` is, as measured: the feature
+/// size of what is left of it with its broad outline taken away, as a share of its side; `Some(None)`
+/// for one with no texture of its own (solid or smooth), none if it is one we don't know.
+pub fn stock_shape_feature(name: &str) -> Option<Option<f32>> {
+    let table = crate::stock_tones::STOCK_SHAPE_FEATURES;
+    let key = name_key(name);
+    let at = table.binary_search_by_key(&key, |&(k, _)| k).ok()?;
+    table.get(at).map(|&(_, [v])| (v < u16::MAX).then(|| f32::from(v) / 65536.0))
+}
+
+/// The grainy square (shape [`shape::STOCK_GRAINY_SQUARE`]) with a texture as coarse as `feature`
+/// (a share of its side, as [`stock_shape_feature`] measures it), or smooth for none, its texture
+/// as strong as `cover` (the share of the real tip that is ink) wants: a tip of few marks takes it
+/// at full contrast, so that once its tones are put on it its marks fall scattered where the
+/// texture says; a fuller tip at under half, so that its soft edge stays below its middle and its
+/// marks don't open into holes. What a stock tip stands in as. Made once for each size and
+/// strength of mark.
+pub fn grainy_square_of(feature: Option<f32>, cover: f32) -> Vec<u8> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    // each made, by the half width of its marks and their strength
+    type Made = Mutex<HashMap<(u32, u32), Vec<u8>>>;
+    static MADE: OnceLock<Made> = OnceLock::new();
+    // the mark's half width in texels, to a quarter (0: smooth)
+    let half = feature.map_or(0, |f| ((f * TEXTURE_SIZE as f32 * 4.0).round() as u32).clamp(1, 4 * 64));
+    // how strong the texture is: full for a twentieth of ink or less, 0.45 from a fifth up, in
+    // twentieths
+    let strength = 0.45 + 0.55 * ((0.2 - cover) / 0.15).clamp(0.0, 1.0);
+    let key = (half, (strength * 20.0).round() as u32);
+    let strength = key.1 as f32 / 20.0;
+    // coarser than the square's own marks: those, which have finer detail in them too (one
+    // softening at that size alone would leave smooth blobs where a coarse tip has streaks)
+    if half > (COARSEST_OWN_MARK * TEXTURE_SIZE as f32 * 4.0) as u32 {
+        return shapes().into_iter().nth(shape::STOCK_GRAINY_SQUARE as usize).map(|g| g.pixels).unwrap_or_default();
+    }
+    let made = MADE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(pixels) = made.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return pixels.clone();
+    }
+    let n = TEXTURE_SIZE;
+    let texture: Vec<f32> = if half == 0 {
+        // smooth: brightest in the middle, a little less out to the edge (a flat middle would leave
+        // its tones to fall anywhere in it)
+        (0..n * n)
+            .map(|k| {
+                let (x, y) = (((k % n) as f32 + 0.5) / n as f32, ((k / n) as f32 + 0.5) / n as f32);
+                1.0 - radius(x, y).min(1.0)
+            })
+            .collect()
+    } else {
+        marks(half)
+    };
+    let pixels = field(|x, y| {
+        let (u, v) = ((x - 0.5).abs() * 2.0, (y - 0.5).abs() * 2.0);
+        let r = (u.powi(4) + v.powi(4)).powf(0.25);
+        let (i, j) = (((x * n as f32) as usize).min(n - 1), ((y * n as f32) as usize).min(n - 1));
+        let t = texture.get(j * n + i).copied().unwrap_or(1.0);
+        smooth(((0.96 - r) * 24.0).clamp(0.0, 1.0)) * (1.0 - strength + strength * t)
+    });
+    made.lock().unwrap_or_else(PoisonError::into_inner).insert(key, pixels.clone());
+    pixels
+}
+
+/// `pixels`, one of our shapes standing in for a stock tip, given a texture as fine as `feature` (as
+/// [`stock_shape_feature`] measures it) as strongly as `cover` wants (see [`grainy_square_of`]):
+/// a smooth shape standing in for a textured tip takes its marks. None where there is nothing to
+/// add (no texture, or one coarser than [`COARSEST_OWN_MARK`]).
+pub fn textured_shape(pixels: &[u8], feature: Option<f32>, cover: f32) -> Option<Vec<u8>> {
+    let f = feature?;
+    let half = ((f * TEXTURE_SIZE as f32 * 4.0).round() as u32).clamp(1, 4 * 64);
+    if half > (COARSEST_OWN_MARK * TEXTURE_SIZE as f32 * 4.0) as u32 || pixels.len() != TEXTURE_SIZE * TEXTURE_SIZE {
+        return None;
+    }
+    let strength = 0.45 + 0.55 * ((0.2 - cover) / 0.15).clamp(0.0, 1.0);
+    let texture = marks(half);
+    Some(
+        pixels
+            .iter()
+            .zip(&texture)
+            .map(|(&v, &t)| (f32::from(v) * (1.0 - strength + strength * t)).round().clamp(0.0, 255.0) as u8)
+            .collect(),
+    )
+}
+
+/// White noise softened until it matches itself only half at `half` quarter texels (a Gaussian's
+/// softening of sigma s does at about 1.665 s), wrapping round, its values spread evenly over 0..1:
+/// marks of that size. Made once for each.
+fn marks(half: u32) -> Vec<f32> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static MADE: OnceLock<Mutex<HashMap<u32, Vec<f32>>>> = OnceLock::new();
+    let made = MADE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(texture) = made.lock().unwrap_or_else(PoisonError::into_inner).get(&half) {
+        return texture.clone();
+    }
+    let n = TEXTURE_SIZE;
+    let sigma = (half as f32 / 4.0) / 1.665;
+    let raw: Vec<f32> = (0..n * n).map(|k| hash((k % n) as i32, (k / n) as i32, 6101)).collect();
+    let soft = if sigma < 0.35 { raw } else { gaussian_wrapped(&raw, n, sigma) };
+    let mut order: Vec<(f32, usize)> = soft.iter().copied().zip(0..).collect();
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut even = vec![0.0; n * n];
+    for (rank, &(_, k)) in order.iter().enumerate() {
+        if let Some(v) = even.get_mut(k) {
+            *v = rank as f32 / (n * n - 1) as f32;
+        }
+    }
+    made.lock().unwrap_or_else(PoisonError::into_inner).insert(half, even.clone());
+    even
+}
+
+/// The coarsest marks [`grainy_square_of`] makes, as a share of its side: past them the grainy
+/// square's own (about as coarse, with finer detail in them) stand in.
+const COARSEST_OWN_MARK: f32 = 0.04;
+
+/// `values` (an `n` square) softened by a Gaussian of `sigma` texels across and down, wrapping round.
+fn gaussian_wrapped(values: &[f32], n: usize, sigma: f32) -> Vec<f32> {
+    let reach = (sigma * 3.0).ceil() as i32;
+    let weights: Vec<f32> = (-reach..=reach).map(|d| (-(d * d) as f32 / (2.0 * sigma * sigma)).exp()).collect();
+    let total: f32 = weights.iter().sum();
+    let pass = |src: &[f32], across: bool| -> Vec<f32> {
+        (0..n * n)
+            .map(|k| {
+                let (i, j) = ((k % n) as i32, (k / n) as i32);
+                let mut v = 0.0;
+                for (w, d) in weights.iter().zip(-reach..=reach) {
+                    let (x, y) =
+                        if across { ((i + d).rem_euclid(n as i32), j) } else { (i, (j + d).rem_euclid(n as i32)) };
+                    v += w * src.get(y as usize * n + x as usize).copied().unwrap_or(0.0);
+                }
+                v / total
+            })
+            .collect()
+    };
+    pass(&pass(values, true), false)
 }
 
 /// The feature size `features` (see [`stock_grain_features`]) shows at a tile `tile` canvas pixels
@@ -1497,7 +1660,162 @@ fn make_grains() -> Vec<GrayImage> {
     grains.push(GrayImage { name: "Rough canvas", pixels: rough_canvas() });
     grains.push(GrayImage { name: "Sprayed", pixels: ranked(&soft_noise(4201, 0.4), &SPRAYED_SPREAD) });
     grains.push(GrayImage { name: "Dry patches", pixels: dry_patches() });
+    grains.push(GrayImage { name: "Graph paper", pixels: graph_paper() });
+    grains.push(GrayImage { name: "Dot grid", pixels: dot_grid() });
+    grains.push(GrayImage { name: "Dotted star", pixels: dotted_star() });
+    grains.push(GrayImage { name: "Diagonal stripes", pixels: diagonal_stripes() });
+    grains.push(GrayImage { name: "Fine grid", pixels: fine_grid() });
+    grains.push(GrayImage { name: "Soft dots", pixels: soft_dots() });
+    grains.push(GrayImage { name: "Labyrinth", pixels: labyrinth() });
     grains
+}
+
+/// Diagonal stripes, white on black, rising to the right: five of differing widths in each quarter
+/// of the tile across the diagonal (each at a share of that quarter, from its start, and its width
+/// there), about a seventh of it white.
+fn diagonal_stripes() -> Vec<u8> {
+    const STRIPES: [(f32, f32); 5] = [(28.0, 5.0), (48.0, 10.0), (108.0, 10.0), (134.0, 11.0), (210.0, 3.0)];
+    field(|x, y| {
+        // where along a quarter's repeat this texel's diagonal falls, in the stock picture's 256ths
+        let along = ((x + y) * 1024.0).rem_euclid(256.0);
+        let ink = STRIPES.iter().map(|&(at, width)| {
+            let middle = at + width / 2.0;
+            let d = (along - middle).abs().min(256.0 - (along - middle).abs());
+            // a texel here spans 4 of those 256ths across the diagonal and down: smoothed over it
+            ((width / 2.0 - d) / 4.0 + 0.5).clamp(0.0, 1.0)
+        });
+        ink.fold(0.0, f32::max)
+    })
+}
+
+/// A fine grid of white lines on black, twelve to the tile each way, each a 512th of it wide (so
+/// half a texel: grey where it falls), half a square in from the tile's edges.
+fn fine_grid() -> Vec<u8> {
+    field(|x, y| {
+        let line = |v: f32| {
+            let d = wrapped(v * 12.0, 0.5 + 12.0 / 1024.0) / 12.0;
+            mark(d, 1.0 / 1024.0)
+        };
+        line(x).max(line(y))
+    })
+}
+
+/// Dark dots on light, on a staggered lattice: fourteen to the tile across, nine rows of each kind
+/// down, every other row shifted half a dot. Each dot lightens slowly from its middle (93) to its
+/// edge a 50th of the tile out (137), steps up to 171 across it, and fades into the light between
+/// the dots (196) by about a 25th.
+fn soft_dots() -> Vec<u8> {
+    // (distance from the middle in 1792ths of the tile, tone), between which it goes straight
+    const PROFILE: [(f32, f32); 11] = [
+        (0.0, 93.0),
+        (12.0, 100.0),
+        (24.0, 116.0),
+        (30.0, 126.0),
+        (36.0, 137.0),
+        (42.0, 171.0),
+        (48.0, 180.0),
+        (54.0, 186.0),
+        (60.0, 190.0),
+        (72.0, 196.0),
+        (1792.0, 196.0),
+    ];
+    let (across, down) = (14.0f32, 9.0f32);
+    field(|x, y| {
+        let near = |cx: f32, cy: f32| {
+            let (dx, dy) = (wrapped(x * across, cx) / across, wrapped(y * down, cy) / down);
+            // its distance in the tile's widths (rows are farther apart than dots are across)
+            (dx * dx + dy * dy).sqrt()
+        };
+        let d = near(0.0, 0.0).min(near(0.5, 0.5)) * 1792.0;
+        let tone = PROFILE
+            .windows(2)
+            .find_map(|pair| match *pair {
+                [(d0, t0), (d1, t1)] if d <= d1 => Some(t0 + (t1 - t0) * ((d - d0) / (d1 - d0)).clamp(0.0, 1.0)),
+                _ => None,
+            })
+            .unwrap_or(196.0);
+        tone / 255.0
+    })
+}
+
+/// A labyrinth: winding white bands about as wide as the black between them (white a little under
+/// half), some 27 to the tile: band-passed noise cut at the share that leaves that much white.
+fn labyrinth() -> Vec<u8> {
+    let n = TEXTURE_SIZE;
+    let raw: Vec<f32> = (0..n * n).map(|k| hash((k % n) as i32, (k / n) as i32, 7307)).collect();
+    // a band of sizes about the bands' own: the noise softened a little, less it softened twice
+    let (fine, broad) = (gaussian_wrapped(&raw, n, 1.6), gaussian_wrapped(&raw, n, 3.2));
+    let band: Vec<f32> = fine.iter().zip(&broad).map(|(a, b)| a - b).collect();
+    let mut sorted = band.clone();
+    sorted.sort_by(f32::total_cmp);
+    let cut = sorted.get(((n * n) as f32 * 0.55) as usize).copied().unwrap_or(0.0);
+    band.iter().map(|&v| if v > cut { 255 } else { 0 }).collect()
+}
+
+/// How much of a texel at distance `d` (a share of the tile) from a mark's middle line or centre
+/// the mark covers, the mark reaching `half` either way: its edge smoothed over one texel.
+fn mark(d: f32, half: f32) -> f32 {
+    ((half - d) * TEXTURE_SIZE as f32 + 0.5).clamp(0.0, 1.0)
+}
+
+/// How far `v` is from `at`, the tile wrapping round (both shares of it).
+fn wrapped(v: f32, at: f32) -> f32 {
+    let d = (v - at).rem_euclid(1.0);
+    d.min(1.0 - d)
+}
+
+/// Graph paper: dark lines across and down on white, six squares to the tile, the line through
+/// the middle about four times as thick and the one along the edge a little thicker.
+fn graph_paper() -> Vec<u8> {
+    // each line's place and half its width, as shares of the tile
+    const LINES: [(f32, f32); 6] = [
+        (0.0, 0.0039),
+        (1.0 / 6.0, 0.0029),
+        (2.0 / 6.0, 0.0029),
+        (0.5, 0.0114),
+        (4.0 / 6.0, 0.0029),
+        (5.0 / 6.0, 0.0029),
+    ];
+    field(|x, y| {
+        let ink = LINES.iter().map(|&(at, half)| mark(wrapped(x, at), half).max(mark(wrapped(y, at), half)));
+        1.0 - ink.fold(0.0, f32::max)
+    })
+}
+
+/// A dot grid: round dark dots on white, one in the middle of the tile and one at its corners
+/// (so a grid turned a quarter of a right angle), each about a fifteenth of the tile across.
+fn dot_grid() -> Vec<u8> {
+    const HALF: f32 = 0.0322;
+    field(|x, y| {
+        let corner = wrapped(x, 0.0).hypot(wrapped(y, 0.0));
+        let middle = wrapped(x, 0.5).hypot(wrapped(y, 0.5));
+        1.0 - mark(corner.min(middle), HALF)
+    })
+}
+
+/// Dotted lines in a star: round dark dots on white along the middle row and column (eight each
+/// side of the middle, which has none) and along both diagonals (eleven in from each corner).
+fn dotted_star() -> Vec<u8> {
+    const HALF: f32 = 0.015;
+    // along the middle row and column, from the edges in, and along the diagonals from the
+    // corners in (shares of the tile)
+    let straight: Vec<f32> = (0..8).map(|k| (63.9 + 120.0 * k as f32) / 2048.0).collect();
+    let slanted: Vec<f32> = (0..11).map(|k| (58.0 + 84.35 * k as f32) / 2048.0).collect();
+    let mut dots: Vec<(f32, f32)> = Vec::new();
+    for &t in &straight {
+        for along in [t, 1.0 - t] {
+            dots.extend([(along, 0.5), (0.5, along)]);
+        }
+    }
+    for &t in &slanted {
+        for along in [t, 1.0 - t] {
+            dots.extend([(along, along), (along, 1.0 - along)]);
+        }
+    }
+    field(|x, y| {
+        let near = dots.iter().map(|&(dx, dy)| wrapped(x, dx).hypot(wrapped(y, dy))).fold(f32::MAX, f32::min);
+        1.0 - mark(near, HALF)
+    })
 }
 
 /// The sprayed grain's values: light, half over 0.78, hardly any under 0.45 (as measured from a
@@ -2184,6 +2502,77 @@ mod tests {
         assert_eq!(row(n / 2), 0);
         assert!(row(n / 2 - 40) > 1000 && row(n / 2 + 40) > 1000, "{} {}", row(n / 2 - 40), row(n / 2 + 40));
         assert_eq!(stock_shape_rows("no such shape.png", false), None);
+    }
+
+    #[test]
+    fn the_grainy_square_takes_the_coarseness_it_is_asked_for() {
+        // fine marks repeat over a short distance, coarse ones over a long one; none is smooth
+        let n = TEXTURE_SIZE;
+        let fine = grainy_square_of(Some(1.5 / n as f32), 0.02);
+        let coarse = grainy_square_of(Some(12.0 / n as f32), 0.02);
+        let smooth = grainy_square_of(None, 0.02);
+        // the share of neighbours across the middle that differ by more than a little
+        let busy = |p: &[u8]| {
+            let row = n / 2;
+            (n / 4..3 * n / 4).filter(|&x| p[row * n + x].abs_diff(p[row * n + x + 1]) > 6).count() as f32
+                / (n / 2) as f32
+        };
+        assert!(busy(&fine) > 3.0 * busy(&coarse), "{} {}", busy(&fine), busy(&coarse));
+        assert_eq!(busy(&smooth), 0.0);
+        // a fuller tip's texture is weaker: its middle stays above its soft edge
+        let full = grainy_square_of(Some(1.5 / n as f32), 0.5);
+        let least_middle = |p: &[u8]| (n / 4..3 * n / 4).map(|x| p[n / 2 * n + x]).min().unwrap_or(0);
+        assert!(
+            least_middle(&full) > 100 && least_middle(&fine) < 40,
+            "{} {}",
+            least_middle(&full),
+            least_middle(&fine)
+        );
+        // the same one twice is the same
+        assert_eq!(grainy_square_of(Some(1.5 / n as f32), 0.02), fine);
+        // another shape takes fine marks; none for no texture or a coarse one
+        let soft = shapes().into_iter().next().unwrap().pixels;
+        let marked = textured_shape(&soft, Some(1.5 / n as f32), 0.02).unwrap();
+        assert!(busy(&marked) > busy(&soft) + 0.2, "{} {}", busy(&marked), busy(&soft));
+        assert_eq!(textured_shape(&soft, None, 0.02), None);
+        assert_eq!(textured_shape(&soft, Some(0.2), 0.02), None);
+        assert_eq!(stock_shape_feature("no such shape.png"), None);
+    }
+
+    #[test]
+    fn the_patterned_grains_draw_their_marks_where_they_should() {
+        let all = grains();
+        let n = TEXTURE_SIZE;
+        let at = |index: u32, x: f32, y: f32| {
+            let px = &all[index as usize].pixels;
+            px[((y * n as f32) as usize).min(n - 1) * n + ((x * n as f32) as usize).min(n - 1)]
+        };
+        // graph paper: dark on its lines (the middle one thickest), white inside a square
+        assert!(at(grain::GRAPH_PAPER, 1.0 / 6.0, 0.08) < 60 && at(grain::GRAPH_PAPER, 0.08, 0.08) > 250);
+        assert!(
+            at(grain::GRAPH_PAPER, 0.5 + 0.009, 0.08) < 60 && at(grain::GRAPH_PAPER, 1.0 / 6.0 + 0.009, 0.08) > 200
+        );
+        // the dot grid: dark in the middle and at the corners, white between
+        assert!(at(grain::DOT_GRID, 0.5, 0.5) < 30 && at(grain::DOT_GRID, 0.0, 0.0) < 30);
+        assert!(at(grain::DOT_GRID, 0.25, 0.25) > 250);
+        // the star: dots along the middle row and the diagonal, none in the very middle
+        assert!(at(grain::DOTTED_STAR, 63.9 / 2048.0, 0.5) < 60 && at(grain::DOTTED_STAR, 0.5, 0.5) > 250);
+        assert!(at(grain::DOTTED_STAR, 58.0 / 2048.0, 58.0 / 2048.0) < 60 && at(grain::DOTTED_STAR, 0.25, 0.1) > 250);
+        assert!(drawn_to_stock_size(grain::DOT_GRID) && !drawn_to_stock_size(grain::PAPER));
+        // diagonal stripes: about a seventh white, the same along the diagonal; the fine grid
+        // white on its lines; soft dots dark in their middles and light between; the labyrinth
+        // a little under half white
+        let share =
+            |index: u32| all[index as usize].pixels.iter().filter(|&&v| v > 128).count() as f32 / (n * n) as f32;
+        assert!((share(grain::DIAGONAL_STRIPES) - 0.15).abs() < 0.03, "{}", share(grain::DIAGONAL_STRIPES));
+        assert_eq!(at(grain::DIAGONAL_STRIPES, 0.2, 0.3), at(grain::DIAGONAL_STRIPES, 0.3, 0.2));
+        let on_line = [0.0405, 0.0425, 0.0445].map(|x| at(grain::FINE_GRID, x, 0.3));
+        assert!(on_line.into_iter().max().unwrap_or(0) > 60 && at(grain::FINE_GRID, 0.0, 0.0) < 20, "{on_line:?}");
+        assert!(at(grain::SOFT_DOTS, 0.0, 0.0) < 110 && at(grain::SOFT_DOTS, 0.5 / 14.0, 0.0) > 180);
+        // its dots' hard edge: dark a 56th of the tile out, light a 40th out
+        assert!(at(grain::SOFT_DOTS, 1.0 / 56.0, 0.0) < 140 && at(grain::SOFT_DOTS, 1.0 / 40.0, 0.0) > 170);
+        assert!((share(grain::LABYRINTH) - 0.45).abs() < 0.02, "{}", share(grain::LABYRINTH));
+        assert_eq!(drawn_to_stock_width(grain::SOFT_DOTS), Some(1792.0));
     }
 
     #[test]

@@ -411,8 +411,10 @@ impl CanvasSession {
             None => canvas.begin_stroke(layer, style),
         }
         if stamp_only {
-            // the brush's stamp on its own, filling the preview's height
-            canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), ch as f32 * 0.4, 1.0)]);
+            // the brush's stamp on its own in the middle, as wide as its preview size of its most
+            // size (a big one reaching past the preview, as there)
+            let side = (brush.setting("preview_size").clamp(0.0, 1.0) * brush.biggest()).max(1.0);
+            canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), side / 2.0, 1.0)]);
         } else {
             let samples = preview::samples(&brush);
             if let Some((second, _, diameter)) = second {

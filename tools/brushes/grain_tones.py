@@ -6,7 +6,8 @@ left to right (means, so that a brush that inverts the image can have them inver
 down to 256 square). And each grain's feature size: how far it shifts before it looks only half
 like itself (its autocorrelation at half), as a share of its side, at four levels of detail (the
 image at 1024, 512, 256 and 128 a side, no finer than its own), so that our stand-in can be tiled
-to match whatever size its tile is drawn. Each is keyed by a hash of its file's name, so the tables hold
+to match whatever size its tile is drawn; and each shape's texture's feature size, its outline
+taken away, so that our stand-in has marks as coarse. Each is keyed by a hash of its file's name, so the tables hold
 measurements only: neither the images nor their names.
 
 usage: python -I tools/brushes/grain_tones.py <that app's bundle folder>   (needs Pillow and numpy)
@@ -145,6 +146,22 @@ def feature_at(im):
     return max(1, min(65535, round(share * 65536)))
 
 
+def shape_feature(path):
+    """How coarse a shape's texture is: the feature size (as [`feature_at`] measures it, at 256 a
+    side) of the shape less its broad outline (the shape blurred over a sixteenth of its side), in
+    65536ths; 65535 for one with no texture of its own (a solid or smooth shape)."""
+    import numpy as np
+    from PIL import ImageFilter
+
+    im = values(path)
+    broad = im.filter(ImageFilter.GaussianBlur(SIDE / 16))
+    g = np.asarray(im, dtype=np.float64) - np.asarray(broad, dtype=np.float64)
+    # where the shape has hardly any texture of its own, it says nothing of one
+    if g.std() < 4.0:
+        return [65535]
+    return [feature_at(Image.fromarray(np.clip(g + 128.0, 0, 255).astype(np.uint8)))]
+
+
 def table(bundle, images, key, measure):
     """One table: each image the brush files name under `key`, its hash and `measure` of it."""
     out = []
@@ -170,12 +187,14 @@ def main():
     bands = table(bundle, images, "bundledShapePath", rows)
     columns = table(bundle, images, "bundledShapePath", cols)
     features = table(bundle, images, "bundledGrainPath", feature)
+    shape_features = table(bundle, images, "bundledShapePath", shape_feature)
     header = """//! Written by tools/brushes/grain_tones.py (don't edit by hand): the tones of the stock grains
 //! and shapes other apps' brush files name instead of carrying (see [`stock_grain_tones`] and
 //! [`stock_shape_tones`]), each the values at [`TONE_SHARES`] or [`SHAPE_TONE_SHARES`] of it, and
 //! each band of a shape's rows' and columns' mean value (see [`stock_shape_rows`] and
-//! [`stock_shape_cols`]), and each grain's
-//! feature size (see [`stock_grain_feature`]), keyed by a hash of its file's name.
+//! [`stock_shape_cols`]), each grain's feature size (see [`stock_grain_feature`]) and how
+//! coarse each shape's texture is (see [`stock_shape_feature`]), keyed by a hash of its file's
+//! name.
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
@@ -187,7 +206,9 @@ def main():
         f.write(f"\npub(crate) const STOCK_SHAPE_COLS: &[(u64, [u8; {BANDS}])] = &[\n{body(columns)}\n];\n")
         f.write("\npub(crate) const STOCK_GRAIN_FEATURES: &[(u64, [u16; 4])] = &[\n"
                 + "\n".join(f"    (0x{h:016x}, [{', '.join(str(v) for v in t)}])," for h, t in features) + "\n];\n")
-    print(f"{len(grains)} grains, {len(shapes)} shapes, {len(features)} grains' features measured")
+        f.write("\npub(crate) const STOCK_SHAPE_FEATURES: &[(u64, [u16; 1])] = &[\n"
+                + "\n".join(f"    (0x{h:016x}, [{', '.join(str(v) for v in t)}])," for h, t in shape_features) + "\n];\n")
+    print(f"{len(grains)} grains, {len(shapes)} shapes, {len(features)} grains' features and {len(shape_features)} shapes' measured")
 
 
 if __name__ == "__main__":

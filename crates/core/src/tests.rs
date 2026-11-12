@@ -4913,11 +4913,25 @@ fn a_stamp_preview_shows_the_stamp_alone() {
     };
     let (left, right) = reach(&s);
     assert!(left < 50 && right > 270, "stroke {left}..{right}");
-    s.studio_begin();
-    s.set_studio_setting("preview_stamp".into(), 1.0);
-    s.studio_end(true);
-    let (left, right) = reach(&s);
-    assert!(left > 110 && right < 220, "stamp {left}..{right}");
+    // a stamp alone in the middle, as wide as the preview size of the brush's most size: twice the
+    // preview size, twice as wide
+    let stamp_at = |s: &CanvasSession, share: f32| {
+        s.studio_begin();
+        s.set_studio_setting("preview_stamp".into(), 1.0);
+        s.set_studio_setting("preview_size".into(), share);
+        s.studio_end(true);
+        reach(s)
+    };
+    let biggest = s.shared.lock().brush(ToolKind::Paint).biggest();
+    let share = (150.0 / biggest).min(0.4);
+    let (left, right) = stamp_at(&s, share);
+    let (wide_left, wide_right) = stamp_at(&s, 2.0 * share);
+    let (narrow, wide) = ((right - left) as f32, (wide_right - wide_left) as f32);
+    assert!(((left + right) as f32 / 2.0 - 163.0).abs() < 4.0, "stamp {left}..{right}");
+    assert!((wide / narrow - 2.0).abs() < 0.25, "{narrow} then {wide}");
+    // as wide as that share of the most size, in the preview's pixels (327 of the canvas's 1060)
+    let expected = share * biggest * 327.0 / 1060.0;
+    assert!((narrow - expected).abs() < expected * 0.2 + 3.0, "{narrow} against {expected}");
 }
 
 #[test]
