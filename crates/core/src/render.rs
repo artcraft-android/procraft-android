@@ -89,6 +89,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
     let mut config: Option<wgpu::SurfaceConfiguration> = None;
     let mut last_present: Option<Instant> = None;
     let started = Instant::now();
+    let mut pipelines_kept = false;
     loop {
         let (size, reconfigure) = {
             let mut st = shared.lock();
@@ -165,9 +166,23 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
         }
         queue.present(frame);
         showing.shown();
+        if !std::mem::replace(&mut pipelines_kept, true) {
+            keep_pipelines(&shared);
+        }
     }
     drop(surface);
     drop(window);
+}
+
+/// Keeps the device's pipelines for the next run (see [`Gpu::keep_pipelines`]): the screen's,
+/// which a canvas's first frame makes, with the canvases'. On a thread of its own (it writes a
+/// file).
+fn keep_pipelines(shared: &Shared) {
+    let Some(gpu) = shared.lock().gpu.clone() else { return };
+    let thread = std::thread::Builder::new().name("procraft-keep-pipelines".to_owned());
+    if let Err(e) = thread.spawn(move || gpu.keep_pipelines()) {
+        log::warn!("keeping the pipelines: {e}");
+    }
 }
 
 /// A frame that holds the canvas longer than this is logged: touches wait on it.

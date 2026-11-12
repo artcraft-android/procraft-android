@@ -414,6 +414,12 @@ impl Screen {
         // nor, once a canvas opening has drawn (or closed first), the canvas's
         if crate::startup::canvas_awaited() {
             crate::startup::canvas_shown(session.map(|s| s.frames_drawn() > 0));
+            // the pipelines its first frames made kept for the next run, with the canvases'
+            let gpu = self.gpu.clone();
+            let thread = std::thread::Builder::new().name("procraft-keep-pipelines".to_owned());
+            if let Err(e) = thread.spawn(move || gpu.keep_pipelines()) {
+                log::warn!("keeping the pipelines: {e}");
+            }
         }
         match (canvas_after, interface_after) {
             (Some(canvas), Some(interface)) => Some(canvas.min(interface)),

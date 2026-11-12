@@ -5,6 +5,7 @@
 //! nothing relies on reading the render target in the shader (Android GPUs have no portable way).
 
 mod canvas;
+mod kept;
 mod lighting;
 mod scene;
 mod sphere;
@@ -20,6 +21,7 @@ pub use canvas::{
     SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, most_resident, read_texture,
     start_reading, textures_bytes,
 };
+pub use kept::keep_pipelines_in;
 pub use lighting::Lighting;
 pub use scene::{
     GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, ShownSelection, SurfaceMap, material_source,
@@ -98,6 +100,9 @@ pub struct Gpu {
     lost: Arc<AtomicBool>,
     /// The canvases' pipelines, once the first canvas has made them.
     canvas_pipelines: Arc<OnceLock<Arc<canvas::Pipelines>>>,
+    /// The pipeline cache kept between runs (see [`kept`]), once the canvases' pipelines are made
+    /// with it.
+    kept: Arc<OnceLock<Option<kept::Kept>>>,
     /// Buffers pixels came back from the GPU through, kept for the next readback (see
     /// [`Gpu::readback_buffer`]).
     readbacks: Arc<std::sync::Mutex<Vec<wgpu::Buffer>>>,
@@ -313,8 +318,10 @@ impl Gpu {
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("procraft"),
-            // where the GPU has it, for strokes that build up only to their transfer
-            required_features: adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING,
+            // where the GPU has them: dual-source blending for strokes that build up only to their
+            // transfer, and the pipelines' compiled form to keep between runs
+            required_features: adapter.features()
+                & (wgpu::Features::DUAL_SOURCE_BLENDING | wgpu::Features::PIPELINE_CACHE),
             // the adapter's own limits, so large canvases fit where the GPU allows them
             required_limits: adapter.limits(),
             // memory taken in small blocks (a few MB up to 64): a block of each kind, once made,
@@ -353,6 +360,7 @@ impl Gpu {
             errors,
             lost,
             canvas_pipelines: Arc::default(),
+            kept: Arc::default(),
             readbacks: Arc::default(),
         })
     }
@@ -418,6 +426,7 @@ impl Gpu {
     pub fn prepare_canvases(&self) {
         let started = std::time::Instant::now();
         let _ = self.canvas_pipelines();
+        self.keep_pipelines();
         let pipelines = started.elapsed().as_millis();
         procraft_engine::textures::prepare();
         log::info!(
@@ -426,12 +435,29 @@ impl Gpu {
         );
     }
 
-    /// The pipelines canvases draw with, made by the first canvas on this device.
+    /// The pipelines canvases draw with, made by the first canvas on this device: from their
+    /// compiled form kept by an earlier run, where there is one (see [`keep_pipelines_in`]).
     pub(crate) fn canvas_pipelines(&self) -> Arc<canvas::Pipelines> {
-        Arc::clone(
-            self.canvas_pipelines
-                .get_or_init(|| Arc::new(canvas::Pipelines::new(&self.device, canvas::liquify_format(&self.adapter)))),
-        )
+        Arc::clone(self.canvas_pipelines.get_or_init(|| {
+            let kept = self
+                .kept
+                .get_or_init(|| kept::folder().and_then(|dir| kept::Kept::open(&self.device, &self.adapter, &dir)));
+            let format = canvas::liquify_format(&self.adapter);
+            let pipelines = canvas::Pipelines::new(&self.device, format, kept.as_ref().map(|k| k.cache.clone()));
+            if let Some(kept) = kept {
+                kept.made();
+            }
+            Arc::new(pipelines)
+        }))
+    }
+
+    /// Keeps the pipelines made so far for the next run, where they are kept (see
+    /// [`keep_pipelines_in`]): those a window's first frame made as well. Writes a file: off the
+    /// main thread.
+    pub fn keep_pipelines(&self) {
+        if let Some(Some(kept)) = self.kept.get() {
+            kept.save();
+        }
     }
 
     /// GPU validation errors so far (each one is logged); tests expect none.

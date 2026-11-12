@@ -115,7 +115,17 @@ impl Gpu {
                 source: wgpu::ShaderSource::Naga(Cow::Owned(code.into_module())),
             });
             let pipeline = |entry: &str| {
-                blended_pipeline(device, &pipeline_layout, &module, "plugin picture", ("host_vs", entry), FORMAT, None)
+                // a plugin's own code: not kept for the next run
+                blended_pipeline(
+                    device,
+                    None,
+                    &pipeline_layout,
+                    &module,
+                    "plugin picture",
+                    ("host_vs", entry),
+                    FORMAT,
+                    None,
+                )
             };
             Arc::new(PictureProgram {
                 draw: pipeline("host_main"),

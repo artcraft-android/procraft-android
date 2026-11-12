@@ -1779,6 +1779,9 @@ pub(crate) struct Pipelines {
     /// groups with it.
     veil_layout: wgpu::BindGroupLayout,
     veil_pipeline_layout: wgpu::PipelineLayout,
+    /// The pipeline cache they are made with, kept between runs (see `kept`): the screen's
+    /// pipelines, made as a window first shows a canvas, as well.
+    cache: Option<wgpu::PipelineCache>,
 }
 
 /// A canvas's own pipelines for drawing to a window, made for each target format as it comes.
@@ -7024,6 +7027,7 @@ impl Canvas {
             veil_pipeline_layout,
             ..
         } = &*self.pipelines;
+        let kept = self.pipelines.cache.as_ref();
         // the images a predicted tail reads, if they are a brush file's own
         let own_images =
             self.active.filter(|_| !predicted.is_empty()).and_then(|a| self.full_grain_bind(device, &a.style));
@@ -7040,6 +7044,7 @@ impl Canvas {
             // over the surround, which shows through see-through parts (a hidden background)
             blended_pipeline(
                 device,
+                kept,
                 display_lut_layout,
                 display_module,
                 "display",
@@ -7065,6 +7070,7 @@ impl Canvas {
             let pipeline = surround_pipelines.entry(target.format).or_insert_with(|| {
                 sampled_pipeline(
                     device,
+                    kept,
                     surround_pipeline_layout,
                     surround_module,
                     "surround",
@@ -7099,6 +7105,7 @@ impl Canvas {
             let pipeline = veil_pipelines.entry(target.format).or_insert_with(|| {
                 blended_pipeline(
                     device,
+                    kept,
                     veil_pipeline_layout,
                     display_module,
                     "veil",
@@ -7154,7 +7161,7 @@ impl Canvas {
                         })],
                     }),
                     multiview_mask: None,
-                    cache: None,
+                    cache: kept,
                 })
             });
             let i = inverse;
@@ -7212,7 +7219,7 @@ impl Canvas {
                         })],
                     }),
                     multiview_mask: None,
-                    cache: None,
+                    cache: kept,
                 })
             });
             let c = target.to_screen.then(to_clip);
@@ -7310,11 +7317,13 @@ impl Canvas {
         let srgb = target.format.is_srgb();
         let Pipelines { display_module, display_pipeline_layout, display_lut_layout, backdrop_module, .. } =
             &*self.pipelines;
+        let kept = self.pipelines.cache.as_ref();
         let ScreenPipelines { display, blur, frost, .. } = &mut self.screen;
         let display = display.entry(target.format).or_insert_with(|| {
             // over the surround, which shows through see-through parts (a hidden background)
             blended_pipeline(
                 device,
+                kept,
                 display_lut_layout,
                 display_module,
                 "display",
@@ -7326,6 +7335,7 @@ impl Canvas {
         let blur = blur.entry(target.format).or_insert_with(|| {
             sampled_pipeline(
                 device,
+                kept,
                 display_pipeline_layout,
                 backdrop_module,
                 "blur",
@@ -7358,7 +7368,7 @@ impl Canvas {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: kept,
             })
         });
 
@@ -8190,7 +8200,12 @@ pub fn textures_bytes(textures: &[wgpu::Texture]) -> u64 {
 }
 
 impl Pipelines {
-    pub(crate) fn new(device: &wgpu::Device, liquify_format: wgpu::TextureFormat) -> Pipelines {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        liquify_format: wgpu::TextureFormat,
+        cache: Option<wgpu::PipelineCache>,
+    ) -> Pipelines {
+        let kept = cache.as_ref();
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -8385,7 +8400,7 @@ impl Pipelines {
         });
         let bounds_pipeline = |group: &wgpu::BindGroupLayout, fs| {
             let pipeline_layout = layout("bounds", &[Some(group)]);
-            blended_pipeline(device, &pipeline_layout, &bounds_module, fs, ("vs_full", fs), LAYER_FORMAT, None)
+            blended_pipeline(device, kept, &pipeline_layout, &bounds_module, fs, ("vs_full", fs), LAYER_FORMAT, None)
         };
         let (bounds_rows, bounds_columns) =
             (bounds_pipeline(&bounds_layout, "fs_rows"), bounds_pipeline(&bounds_layout, "fs_columns"));
@@ -8396,7 +8411,7 @@ impl Pipelines {
         let flip_module = module("flip", include_str!("shaders/flip.wgsl"));
         let flip_layout = layout("flip", &[Some(&bounds_layout)]);
         let flip_pipeline =
-            |fs| blended_pipeline(device, &flip_layout, &flip_module, fs, ("vs_full", fs), LAYER_FORMAT, None);
+            |fs| blended_pipeline(device, kept, &flip_layout, &flip_module, fs, ("vs_full", fs), LAYER_FORMAT, None);
         let (flip_across, flip_down) = (flip_pipeline("fs_across"), flip_pipeline("fs_down"));
         let invert = flip_pipeline("fs_invert");
         let crop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -8418,6 +8433,7 @@ impl Pipelines {
         let crop_module = module("crop", include_str!("shaders/crop.wgsl"));
         let crop = blended_pipeline(
             device,
+            kept,
             &layout("crop", &[Some(&crop_layout)]),
             &crop_module,
             "crop",
@@ -8431,6 +8447,7 @@ impl Pipelines {
             .map(|&fs| {
                 let pipeline = blended_pipeline(
                     device,
+                    kept,
                     &filter_pipeline_layout,
                     &filter_module,
                     fs,
@@ -8444,6 +8461,7 @@ impl Pipelines {
         let liquify_module = module("liquify", include_str!("shaders/liquify.wgsl"));
         let liquify_stamp = blended_pipeline(
             device,
+            kept,
             &layout("liquify stamps", &[Some(&uniform_layout)]),
             &liquify_module,
             "liquify stamps",
@@ -8457,6 +8475,7 @@ impl Pipelines {
         });
         let liquify_step = blended_pipeline(
             device,
+            kept,
             &layout("liquify step", &[Some(&uniform_layout), Some(&liquify_layout)]),
             &liquify_module,
             "liquify step",
@@ -8528,7 +8547,7 @@ impl Pipelines {
                 module: &smudge_module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: kept,
             })
         };
         let smudge_carry = compute("smudge carry", "cs_carry");
@@ -8567,7 +8586,7 @@ impl Pipelines {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: kept,
             })
         };
         let stamp = stamp_pipeline("stamp", PREMULTIPLIED_OVER);
@@ -8611,7 +8630,7 @@ impl Pipelines {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: kept,
             })
         });
         let full = |label, entry, blend| {
@@ -8638,7 +8657,7 @@ impl Pipelines {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: kept,
             })
         };
         Pipelines {
@@ -8650,6 +8669,7 @@ impl Pipelines {
             commit_locked: full("commit locked", "fs_commit_locked", None),
             transform: blended_pipeline(
                 device,
+                kept,
                 &transform_pipeline_layout,
                 &transform_module,
                 "transform",
@@ -8659,6 +8679,7 @@ impl Pipelines {
             ),
             transform_static: sampled_pipeline(
                 device,
+                kept,
                 &transform_pipeline_layout,
                 &transform_module,
                 "transform static",
@@ -8712,10 +8733,11 @@ impl Pipelines {
                     })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache: kept,
             }),
             thumb: sampled_pipeline(
                 device,
+                kept,
                 &display_pipeline_layout,
                 &display_module,
                 "thumbnail",
@@ -8753,6 +8775,7 @@ impl Pipelines {
             backdrop_module,
             veil_layout,
             veil_pipeline_layout,
+            cache,
         }
     }
 }
@@ -8835,6 +8858,7 @@ const FILTER_PASSES: [&str; 17] = [
 /// A full-screen pipeline (no vertex buffers) with its blending.
 fn blended_pipeline(
     device: &wgpu::Device,
+    cache: Option<&wgpu::PipelineCache>,
     layout: &wgpu::PipelineLayout,
     module: &wgpu::ShaderModule,
     label: &str,
@@ -8861,12 +8885,13 @@ fn blended_pipeline(
             targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
         }),
         multiview_mask: None,
-        cache: None,
+        cache,
     })
 }
 
 fn sampled_pipeline(
     device: &wgpu::Device,
+    cache: Option<&wgpu::PipelineCache>,
     layout: &wgpu::PipelineLayout,
     module: &wgpu::ShaderModule,
     label: &str,
@@ -8874,7 +8899,7 @@ fn sampled_pipeline(
     fs: &str,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
-    blended_pipeline(device, layout, module, label, (vs, fs), format, None)
+    blended_pipeline(device, cache, layout, module, label, (vs, fs), format, None)
 }
 
 /// One frame's uniforms, a slot per draw.

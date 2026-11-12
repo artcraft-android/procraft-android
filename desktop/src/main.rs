@@ -396,6 +396,8 @@ impl ApplicationHandler for App {
         // was at risk when it stopped
         let order = startup::backend_order();
         let from = startup::gpu_start(order);
+        // the canvases' pipelines kept between runs, where the GPU can
+        procraft_gpu::keep_pipelines_in(files::app_dir());
         // what the start waits for logged while it does
         startup::watch_start(self.wake.clone());
         let tried = startup::gpu_tried();

@@ -536,7 +536,17 @@ impl Gpu {
                 source: wgpu::ShaderSource::Naga(Cow::Owned(code.module)),
             });
             let pipeline = |entry: &str| {
-                blended_pipeline(device, &layout, &module, "plugin filter", ("host_vs", entry), LAYER_FORMAT, None)
+                // a plugin's own code: not kept for the next run
+                blended_pipeline(
+                    device,
+                    None,
+                    &layout,
+                    &module,
+                    "plugin filter",
+                    ("host_vs", entry),
+                    LAYER_FORMAT,
+                    None,
+                )
             };
             let probe_target = texture(device, "plugin filter probe", PROBE_SIZE, PROBE_SIZE, LAYER_FORMAT);
             Arc::new(FilterProgram {
