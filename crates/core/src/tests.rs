@@ -11001,6 +11001,208 @@ fn whole_canvas_changes_with_layers_off_the_gpu_save_and_reopen_as_with_them_all
     }
 }
 
+/// Painting, smudging and erasing, fills, clears and inverts, adjustments, transforms, liquify,
+/// ColorDrop, flips, copies and pastes, merges and duplicates, layers made, picked, moved, hidden
+/// and deleted, undo and redo, and saves now and then (some with an edit open, as the app going
+/// into the background saves): a canvas that keeps one layer on the GPU, the others compressed off
+/// it, has every layer as one that keeps them all after each step, and opened again from its
+/// last save.
+fn layers_off_the_gpu_keep_every_edit(seed: u32, steps: usize) {
+    use crate::Adjustment;
+    use crate::transform::TransformHandle;
+    let side = 160u32;
+    let make = |resident: u64| -> Option<std::sync::Arc<CanvasSession>> {
+        let s = session(side, side)?;
+        {
+            let mut st = s.shared.lock();
+            let canvas = st.canvas.as_mut().unwrap();
+            // as the app has it: the layers not worked on composited once, kept
+            canvas.set_cache_composites(true);
+            canvas.set_resident_budget(resident * u64::from(side) * u64::from(side) * 4);
+        }
+        s.set_brush_size(0.3);
+        Some(s)
+    };
+    let Some(all) = make(0) else { return };
+    let one = make(1).unwrap();
+    let gpu = one.shared.lock().gpu.clone().unwrap();
+    let dir = std::env::temp_dir().join(format!("procraft-off-gpu-{}-{seed}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let save = |s: &CanvasSession| s.save(dir.to_string_lossy().into_owned()).unwrap();
+    // a frame, as the app draws one after every change: layers are parked there
+    let frame = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render(g, &mut st.doc, None);
+            g.flush();
+        }
+    };
+    let mut state = seed;
+    let mut next = |n: u32| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) % n.max(1)
+    };
+    let mut done: Vec<String> = Vec::new();
+    // how many layers were found parked, step by step: the test is no test without
+    let mut parked_seen = 0;
+    for step in 0..steps {
+        // the step's numbers drawn once, then the same step on both
+        let (kind, r): (u32, [u32; 6]) = (next(26), std::array::from_fn(|_| next(1000)));
+        let at = |k: usize| 15.0 + (r[k] % 130) as f32;
+        let apply = |s: &CanvasSession| -> String {
+            let layers: Vec<u64> =
+                s.layers().iter().filter(|l| l.kind == crate::layers::LayerType::Paint).map(|l| l.id).collect();
+            let any = |k: usize| layers[r[k] as usize % layers.len()];
+            let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+            let stroke = |s: &CanvasSession| {
+                s.set_color((r[0] % 7) as f32 / 6.0, (r[1] % 5) as f32 / 4.0, (r[2] % 3) as f32 / 2.0);
+                let (x0, y0, x1, y1) = (at(3), at(4), at(5), at(0));
+                s.stroke_begin(PointerKind::Finger, vec![sample(x0, y0, 0.0)]);
+                s.stroke_add(
+                    (1..16)
+                        .map(|k| {
+                            let t = k as f32 / 16.0;
+                            sample(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, f64::from(k) * 8.0)
+                        })
+                        .collect(),
+                );
+                s.stroke_end(vec![sample(x1, y1, 136.0)]);
+            };
+            match kind {
+                0..=4 => {
+                    stroke(s);
+                    "stroke".to_owned()
+                }
+                5 | 6 => {
+                    let tool = if kind == 5 { ToolKind::Erase } else { ToolKind::Smudge };
+                    s.set_tool(tool);
+                    stroke(s);
+                    s.set_tool(ToolKind::Paint);
+                    format!("{tool:?} stroke")
+                }
+                7 | 8 => format!("new layer {}", s.add_layer()),
+                9 => format!("select {}: {}", any(1), s.select_layer(any(1))),
+                10 => {
+                    let id = any(2);
+                    format!("delete {id}: {}", layers.len() > 1 && s.delete_layer(id))
+                }
+                11 => format!("undo: {:?}", s.undo()),
+                12 => format!("redo: {:?}", s.redo()),
+                13 => format!("fill {current}: {}", s.fill_layer(current)),
+                14 => {
+                    s.clear_layer();
+                    format!("clear {current}")
+                }
+                15 => format!("invert {current}: {}", s.invert_layer(current)),
+                16 | 17 => {
+                    let adjustment =
+                        [Adjustment::GaussianBlur, Adjustment::Hsb, Adjustment::Liquify][r[1] as usize % 3];
+                    let started = s.adjustment_start(adjustment);
+                    if adjustment == Adjustment::Liquify {
+                        let (x, y) = (at(3), at(4));
+                        s.adjustment_liquify_stroke(
+                            (0..12).flat_map(|i| [x + i as f32 * 3.0, y, 1.0, 8.0]).collect(),
+                            true,
+                            false,
+                        );
+                    } else {
+                        s.adjustment_amount_by(0.3);
+                    }
+                    // the app sent away with it open: saved as it shows
+                    if kind == 17 {
+                        save(s);
+                    }
+                    let kept = r[2] % 4 != 0;
+                    format!("{adjustment:?} {started}, kept {kept}: {}", s.adjustment_end(kept))
+                }
+                18 | 19 => {
+                    let begun = s.transform_begin().is_some();
+                    s.transform_grab(TransformHandle::Move, 80.0, 80.0);
+                    s.transform_drag(80.0 + (r[3] % 40) as f32 - 20.0, 80.0 + (r[4] % 40) as f32 - 20.0);
+                    s.transform_release();
+                    if kind == 19 {
+                        save(s);
+                    }
+                    let kept = r[2] % 4 != 0;
+                    s.transform_end(kept);
+                    format!("transform {begun}, kept {kept}")
+                }
+                20 => {
+                    let (x, y) = (at(3), at(4));
+                    let poured = s.pour_begin(x, y, 0.2, 0.7, 0.3, 0.4);
+                    if poured {
+                        s.pour_end(true, None);
+                    }
+                    format!("ColorDrop at {x},{y}: {poured}")
+                }
+                21 => {
+                    s.flip_canvas(r[1] % 2 == 0);
+                    "flip".to_owned()
+                }
+                22 => {
+                    let pasted = s.copy_layer().and_then(|c| s.paste(c));
+                    format!("copy and paste: {pasted:?}")
+                }
+                23 => {
+                    if r[1] % 2 == 0 {
+                        format!("merge down {current}: {}", s.merge_down(current))
+                    } else {
+                        format!("duplicate {current}: {:?}", s.duplicate_layer(current))
+                    }
+                }
+                24 => {
+                    let (id, to) = (any(1), r[2] % (layers.len() as u32 + 1));
+                    let visible = r[3] % 2 == 0;
+                    format!(
+                        "move {id} to {to}: {}; visible {visible}: {}",
+                        s.move_layer(id, to),
+                        s.set_layer_visible(id, visible)
+                    )
+                }
+                _ => {
+                    save(s);
+                    "save".to_owned()
+                }
+            }
+        };
+        let what = apply(&all);
+        let also = apply(&one);
+        done.push(format!("{step}: {what}"));
+        assert_eq!(what, also, "seed {seed}: the two went apart at step {step}\n{}", done.join("\n"));
+        frame(&all);
+        frame(&one);
+        parked_seen += one.shared.lock().canvas.as_ref().map_or(0, |c| c.parked_layers());
+        assert_eq!(
+            layer_hashes(&one),
+            layer_hashes(&all),
+            "seed {seed}: a layer kept off the GPU differs after\n{}",
+            done.join("\n")
+        );
+    }
+    assert!(parked_seen > 0, "seed {seed}: no layer was ever kept off the GPU");
+    let shown = layer_hashes(&all);
+    save(&one);
+    let reopened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    reopened.use_gpu(gpu);
+    {
+        let mut st = reopened.shared.lock();
+        st.window_size = (side, side);
+        st.view = Some(View::fit((side, side), (side, side)));
+        st.ensure_canvas();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(layer_hashes(&reopened), shown, "seed {seed}: opened again\n{}", done.join("\n"));
+}
+
+#[test]
+fn layers_off_the_gpu_keep_every_kind_of_edit_through_saves() {
+    let seeds: u32 = std::env::var("OFF_GPU_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    for seed in 1..=seeds {
+        layers_off_the_gpu_keep_every_edit(seed, 60);
+    }
+}
+
 #[test]
 fn a_copied_drawing_becomes_a_shape_source_filling_it_as_drawn() {
     let Some(s) = session(200, 200) else { return };

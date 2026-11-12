@@ -2723,3 +2723,87 @@ fn circle_image(ui: &Ui, texture: TextureId, centre: Pos2, r: f32) {
     }
     ui.painter().add(mesh);
 }
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, PointerButton, RawInput};
+
+    use super::*;
+
+    /// The studio open on a wide window, frame by frame.
+    struct Open {
+        ctx: egui::Context,
+        look: Look,
+        prefs: crate::prefs::Prefs,
+        studio: Studio,
+        session: Arc<CanvasSession>,
+        time: f64,
+    }
+
+    impl Open {
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 700.0))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Open { ctx, look, prefs, studio, session, .. } = self;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                studio.show(ui.ctx(), look, session, prefs);
+            });
+            output.textures_delta.clear();
+        }
+
+        fn click(&mut self, at: Pos2) {
+            let button = |pressed| Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            self.frame(vec![Event::PointerMoved(at), button(true)]);
+            self.frame(vec![button(false)]);
+        }
+    }
+
+    #[test]
+    fn a_brush_is_renamed_by_clicking_its_name_on_its_about_page_and_typing() {
+        let session = CanvasSession::new(64, 64);
+        let mut open = Open {
+            ctx: egui::Context::default(),
+            look: Look::default(),
+            prefs: crate::prefs::Prefs::default(),
+            studio: Studio::default(),
+            session,
+            time: 0.0,
+        };
+        open.studio.begin(&open.ctx.clone(), &open.session, None);
+        let before = open.studio.name.clone();
+        assert!(!before.is_empty());
+        open.studio.tab = PAGES.len() - 1;
+        open.frame(Vec::new());
+        open.frame(Vec::new());
+        // the name heads the page: its column 20 points in from the settings beside the pages'
+        // card, its row 25 down
+        let name_at = pos2(330.0 + 20.0 + 8.0 + 12.0, 25.0 + 11.5);
+        open.click(name_at);
+        assert!(open.studio.renaming.is_some(), "clicking the name opens it for typing");
+        open.frame(Vec::new());
+        // typed over: the whole name was chosen
+        open.frame(vec![Event::Text("Mine".to_owned())]);
+        assert_eq!(open.studio.name, "Mine");
+        open.frame(vec![Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        open.frame(Vec::new());
+        assert!(open.studio.renaming.is_none(), "Return ends the typing");
+        open.studio.close(&open.session, true);
+        assert_eq!(open.session.current_brush().name, "Mine", "kept with Done (it was {before})");
+    }
+}
