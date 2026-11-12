@@ -1,0 +1,22 @@
+[package]
+name = "opacity-together"
+version = "1.2.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "A plugin for ProCraft: picked layers take one opacity together"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+kit = { package = "procraft-plugin-kit", path = "../kit", default-features = false }
+
+# Not a member of the app's workspace, and linked into nothing: it builds to a module of its own.
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

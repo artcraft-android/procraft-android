@@ -595,13 +595,6 @@ impl Plugins {
         }
         let values: Vec<f32> = plugin.controls.iter().map(PluginControl::number).collect();
         let store = self.store.as_deref();
-        // a plugin of switches: no code, its hooks answered from its controls
-        if let Some((hooks, answers)) =
-            store.and_then(|store| plugin_file::read_switches(store, &plugin.id, &plugin.version))
-        {
-            self.hooks.put_switches(plugin.id.clone(), &hooks, answers, values);
-            return;
-        }
         let code = store.and_then(|store| plugin_file::read_code(store, &plugin.id, &plugin.version));
         let started = code
             .ok_or(Stop::Damaged)

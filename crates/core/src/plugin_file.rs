@@ -23,7 +23,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 3;
+const INTERFACE: u32 = 2;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -106,10 +106,6 @@ pub(crate) struct Listed {
     size: usize,
 }
 
-/// What a plugin of switches answers at each of its hooks: the value of the control at that place,
-/// or yes while it is on (none).
-pub(crate) type Answers = Vec<(Hook, Option<usize>)>;
-
 /// A manifest that has held up, its controls' keys carrying the plugin's id.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Manifest {
@@ -130,9 +126,6 @@ pub(crate) struct Manifest {
     /// The kinds of artwork it makes.
     pub kinds: Vec<crate::plugin_canvas::PluginKind>,
     pub permissions: Vec<crate::plugin_commands::PluginPermission>,
-    /// A plugin of switches (hooks and no code): each hook's answer, the control at that place's
-    /// value, or yes while it is on (none).
-    pub answers: Answers,
     files: Vec<Listed>,
 }
 
@@ -197,9 +190,6 @@ struct RawManifest {
     actions: Vec<RawAction>,
     #[serde(default)]
     kinds: Vec<RawKind>,
-    /// A plugin of switches: the control (by its key) whose value each hook answers.
-    #[serde(default)]
-    answers: std::collections::BTreeMap<String, String>,
 }
 
 /// A kind of artwork a plugin makes: its key and its name in the gallery's menu.
@@ -536,8 +526,6 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         return Err(Refusal::Described);
     }
     let id = raw.id;
-    // (each control's key and kind, for what a plugin of switches answers from)
-    let control_kinds: Vec<(String, String)> = raw.controls.iter().map(|c| (c.key.clone(), c.kind.clone())).collect();
     let controls = raw.controls.into_iter().map(|c| checked_control(&id, c)).collect::<Result<Vec<_>, _>>()?;
     if id.starts_with(OWN_PREFIX) {
         return Err(Refusal::Described);
@@ -549,9 +537,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     // what it says it holds and what it lists agree, so what the import screen tells is all of it
     let has = |part| holds.contains(&part);
     let fits = |path: &str, most: usize| files.iter().find(|f| f.path == path).map(|f| f.size <= most);
-    // hooks with no code: a plugin of switches, its hooks answered from its controls
-    let switches = has(PluginPart::Hooks) && fits(MODULE, MOST_MODULE).is_none();
-    let module = switches || fits(MODULE, MOST_MODULE) == has(PluginPart::Hooks).then_some(true);
+    let module = fits(MODULE, MOST_MODULE) == has(PluginPart::Hooks).then_some(true);
     let filter = fits(FILTER_CODE, MOST_SHADER) == has(PluginPart::Filter).then_some(true);
     if !module || !filter {
         return Err(Refusal::Described);
@@ -619,43 +605,6 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         };
         actions.push(crate::plugins::PluginAction { key: format!("{id}.{}", a.key), label: a.label, place });
     }
-    // a plugin of switches: only hooks that ask yes or a number, nothing else for code to do, and
-    // each answer from a control of the right kind (a number from a slider)
-    let mut answers = Vec::new();
-    if switches {
-        let alone = !hooks.is_empty() && hooks.iter().all(|hook| hook.answers_alone());
-        let nothing_else = actions.is_empty()
-            && kinds.is_empty()
-            && permissions.is_empty()
-            && brush_controls.is_empty()
-            && picked == 0;
-        let three = compat.interface.is_some_and(|interface| interface >= 3);
-        if !alone || !nothing_else || !three {
-            return Err(Refusal::Described);
-        }
-        let mut from = Vec::new();
-        for (name, key) in &raw.answers {
-            let hook = Hook::named(name).ok_or(Refusal::Newer)?;
-            let at = control_kinds.iter().position(|(k, _)| k == key).ok_or(Refusal::Described)?;
-            let number = hook == Hook::RadialSegments;
-            let wanted = if number { "slider" } else { "switch" };
-            let kind_fits = control_kinds.get(at).is_some_and(|(_, kind)| kind == wanted);
-            if !hooks.contains(&hook) || !kind_fits {
-                return Err(Refusal::Described);
-            }
-            from.push((hook, at));
-        }
-        for &hook in &hooks {
-            let at = from.iter().find(|(h, _)| *h == hook).map(|&(_, at)| at);
-            // a number has to come from somewhere
-            if hook == Hook::RadialSegments && at.is_none() {
-                return Err(Refusal::Described);
-            }
-            answers.push((hook, at));
-        }
-    } else if !raw.answers.is_empty() {
-        return Err(Refusal::Described);
-    }
     Ok(Manifest {
         id,
         name: raw.name,
@@ -670,7 +619,6 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         actions,
         kinds,
         permissions,
-        answers,
         files,
     })
 }
@@ -907,15 +855,6 @@ pub(crate) fn read_code(dir: &Path, id: &str, version: &str) -> Option<(Vec<Hook
     let folder = dir.join(id).join(version);
     let manifest = read_folder(&folder, id, version)?;
     Some((manifest.hooks, read_capped(&folder.join(MODULE), MOST_MODULE)?))
-}
-
-/// The hooks of the plugin of switches `id` at `version` in `dir` (one with no code), and what each
-/// answers; none if it isn't one or doesn't hold up as it did.
-pub(crate) fn read_switches(dir: &Path, id: &str, version: &str) -> Option<(Vec<Hook>, Answers)> {
-    let folder = dir.join(id).join(version);
-    let manifest = read_folder(&folder, id, version)?;
-    let switches = manifest.holds.contains(&PluginPart::Hooks) && manifest.files.iter().all(|f| f.path != MODULE);
-    switches.then_some((manifest.hooks, manifest.answers))
 }
 
 /// The picture's code of the picker `id` at `version` in `dir`, if it holds up as it did.
@@ -1248,59 +1187,6 @@ pub(crate) mod tests {
             "permissions": [],
             "hooks": ["position"],
         })
-    }
-
-    /// A plugin of switches on `hooks`: hooks and no code.
-    pub(crate) fn switches(id: &str, hooks: Value) -> Value {
-        let mut manifest = coded(id, &[]);
-        manifest["compat"]["procraft"]["interface"] = json!(3);
-        manifest["files"] = json!([]);
-        manifest["hooks"] = hooks;
-        manifest
-    }
-
-    #[test]
-    fn a_plugin_of_switches_has_no_code_and_answers_from_its_controls() {
-        // yes while on: no code, no controls
-        let package = read_package(&pack(&switches("org.example.quiet", json!(["hide_undo_notice"])), &[])).unwrap();
-        assert_eq!(package.manifest.answers, [(Hook::HideUndoNotice, None)]);
-        // a number from a slider, a yes from a switch
-        let mut radial = switches("org.example.radial", json!(["radial_segments", "pick_layer"]));
-        radial["controls"] = json!([
-            { "key": "parts", "type": "slider", "label": "Segments", "least": 2, "most": 32, "step": 1, "starts": 8 },
-            { "key": "layer", "type": "switch", "label": "Layer", "starts": false },
-        ]);
-        radial["answers"] = json!({ "radial_segments": "parts", "pick_layer": "layer" });
-        let package = read_package(&pack(&radial, &[])).unwrap();
-        assert_eq!(package.manifest.answers, [(Hook::RadialSegments, Some(0)), (Hook::PickLayer, Some(1))]);
-        // refused: a number from nowhere, or from a switch; a control it hasn't; a hook it isn't on
-        let refused = |change: &dyn Fn(&mut Value)| {
-            let mut manifest = radial.clone();
-            change(&mut manifest);
-            refusal(&pack(&manifest, &[]))
-        };
-        assert_eq!(refused(&|m| m["answers"] = json!({ "pick_layer": "layer" })), Refusal::Described);
-        assert_eq!(refused(&|m| m["answers"]["radial_segments"] = json!("layer")), Refusal::Described);
-        assert_eq!(refused(&|m| m["answers"]["pick_layer"] = json!("nothing")), Refusal::Described);
-        assert_eq!(refused(&|m| m["answers"]["fill_all_layers"] = json!("layer")), Refusal::Described);
-        // written for an app before plugins of switches
-        let mut older = radial.clone();
-        older["compat"]["procraft"]["interface"] = json!(2);
-        assert_eq!(refusal(&pack(&older, &[])), Refusal::Described);
-        // a hook that hands something over needs code
-        assert_eq!(refusal(&pack(&switches("org.example.moves", json!(["position"])), &[])), Refusal::Described);
-        // and so do actions, kinds of artwork and the rest
-        let mut acting = switches("org.example.acts", json!(["pin_panels"]));
-        acting["compat"]["procraft"]["interface"] = json!(2);
-        acting["actions"] = json!([{ "key": "go", "label": "Go" }]);
-        assert_eq!(refusal(&pack(&acting, &[])), Refusal::Described);
-        // a plugin with code names no answers: its code gives them
-        let module =
-            wat::parse_str(r#"(module (func (export "procraft_pin_panels") (result i32) (i32.const 1)))"#).unwrap();
-        let mut coded_answers = coded("org.example.coded", &module);
-        coded_answers["hooks"] = json!(["pin_panels"]);
-        coded_answers["answers"] = json!({ "pin_panels": "x" });
-        assert_eq!(refusal(&pack(&coded_answers, &[(MODULE, module.as_slice())])), Refusal::Described);
     }
 
     /// A plugin file of `manifest` and `files`, as they are.
@@ -1783,7 +1669,6 @@ pub(crate) mod tests {
             read_package(&a_coded_file(&manifest, &module))
         };
         let package = placed("adjustments").unwrap();
-        // (a plugin of switches, below, has hooks and no code)
         assert_eq!(package.manifest.actions[0].place, crate::plugins::PluginPlace::Adjustments);
         for (name, place) in
             [("layer", crate::plugins::PluginPlace::Layer), ("frame", crate::plugins::PluginPlace::Frame)]

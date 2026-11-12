@@ -58,7 +58,7 @@ plugin do.
 `hooks` lists the hooks the code uses, and only a plugin that holds `"hooks"` may have it. Code
 needs at least one hook, one action (see [Actions](#actions)) or one kind of artwork (see
 [Artworks of its own](#artworks-of-its-own)). `interface` is 1 here; actions, permissions, panels,
-the `picker` hook and kinds of artwork need 2, and a plugin of switches (no code) needs 3.
+the `picker` hook and kinds of artwork need 2.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -140,26 +140,6 @@ its permissions give, as an action). A module imports only the app's functions i
 `permissions` give (see [Actions](#actions)), so it has no files, no network and no clock. A module
 that imports anything else is refused. A function it exports for a hook it didn't list is never
 called.
-
-### Plugins of switches
-
-A plugin that only says yes, or a number, at hooks that hand it nothing needs no code: it holds
-`hooks`, lists no `module.wasm`, and each of its hooks answers yes while it is on, or the value of a
-control it names in `answers`:
-
-```json
-"holds": ["hooks"],
-"hooks": ["radial_segments"],
-"controls": [{ "key": "parts", "type": "slider", "label": "Segments", "least": 2, "most": 32, "step": 1, "starts": 8 }],
-"answers": { "radial_segments": "parts" }
-```
-
-The hooks it may be on: `pick_layer`, `fill_all_layers`, `hide_undo_notice`, `pin_panels`,
-`opacity_together` and `colour_triangle` (yes while on, or a switch's value), and `radial_segments`
-(a slider's value, which it has to name). It can have no actions, kinds of artwork, brush studio rows,
-file controls or permissions: those are for code. The packer leaves a plugin folder with no
-`Cargo.toml` uncompiled, and `interface` is 3. Six of the plugins that come with the app are plugins
-of switches.
 
 ### The crate
 
@@ -838,8 +818,7 @@ and have `Plugins::with_bundled` add none. What was added stays, as if imported.
 
 `interface` in `compat` is the version of all this: the hooks and what they call, the template around
 a filter's function, what a filter is given, the kinds of control, and the app's functions. Interface
-2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork, and
-interface 3 plugins of switches. What a
+2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork. What a
 hook calls stays as it's written here, and the app keeps every interface's template, so a plugin goes
 on working as it was written.
 

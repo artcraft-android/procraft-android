@@ -276,21 +276,6 @@ impl Hook {
         }
     }
 
-    /// Whether it only asks yes or a number, handing nothing over: a plugin with no code can answer
-    /// it from its controls.
-    pub(crate) fn answers_alone(self) -> bool {
-        matches!(
-            self,
-            Hook::PickLayer
-                | Hook::FillAllLayers
-                | Hook::RadialSegments
-                | Hook::HideUndoNotice
-                | Hook::PinPanels
-                | Hook::OpacityTogether
-                | Hook::ColourTriangle
-        )
-    }
-
     /// It as a bit, in a set of hooks.
     pub(crate) fn bit(self) -> u32 {
         1 << self as u32

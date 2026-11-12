@@ -115,12 +115,8 @@ mod tests {
             } else {
                 assert!(!filter.exists(), "{name}");
             }
-            // code with hooks, but for a plugin of switches (no crate, its hooks answered from its
-            // controls)
             let code = package.file(crate::plugin_run::MODULE).is_some();
-            let crate_ = folder.join("Cargo.toml").exists();
-            assert_eq!(code, package.manifest.holds.contains(&PluginPart::Hooks) && crate_, "{name}");
-            assert!(code || !crate_, "{name} has a crate but no code");
+            assert_eq!(code, package.manifest.holds.contains(&PluginPart::Hooks), "{name}");
             // its code can't be built here, so the folder as it was packed, all of it, is checked
             let line = format!("{name} {}", source_digest(&folder));
             assert!(sources.lines().any(|kept| kept == line), "plugins/{name} has changed: {REPACK}");
