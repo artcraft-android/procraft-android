@@ -62,6 +62,7 @@ mod system_clipboard;
 mod text;
 mod timelapse;
 mod tool_header;
+mod touch_keyboard;
 mod transform;
 mod transform_numeric;
 mod ui;
@@ -436,6 +437,17 @@ impl ApplicationHandler for App {
         let Some(event) = self.tap_assist(event) else { return };
         let Some(screen) = self.screen.as_mut() else { return };
         let session = self.session.clone();
+        // a finger or a pen pressing brings the on-screen keyboard up for a field it focuses (a
+        // tablet's pen that moves the mouse as well as the system's pen)
+        match &event {
+            WindowEvent::Touch(t) if t.phase == winit::event::TouchPhase::Started => {
+                screen.touch_keyboard.touched(Instant::now());
+            }
+            WindowEvent::MouseInput { state: winit::event::ElementState::Pressed, .. } => {
+                screen.touch_keyboard.clicked(crate::pen::mouse_pen().is_some(), Instant::now());
+            }
+            _ => {}
+        }
         // on the canvas Ctrl+X, C and V are the app's shortcuts (a layer cut, copied or pasted,
         // from a clipboard of its own, the system's perhaps empty); a text field keeps them for
         // the system's clipboard

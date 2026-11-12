@@ -33,6 +33,8 @@ pub struct Screen {
     /// before it started again), and whether that is all there are.
     pub tried: usize,
     pub last: bool,
+    /// The system's on-screen keyboard, for a field focused by a finger or a pen.
+    pub touch_keyboard: crate::touch_keyboard::TouchKeyboard,
 }
 
 /// A canvas drawn into a picture of its own (the surface's format), its size, and the
@@ -194,6 +196,7 @@ impl Screen {
             canvases_later: None,
             tried: 0,
             last,
+            touch_keyboard: crate::touch_keyboard::TouchKeyboard::default(),
         })
     }
 
@@ -333,6 +336,8 @@ impl Screen {
         // a pen read by the app itself (on Wayland) has its cursor set apart from the mouse's
         crate::pen::set_cursor(platform_output.cursor_icon);
         self.egui.handle_platform_output(&self.window, platform_output);
+        let typing = self.egui.egui_ctx().text_edit_focused();
+        self.touch_keyboard.frame(&self.window, typing);
         let interface_after = viewport_output
             .get(&egui::ViewportId::ROOT)
             .map(|v| v.repaint_delay)
