@@ -2497,14 +2497,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = s.guide()
     }
 
-    /** The canvas view's ear for a pen's side button that comes as a key (true: the second). */
-    var penKeyHeard: ((second: Boolean) -> Unit)? = null
+    /** The canvas view's ear for a pen's side button that comes as a key (true: the second), and what it did. */
+    var penKeyHeard: ((second: Boolean, action: PenKeyAction) -> Unit)? = null
 
     /** A pen's side button came as a key (see [penKeyButton]): true if a canvas took it. */
-    fun penKey(second: Boolean): Boolean {
+    fun penKey(second: Boolean, action: PenKeyAction = PenKeyAction.PRESSED): Boolean {
         if (screen != Screen.CANVAS || session == null) return false
         val heard = penKeyHeard ?: return false
-        heard(second)
+        heard(second, action)
         return true
     }
 

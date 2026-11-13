@@ -179,6 +179,9 @@ pub struct Interface {
     quick_menu: crate::quick_menu::QuickMenu,
     /// A pen button set to the eyedropper is held: its loupe follows the pen until it is let go.
     pen_picking: bool,
+    /// The pen's first and second buttons as held last frame: let go, one held to erase gives the
+    /// eraser back.
+    pen_held: [bool; 2],
     /// An open adjustment's bar, panel and tap menu; Gradient Map's library (kept between runs).
     adjustments: crate::adjustments::Adjustments,
     gradients: std::sync::Arc<procraft_core::Gradients>,
@@ -285,6 +288,7 @@ impl Default for Interface {
             artwork_dir: None,
             quick_menu: crate::quick_menu::QuickMenu::default(),
             pen_picking: false,
+            pen_held: [false; 2],
             adjustments: crate::adjustments::Adjustments::default(),
             gradients: procraft_core::Gradients::open(
                 crate::files::app_dir().join("gradients.json").to_string_lossy().into_owned(),
@@ -502,9 +506,10 @@ impl Interface {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
-        // do (the first, set to nothing, the eraser and back), where the pointer is; one set to
-        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it;
-        // with the canvas out of sight they do nothing, then or later: the tool would change unseen
+        // do (the first, set to nothing, the eraser and back; set to erase, the eraser while it is
+        // held), where the pointer is; one set to the eyedropper picks while it is held, where the
+        // pen hovers, and lets go to take it; with the canvas out of sight they do nothing, then
+        // or later: the tool would change unseen (and one held to erase is let go)
         let covered = self.studio.open || self.time_lapse.replaying();
         let presses = crate::pen::take_button_presses().map(|n| if covered { 0 } else { n });
         let held = crate::pen::buttons_held().map(|h| h && !covered);
@@ -517,13 +522,19 @@ impl Interface {
                     self.pen_picking = true;
                     ctx.request_repaint();
                 }
-                continue;
+            } else {
+                for _ in 0..pressed {
+                    input.commands.extend(session.touch_pen_button(button == 1, x, y));
+                    self.library.tool_changed();
+                }
             }
-            for _ in 0..pressed {
-                input.commands.extend(session.touch_pen_button(button == 1, x, y));
+            // let go since the last frame (or pressed and let go within this one)
+            let was_held = self.pen_held.get(button).copied().unwrap_or(false);
+            if !is_held && (was_held || pressed > 0) && session.touch_pen_button_up(button == 1) {
                 self.library.tool_changed();
             }
         }
+        self.pen_held = held;
         let eyedropper_held = held.iter().zip(&purposes).any(|(h, p)| *h && *p == Some(GesturePurpose::Eyedropper));
         if self.pen_picking && !eyedropper_held {
             self.pen_picking = false;

@@ -17,6 +17,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.ProjectionPresentation
 import io.github.artcraftandroid.procraft.canvas.PEN_DOUBLE_TAP_KEY
+import io.github.artcraftandroid.procraft.canvas.PenKeyAction
 import io.github.artcraftandroid.procraft.canvas.PenDoubleTaps
 import io.github.artcraftandroid.procraft.canvas.penKeyButton
 import kotlinx.coroutines.launch
@@ -173,7 +174,7 @@ class MainActivity : ComponentActivity() {
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
         // a pen's double-tap that comes as a key of its own: as its first button, once for each
         if (keyCode == PEN_DOUBLE_TAP_KEY) {
-            if (event.repeatCount == 0 && penDoubleTaps.isNew(event.eventTime)) vm.penKey(false)
+            if (event.repeatCount == 0 && penDoubleTaps.isNew(event.eventTime)) vm.penKey(false, PenKeyAction.DOUBLE_TAPPED)
             return true
         }
         // a pen's side button that comes as a key
@@ -185,6 +186,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        // a pen's side button that comes as a key, let go (held to erase, the eraser goes back)
+        val penButton = event.device?.let { penKeyButton(keyCode, it.sources or event.source, it.keyboardType, it.name) }
+        if (penButton != null && vm.penKey(penButton, PenKeyAction.LET_GO)) return true
         if (isAltKey(keyCode) && vm.modifyHeld && vm.modifyKey(false)) return true
         return super.onKeyUp(keyCode, event)
     }

@@ -44,7 +44,8 @@ pub enum Trigger {
 }
 
 /// One switch on a page: its name (a trigger's, or a setting of its own), what it says and does,
-/// whether it starts on, and whether it has a delay slider under it.
+/// whether it starts on, whether it has a delay slider under it, and whether it needs a pen's
+/// button held down (an app whose pen only taps, as a double-tap does, leaves that switch out).
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct GestureOption {
     pub key: String,
@@ -53,6 +54,7 @@ pub struct GestureOption {
     pub default: bool,
     pub trigger: Option<Trigger>,
     pub delayed: bool,
+    pub held_button: bool,
 }
 
 /// The pages in order, with their names as kept, titles and headings.
@@ -108,7 +110,13 @@ fn opt(t: Trigger, detail: &str, default: bool) -> GestureOption {
         default,
         trigger: Some(t),
         delayed: t == Trigger::Hold,
+        held_button: false,
     }
+}
+
+/// A switch for the pen's button held down.
+fn held(t: Trigger, detail: &str) -> GestureOption {
+    GestureOption { held_button: true, ..opt(t, detail, false) }
 }
 
 /// A setting of a page's own.
@@ -120,6 +128,7 @@ fn own(key: &str, label: &str, detail: &str, default: bool, delayed: bool) -> Ge
         default,
         trigger: None,
         delayed,
+        held_button: false,
     }
 }
 
@@ -156,6 +165,8 @@ pub fn gesture_options(purpose: GesturePurpose) -> Vec<GestureOption> {
             opt(T::Pen, "Pen strokes erase", false),
             opt(T::ModifyTouch, "Finger strokes erase while □ is held down", false),
             opt(T::ModifyPen, "Pen strokes erase while □ is held down", false),
+            // off, the button switches to the eraser and back (as a pen's double-tap does)
+            held(T::PenDoubleTap, "Pen strokes erase while the pen button is held down"),
         ],
         GesturePurpose::Assisted => vec![
             opt(T::TapModify, "Turns drawing assist on or off for this layer", false),
@@ -494,6 +505,30 @@ mod tests {
         // a page's own setting touches nothing else
         assert_eq!(g.set(GesturePurpose::General, "NO_UNDO".into(), true).len(), 1);
         assert!(!g.touch_settings(650.0).undo_taps);
+    }
+
+    #[test]
+    fn erase_s_pen_button_erases_while_held_one_switch_kept_like_the_rest() {
+        let g = GestureSettings::new(KeptGestures::default());
+        // as shipped, off: the button switches to the eraser and back
+        assert!(!g.is_on(GesturePurpose::Erase, "PEN_DOUBLE_TAP".into()));
+        assert_eq!(g.touch_settings(650.0).pen_button, None);
+        g.set(GesturePurpose::Quickmenu, "PEN_DOUBLE_TAP".into(), true);
+        let changed = g.set(GesturePurpose::Erase, "PEN_DOUBLE_TAP".into(), true);
+        assert_eq!(changed.get("QUICKMENU.PEN_DOUBLE_TAP"), Some(&false));
+        assert_eq!(changed.get("ERASE.PEN_DOUBLE_TAP"), Some(&true));
+        assert_eq!(g.touch_settings(650.0).pen_button, Some(GestureAction::Erase));
+        let again = GestureSettings::new(g.kept());
+        assert!(again.is_on(GesturePurpose::Erase, "PEN_DOUBLE_TAP".into()));
+        assert_eq!(again.touch_settings(650.0).pen_button, Some(GestureAction::Erase));
+        again.reset_all();
+        assert_eq!(again.touch_settings(650.0).pen_button, None);
+        // the only switch that needs a pen's button held down
+        let held: Vec<(GesturePurpose, String)> = gesture_purposes()
+            .into_iter()
+            .flat_map(|p| gesture_options(p).into_iter().filter(|o| o.held_button).map(move |o| (p, o.key)))
+            .collect();
+        assert_eq!(held, [(GesturePurpose::Erase, "PEN_DOUBLE_TAP".to_owned())]);
     }
 
     #[test]

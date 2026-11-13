@@ -9834,16 +9834,23 @@ fn touches_anyhow_leave_no_stroke_open_and_undo_whole() {
                     let (id, _, _) = down.remove(next(down.len() as u32) as usize);
                     run(&s, s.touch_cancel_one(id));
                 }
+                // a pen button pressed, and let go now or later (held to erase, the eraser meanwhile)
                 13 if next(3) == 0 => {
                     let (x, y) = (5.0 + next(90) as f32, 5.0 + next(90) as f32);
-                    run(&s, s.touch_pen_button(next(2) == 0, x, y));
+                    let second = next(2) == 0;
+                    run(&s, s.touch_pen_button(second, x, y));
+                    if next(2) == 0 {
+                        s.touch_pen_button_up(second);
+                    }
                 }
-                // one finger set to move the canvas, or to paint again
+                // one finger set to move the canvas, or to paint again; the pen button to erase
+                // while held, or to switch
                 14 if next(6) == 0 => {
                     let pan = next(2) == 0;
                     s.set_touch_settings(crate::touch::TouchSettings {
                         one_finger_pan: pan,
                         finger_paint: !pan,
+                        pen_button: (next(2) == 0).then_some(crate::touch::GestureAction::Erase),
                         ..Default::default()
                     });
                 }
