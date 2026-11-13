@@ -731,6 +731,12 @@ def new_set():
     return folder().difference(capsule((8.6, 14.8), (15.4, 14.8), 1.1)).difference(capsule((12.0, 11.4), (12.0, 18.2), 1.1))
 
 
+def new_layer():
+    """New layer: a single sheet with a plus cut out of it."""
+    sheet = soft(Polygon([(12, 5.8), (22, 12), (12, 18.2), (2, 12)]), 1.0)
+    return sheet.difference(capsule((9.1, 12), (14.9, 12), 1.1)).difference(capsule((12, 9.1), (12, 14.9), 1.1))
+
+
 def volumes():
     """Libraries: three volumes standing on a shelf, the last leaning away from the others."""
     shelf = soft(box(2.5, 19.0, 21.5, 20.8), 0.6)
@@ -1622,7 +1628,7 @@ DRAWINGS = {
     'studiodynamics': chevrons, 'studiostylus': stylus, 'studioproperties': gear, 'studiomaterials': material_ball,
     'studiopreview': eye, 'studioabout': name_tag,
     'infoabout': name_tag, 'infodimensions': ruler, 'infolayers': layers, 'infoprofile': gamut, 'infovideo': video_tab,
-    'infostatistics': pie, 'menunewbrush': new_brush, 'menunewset': new_set, 'menushare': share_tab,
+    'infostatistics': pie, 'menunewbrush': new_brush, 'menunewset': new_set, 'menunewlayer': new_layer, 'menushare': share_tab,
     'menulibraries': volumes, 'menunewlibrary': new_library,
     'menuchevron': chevron, 'disclose': lambda: chevron(90), 'donetick': tick, 'add': plus, 'fullscreen': full_screen,
     'cardcompact': rows, 'cardstack': stacked_cards, 'folder-fill': folder, 'sweep': bin_, 'keyboard': keyboard,
