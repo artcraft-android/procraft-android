@@ -474,6 +474,22 @@ fn a_held_edit_is_one_undo_step_or_put_back() {
     canvas.release_layer(false, None);
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, a, 3, 3), [10, 20, 30, 255]);
+    // held quietly, clearing and filling it make no steps of their own: one, holding one copy
+    // (after a step of its own, so nothing waits to be redone)
+    fill(&mut canvas, &doc, a, [10, 20, 30]);
+    canvas.render(&gpu, &mut doc, None);
+    let (steps, bytes) = (canvas.steps_made(), canvas.history_bytes());
+    canvas.hold_layer_quietly(a);
+    canvas.clear_layer(a);
+    fill(&mut canvas, &doc, a, [40, 50, 60]);
+    canvas.release_layer(true, None);
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(canvas.steps_made(), steps + 1);
+    assert_eq!(canvas.history_bytes() - bytes, u64::from(W * W) * 4, "one copy of the layer");
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, a, 3, 3), [40, 50, 60, 255]);
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, a, 3, 3), [10, 20, 30, 255]);
 }
 
 /// The same edits to an artwork composited fully and one composited around caches.

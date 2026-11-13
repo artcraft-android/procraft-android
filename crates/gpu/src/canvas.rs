@@ -1482,6 +1482,9 @@ enum Op {
     },
     /// A layer's pixels are set aside: what an edit made of many changes goes back to.
     Hold(LayerId),
+    /// While the layer held stays held, its changes make no steps of their own (its one step is
+    /// made as it is released).
+    HoldQuietly,
     /// The held pixels, and the document as it was (`before`), become one undo step (`keep`), or
     /// the pixels are put back.
     Release {
@@ -1923,8 +1926,10 @@ pub struct Canvas {
     /// until it ends. And whether that is still to be told.
     smudge_refused: bool,
     smudge_untold: bool,
-    /// A layer's pixels set aside by [`Canvas::hold_layer`].
+    /// A layer's pixels set aside by [`Canvas::hold_layer`], and whether its changes meanwhile make
+    /// no steps of their own ([`Canvas::hold_layer_quietly`]).
     held: Option<Snapshot>,
+    held_quietly: bool,
     /// Part of the composite kept as it was, drawn over the canvas but for a hole (see
     /// [`Canvas::veil_begin`]).
     veil: Option<Veil>,
@@ -2242,6 +2247,7 @@ impl Canvas {
             smudge_refused: false,
             smudge_untold: false,
             held: None,
+            held_quietly: false,
             veil: None,
             steps_made: 0,
             mark: None,
@@ -2953,6 +2959,14 @@ impl Canvas {
     pub fn hold_layer(&mut self, layer: LayerId) {
         self.end_stroke();
         self.ops.push(Op::Hold(layer));
+    }
+
+    /// Sets a layer's pixels aside as [`Canvas::hold_layer`] does, for an edit made of strokes and
+    /// clearing (laying a layer's strokes again, say): until [`Canvas::release_layer`], what changes
+    /// it makes no undo step of its own, so the edit keeps one copy of the layer, not one for each.
+    pub fn hold_layer_quietly(&mut self, layer: LayerId) {
+        self.hold_layer(layer);
+        self.ops.push(Op::HoldQuietly);
     }
 
     /// Ends a held edit: `keep` makes it one undo step back to the held pixels and `before` (the
@@ -4341,9 +4355,12 @@ impl Canvas {
                 Op::Hold(id) => {
                     let full = self.full();
                     self.held = self.snapshot(device, &mut encoder, id, full);
+                    self.held_quietly = false;
                 }
+                Op::HoldQuietly => self.held_quietly = self.held.is_some(),
                 Op::Release { keep, before } => {
                     let held = self.held.take();
+                    self.held_quietly = false;
                     if keep {
                         if held.is_some() || before.is_some() {
                             self.push_step(Step {
@@ -6125,6 +6142,17 @@ impl Canvas {
 
     /// A new step: it joins the history and anything undone can no longer be redone.
     fn push_step(&mut self, mut step: Step) {
+        // part of an edit held quietly: the step made as it is released holds it
+        let held = self.held.as_ref().filter(|_| self.held_quietly).map(|h| h.layer);
+        if let Some(layer) = held
+            && step.doc.is_none()
+            && step.selection.is_none()
+            && step.flip.is_none()
+            && step.pixels.iter().all(|s| s.layer == layer)
+        {
+            self.keep_spare_snapshot(step);
+            return;
+        }
         self.steps_made += 1;
         step.made = self.steps_made;
         if step.name.is_none() {
