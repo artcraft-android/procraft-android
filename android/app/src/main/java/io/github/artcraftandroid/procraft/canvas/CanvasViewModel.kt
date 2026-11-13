@@ -4858,6 +4858,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val setName = name.substringBeforeLast('.').trim()
         val s = session
         if (s == null) {
+            // read once now (and let go: it is read again when a canvas opens), so a file with
+            // none in it is told so here rather than promised and then dropped without a word
+            val any = withContext(Dispatchers.Default) {
+                runCatching { io.github.artcraftandroid.procraft.core.readBrushes(bytes, name)?.also { it.destroy() } != null }.getOrDefault(false)
+            }
+            if (!any) return false
             withContext(Dispatchers.IO) {
                 pendingBrushDir.mkdirs()
                 File(pendingBrushDir, "${System.nanoTime()}-${setName.replace(Regex("[^A-Za-z0-9 _-]"), "_")}.other").writeBytes(bytes)
@@ -4909,6 +4915,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (pendingBrushesReading?.isActive == true) return
         pendingBrushesReading = viewModelScope.launch {
             var any = false
+            var unread = false
             while (session != null) {
                 val f = withContext(Dispatchers.IO) { pendingBrushDir.listFiles()?.minByOrNull { it.name } } ?: break
                 val read = withContext(Dispatchers.Default) {
@@ -4916,14 +4923,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     runCatching { io.github.artcraftandroid.procraft.core.readBrushes(f.readBytes(), f.name.substringAfter('-')) }.getOrNull()
                 }
                 if (session == null) break
-                read?.let {
-                    brushesRead += it
+                if (read != null) {
+                    brushesRead += read
                     addBrushesRead()
                     any = true
+                } else {
+                    unread = true
                 }
                 withContext(Dispatchers.IO) { f.delete() }
             }
-            if (any) message = "Brushes added to the library."
+            if (unread) {
+                message = "A brush file couldn't be read."
+            } else if (any) {
+                message = "Brushes added to the library."
+            }
         }
     }
 
