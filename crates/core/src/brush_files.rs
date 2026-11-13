@@ -1545,6 +1545,16 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                 .zip(textures::stock_shape_tones(name, *inverted))
                 .and_then(|(i, tones)| {
                     let mut shape = textures::shapes().into_iter().nth(i as usize)?;
+                    // as wide and tall as the real tip, where it lies in its square (the grainy
+                    // square, standing in for a tip we know nothing else of, takes its outline
+                    // across and down below)
+                    if i != shape::STOCK_GRAINY_SQUARE
+                        && let (Some(rows), Some(cols)) =
+                            (textures::stock_shape_rows(name, *inverted), textures::stock_shape_cols(name, *inverted))
+                        && let Some(fitted) = textures::fitted_to_box(&shape.pixels, &rows, &cols)
+                    {
+                        shape.pixels = fitted;
+                    }
                     // its marks as fine as the real tip's: standing in for a tip we know nothing
                     // else of, the grainy square (smooth for a solid one); any other shape of ours
                     // takes them over itself
@@ -2039,6 +2049,25 @@ mod tests {
         // and a dual brush's second's own tip and grain are measured as its first's are
         assert!(textures::stock_shape_tones("nightjar_secondary_shape.png", false).is_some());
         assert!(textures::stock_grain_tones("lumita_secondary_grain.png").is_some());
+    }
+
+    #[test]
+    fn a_stock_tip_stands_in_as_wide_as_it_inks() {
+        // a dab inked across 85% of its square and down 70% (ours, a chunk, had 68% and 66%): its
+        // stroke came out a fifth too narrow
+        let tip = Texture::Stock { name: "Acrylic-Dab-3.jpg".to_owned(), inverted: false };
+        let (_, source, _) = shape_for(&tip);
+        let pixels = source.expect("retoned").pixels;
+        let n = TEXTURE_SIZE;
+        let span = |across: bool| {
+            let inked =
+                |i: usize| (0..n).filter(|&j| pixels[if across { j * n + i } else { i * n + j }] > 13).count() > n / 50;
+            let first = (0..n).find(|&i| inked(i)).unwrap_or(0);
+            let last = (0..n).rev().find(|&i| inked(i)).unwrap_or(0);
+            (last - first) as f32 / n as f32
+        };
+        assert!(span(true) > 0.74, "{}", span(true));
+        assert!((0.62..0.76).contains(&span(false)), "{}", span(false));
     }
 
     #[test]

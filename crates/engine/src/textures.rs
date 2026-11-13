@@ -470,6 +470,71 @@ pub fn halftone_shape(lattice: [(f32, f32); 2], rows: &[u8; 64], cols: &[u8; 64]
     })
 }
 
+/// `pixels`, a shape, stretched across and down so that the bands of its rows and columns holding
+/// ink span as many as `rows` and `cols` (a stock tip's, as [`stock_shape_rows`] gives them) say
+/// theirs do, and lie where theirs lie: a stand-in as wide and tall as the tip it stands for. Only
+/// ever grown: a soft tip's faint rim, under a twentieth of its fullest band, still paints, so a tip
+/// that measures smaller than ours is no sure sign that ours reaches too far. None where it already
+/// is (within a twentieth), or where either holds no ink.
+pub fn fitted_to_box(pixels: &[u8], rows: &[u8; 64], cols: &[u8; 64]) -> Option<Vec<u8>> {
+    let n = TEXTURE_SIZE;
+    if pixels.len() != n * n {
+        return None;
+    }
+    let per = n / rows.len();
+    let mut ours_rows = [0.0f32; 64];
+    let mut ours_cols = [0.0f32; 64];
+    for (i, &v) in pixels.iter().enumerate() {
+        if let Some(r) = ours_rows.get_mut(i / n / per) {
+            *r += f32::from(v);
+        }
+        if let Some(c) = ours_cols.get_mut(i % n / per) {
+            *c += f32::from(v);
+        }
+    }
+    // the first and last band holding a twentieth of the fullest band's ink, as texels (end past)
+    let span = |bands: &[f32]| {
+        let top = bands.iter().copied().fold(0.0, f32::max);
+        if top <= 0.0 {
+            return None;
+        }
+        let first = bands.iter().position(|&b| b > top * 0.05)?;
+        let last = bands.iter().rposition(|&b| b > top * 0.05)?;
+        Some(((first * per) as f32, ((last + 1) * per) as f32))
+    };
+    let theirs = |bands: &[u8; 64]| span(&bands.map(f32::from));
+    let ((oy0, oy1), (ox0, ox1)) = (span(&ours_rows)?, span(&ours_cols)?);
+    let ((ty0, ty1), (tx0, tx1)) = (theirs(rows)?, theirs(cols)?);
+    // how far ours stretches each way (grown, to twice at most), about the middles of the two boxes
+    let (sx, sy) = (((ox1 - ox0) / (tx1 - tx0)).clamp(0.5, 1.0), ((oy1 - oy0) / (ty1 - ty0)).clamp(0.5, 1.0));
+    let (ocx, ocy, tcx, tcy) = ((ox0 + ox1) / 2.0, (oy0 + oy1) / 2.0, (tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0);
+    let off = |a: f32, b: f32| (a - b).abs() / n as f32;
+    if sx > 0.95 && sy > 0.95 && off(ocx, tcx) < 0.05 && off(ocy, tcy) < 0.05 {
+        return None;
+    }
+    let at = |x: i32, y: i32| {
+        if x < 0 || y < 0 || x >= n as i32 || y >= n as i32 {
+            0.0
+        } else {
+            f32::from(pixels.get(y as usize * n + x as usize).copied().unwrap_or(0))
+        }
+    };
+    Some(
+        (0..n * n)
+            .map(|k| {
+                // where in ours this texel of theirs falls, read between texels
+                let (x, y) = ((k % n) as f32 + 0.5, (k / n) as f32 + 0.5);
+                let (u, v) = (ocx + (x - tcx) * sx - 0.5, ocy + (y - tcy) * sy - 0.5);
+                let (i, j) = (u.floor() as i32, v.floor() as i32);
+                let (fx, fy) = (u - u.floor(), v - v.floor());
+                let top = at(i, j) * (1.0 - fx) + at(i + 1, j) * fx;
+                let bottom = at(i, j + 1) * (1.0 - fx) + at(i + 1, j + 1) * fx;
+                (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8
+            })
+            .collect(),
+    )
+}
+
 /// `pixels`, a shape, its rows weighted as [`striped`] weights them, then its columns as `cols`
 /// says the same way: a stand-in takes a stock shape's outline across as well as down.
 pub fn shaped(pixels: &[u8], rows: &[u8; 64], cols: &[u8; 64]) -> Vec<u8> {
@@ -2623,6 +2688,34 @@ mod tests {
         assert!(at(grain::SOFT_DOTS, 1.0 / 56.0, 0.0) < 140 && at(grain::SOFT_DOTS, 1.0 / 40.0, 0.0) > 170);
         assert!((share(grain::LABYRINTH) - 0.45).abs() < 0.02, "{}", share(grain::LABYRINTH));
         assert_eq!(drawn_to_stock_width(grain::SOFT_DOTS), Some(1792.0));
+    }
+
+    #[test]
+    fn a_stand_in_is_stretched_to_the_box_its_stock_tip_inks() {
+        // ours a square across the middle fifth to four fifths...
+        let n = TEXTURE_SIZE;
+        let inside = |v: usize, from: usize, to: usize| v >= from * n / 20 && v < to * n / 20;
+        let square: Vec<u8> =
+            (0..n * n).map(|k| if inside(k % n, 6, 14) && inside(k / n, 6, 14) { 255 } else { 0 }).collect();
+        // ...the stock tip's ink wide (from 10 to 54 of 64 bands across) and as tall but lower (26
+        // to 52 down)
+        let bands =
+            |from: usize, to: usize| std::array::from_fn::<u8, 64, _>(|b| if b >= from && b < to { 255 } else { 0 });
+        let (rows, cols) = (bands(26, 52), bands(10, 54));
+        let fitted = fitted_to_box(&square, &rows, &cols).expect("stretched");
+        let span = |along: bool| {
+            let inked = |i: usize| (0..n).any(|j| fitted[if along { j * n + i } else { i * n + j }] > 127);
+            let first = (0..n).find(|&i| inked(i)).unwrap();
+            let last = (0..n).rev().find(|&i| inked(i)).unwrap();
+            (first, last)
+        };
+        let ((x0, x1), (y0, y1)) = (span(true), span(false));
+        assert!(x0.abs_diff(40) <= 2 && x1.abs_diff(215) <= 2, "{x0}..{x1}");
+        assert!(y0.abs_diff(104) <= 2 && y1.abs_diff(207) <= 2, "{y0}..{y1}");
+        // one as big as its tip already, where it lies, is left alone, and one bigger than its tip
+        // isn't shrunk
+        assert!(fitted_to_box(&square, &bands(19, 45), &bands(19, 45)).is_none());
+        assert!(fitted_to_box(&square, &bands(24, 40), &bands(24, 40)).is_none());
     }
 
     #[test]
