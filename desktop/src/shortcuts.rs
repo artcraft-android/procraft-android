@@ -1,12 +1,12 @@
 //! The keyboard shortcuts' list (#31), the core's (keys.rs) with the desktop's own: Ctrl (⌘) held
 //! alone a moment shows it for as long as it is held, as a tablet's system shows an app's
 //! shortcuts while its command key is held; Help's Keyboard shortcuts opens it until Done, Esc or
-//! a click beside it.
+//! a click beside it. With a plugin rebinding keys, it shows them as they are now.
 
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Galley, Id, Order, Rect, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
-use procraft_core::ShortcutGroup;
+use procraft_core::{Plugins, ShortcutGroup};
 
 use crate::look::{Weight, argb, pc, text};
 
@@ -36,12 +36,14 @@ pub struct Shortcuts {
     /// the hold until it is let go.
     held_since: Option<Instant>,
     spoiled: bool,
+    /// The list while it shows, as the plugins had it when it began to.
+    list: Option<Vec<ShortcutGroup>>,
 }
 
 impl Shortcuts {
     /// Shows the list if it is open, or Ctrl (⌘) has been held alone long enough while `keys` go
-    /// to the canvas (no text being typed).
-    pub fn show(&mut self, ctx: &egui::Context, keys: bool) {
+    /// to the canvas (no text being typed): its keys as `plugins` say they are.
+    pub fn show(&mut self, ctx: &egui::Context, keys: bool, plugins: &Plugins) {
         let (alone, other) = ctx.input(|i| {
             let m = i.modifiers;
             let alone = m.command && !m.shift && !m.alt && (!m.ctrl || m.mac_cmd || !cfg!(target_os = "macos"));
@@ -63,10 +65,16 @@ impl Shortcuts {
                 ctx.request_repaint_after(HOLD - for_now);
             }
         }
+        if !self.open && !held {
+            self.list = None;
+            return;
+        }
+        let mac = cfg!(target_os = "macos");
+        let list = self.list.get_or_insert_with(|| plugins.key_shortcut_list(true, mac)).clone();
         if self.open {
-            self.open = !panel(ctx, true);
-        } else if held {
-            panel(ctx, false);
+            self.open = !panel(ctx, true, list);
+        } else {
+            panel(ctx, false, list);
         }
     }
 }
@@ -123,9 +131,9 @@ fn columns(laid: &[Laid], columns: usize) -> Vec<Vec<&Laid>> {
     out
 }
 
-/// The list's panel in the middle of the window, with Done and a dimmed window around it if
-/// `closable`; true once closed.
-fn panel(ctx: &egui::Context, closable: bool) -> bool {
+/// The list's panel (`groups`) in the middle of the window, with Done and a dimmed window around it
+/// if `closable`; true once closed.
+fn panel(ctx: &egui::Context, closable: bool, groups: Vec<ShortcutGroup>) -> bool {
     let screen = ctx.content_rect();
     let mut close = false;
     if closable {
@@ -135,9 +143,8 @@ fn panel(ctx: &egui::Context, closable: bool) -> bool {
             close |= crate::ui::escape(ui.ctx()) || beside.clicked();
         });
     }
-    let mac = cfg!(target_os = "macos");
     let layer = egui::LayerId::new(Order::Tooltip, Id::unique("shortcuts"));
-    let laid = lay_out(&ctx.layer_painter(layer), procraft_core::key_shortcut_list(true, mac));
+    let laid = lay_out(&ctx.layer_painter(layer), groups);
     let fit = ((screen.width() - 40.0 - 2.0 * PAD + COLUMN_GAP) / (COLUMN + COLUMN_GAP)).floor();
     let cols = columns(&laid, (fit as usize).clamp(1, 3));
     let body_height = cols.iter().map(|c| c.iter().map(|g| g.height).sum::<f32>()).fold(0.0, f32::max) - GROUP_GAP;

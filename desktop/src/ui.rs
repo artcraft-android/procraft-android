@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, Stroke, Ui, vec2};
+use egui::{Color32, Key, Modifiers, Rect, Stroke, Ui, vec2};
 use procraft_core::{
-    Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyShortcut, ModeButton, ModeSwitch, Modes, QuickAction,
-    ToolKind, TouchCommand, Trigger, mode_switch,
+    Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyCombo, KeyShortcut, ModeButton, ModeSwitch, Modes,
+    QuickAction, ToolKind, TouchCommand, Trigger, mode_switch,
 };
 
 use crate::actions::{Act, Actions};
@@ -154,6 +154,8 @@ pub struct Interface {
     actions_panel: Actions,
     /// A plugin's panel's slider being moved: its row, and where it is.
     plugin_panel_held: Option<(usize, f32)>,
+    /// A plugin's panel took Space as the key press it asked for: let go, it is no tap.
+    space_to_panel: bool,
     layers: Layers,
     pub look: Look,
     side_bar: SideBar,
@@ -268,6 +270,7 @@ impl Default for Interface {
             layer_choice: None,
             actions_panel: Actions::default(),
             plugin_panel_held: None,
+            space_to_panel: false,
             layers: Layers::default(),
             look: Look::default(),
             side_bar: SideBar::default(),
@@ -741,9 +744,16 @@ impl Interface {
         // then does nothing)
         // Alt held is the button held; tapped it does nothing, being in the system's own shortcuts
         let used = session.set_modify_held(taps.modify_down || input.modify_key());
-        // Space tapped, not moving the canvas, opens or closes the QuickMenu
-        if std::mem::take(&mut input.space_tapped) && !self.keys_taken() {
-            self.quick_menu.toggle(ctx.content_rect().center());
+        // Space tapped, not moving the canvas, opens or closes the QuickMenu (or does what a plugin
+        // rebinding keys takes it as)
+        let space_tapped = std::mem::take(&mut input.space_tapped);
+        let to_panel = std::mem::take(&mut self.space_to_panel);
+        self.space_to_panel = to_panel && !space_tapped && input.moving_view();
+        if space_tapped && !to_panel && !self.keys_taken() {
+            let space = KeyCombo { key: "space".into(), command: false, shift: false, alt: false };
+            if let Some(press) = self.prefs.plugins.key_press(space) {
+                self.press(&ctx, session, &info, &press);
+            }
         }
         if taps.modify_tapped && !used {
             self.tap_modify(&ctx, session);
@@ -891,7 +901,7 @@ impl Interface {
             self.licences = false;
         }
         let keys_to_canvas = self.canvas_shown() && !ctx.egui_wants_keyboard_input() && !self.keys_taken();
-        self.shortcut_list.show(&ctx, keys_to_canvas);
+        self.shortcut_list.show(&ctx, keys_to_canvas, &self.prefs.plugins);
         self.name_colour(&ctx);
         self.place_canvas(session, ctx.pixels_per_point());
         session.set_glass(backdrops, windows);
@@ -2563,71 +2573,103 @@ impl Interface {
             || self.settings)
     }
 
-    /// A hardware keyboard's shortcuts: the core's (keys.rs), and the desktop's files: Ctrl (⌘)
-    /// with N, O, S (and Shift).
-    fn shortcuts(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo) {
+    /// A hardware keyboard's shortcuts: the core's (keys.rs), and the desktop's own: Ctrl (⌘) with
+    /// N, O, S (and Shift) for its files, with +, - and 0 for its view. A plugin rebinding keys takes
+    /// each press as it says first; a plugin's panel asking for a key press takes the next.
+    fn shortcuts(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, info: &CanvasInfo) {
         // a text field, or the hex keypad, takes the keys; text being edited takes them all
         if ctx.egui_wants_keyboard_input() || self.keys_taken() {
             return;
         }
-        let pressed = |modifiers: Modifiers, key: Key| {
-            ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
-        };
-        let command_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-        // with Shift first: the shortcut without it would take it too
-        if pressed(command_shift, Key::S) {
-            self.actions.push(Action::SaveAs);
-        } else if pressed(Modifiers::COMMAND, Key::S) {
-            self.actions.push(Action::Save);
-        }
-        if pressed(Modifiers::COMMAND, Key::N) {
-            self.actions.push(Action::New);
-        }
-        if pressed(Modifiers::COMMAND, Key::O) {
-            self.actions.push(Action::Open);
-        }
-        let keys: Vec<(Key, Modifiers)> = ctx.input(|i| {
+        let keys: Vec<(Key, Modifiers, bool)> = ctx.input(|i| {
             i.events
                 .iter()
                 .filter_map(|e| match e {
-                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                    egui::Event::Key { key, pressed: true, modifiers, repeat, .. } => Some((*key, *modifiers, *repeat)),
                     _ => None,
                 })
                 .collect()
         });
-        for (key, modifiers) in keys {
-            // R tapped turns the canvas a step, held it turns it by dragging: the window's input
-            // sees to it (input.rs)
-            if key == Key::R && !modifiers.command && !modifiers.alt {
-                ctx.input_mut(|i| i.consume_key(modifiers, key));
-                continue;
-            }
-            // Ctrl (⌘) with + or = zooms in about the window's middle, with - out, with 0 fits the
-            // canvas (the desktop's own, as the R key's turn)
-            if modifiers.command && matches!(key, Key::Plus | Key::Equals | Key::Minus | Key::Num0) {
-                let middle = ctx.content_rect().center() * ctx.pixels_per_point();
-                match key {
-                    Key::Num0 => session.settle_to_fit(),
-                    Key::Minus => session.view_gesture(middle.x, middle.y, 0.0, 0.0, 1.0 / KEY_ZOOM, 0.0),
-                    _ => session.view_gesture(middle.x, middle.y, 0.0, 0.0, KEY_ZOOM, 0.0),
+        let mut asking = self.prefs.plugins.panel().is_some_and(|panel| panel.key_press);
+        for (key, modifiers, repeat) in keys {
+            let Some(name) = key_name(key) else { continue };
+            let press =
+                KeyCombo { key: name.into(), command: modifiers.command, shift: modifiers.shift, alt: modifiers.alt };
+            if asking {
+                if !repeat {
+                    // the one press it asked for, told on a thread of its own (it may take a while)
+                    asking = false;
+                    match key {
+                        Key::Escape => _ = escape(ctx),
+                        Key::Space => self.space_to_panel = true,
+                        _ => {}
+                    }
+                    let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
+                    std::thread::spawn(move || {
+                        plugins.panel_key(press, session);
+                        ctx.request_repaint();
+                    });
                 }
                 ctx.input_mut(|i| i.consume_key(modifiers, key));
                 continue;
             }
-            let Some(name) = key_name(key) else { continue };
-            let transforming = self.transform.on;
-            let Some(shortcut) = procraft_core::key_shortcut(
-                name.into(),
-                modifiers.command,
-                modifiers.shift,
-                modifiers.alt,
-                transforming,
-            ) else {
+            // R tapped turns the canvas a step, held it turns it by dragging, and Space tapped opens
+            // the QuickMenu, held it moves the canvas: the window's input sees to them (input.rs),
+            // as to Escape and F11 elsewhere
+            if key == Key::R && !modifiers.command && !modifiers.alt {
+                ctx.input_mut(|i| i.consume_key(modifiers, key));
                 continue;
+            }
+            if matches!(key, Key::Space | Key::Escape | Key::F11) {
+                continue;
+            }
+            let did = match self.prefs.plugins.key_press(press) {
+                Some(press) => self.press(ctx, session, info, &press),
+                // a key a plugin took away does nothing
+                None => true,
             };
-            ctx.input_mut(|i| i.consume_key(modifiers, key));
-            self.key_shortcut(ctx, session, info, shortcut);
+            if did {
+                ctx.input_mut(|i| i.consume_key(modifiers, key));
+            }
         }
+    }
+
+    /// Does what `press` does (as a plugin rebinding keys took it): the desktop's own, else the
+    /// core's shortcut on it. True if it did something.
+    fn press(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, press: &KeyCombo) -> bool {
+        if press.command {
+            // Ctrl (⌘) with + or = zooms in about the window's middle, with - out, with 0 fits the
+            // canvas (the desktop's own, as the R key's turn)
+            let middle = ctx.content_rect().center() * ctx.pixels_per_point();
+            match press.key.as_str() {
+                "s" => self.actions.push(if press.shift { Action::SaveAs } else { Action::Save }),
+                "n" => self.actions.push(Action::New),
+                "o" => self.actions.push(Action::Open),
+                "=" | "plus" => session.view_gesture(middle.x, middle.y, 0.0, 0.0, KEY_ZOOM, 0.0),
+                "-" => session.view_gesture(middle.x, middle.y, 0.0, 0.0, 1.0 / KEY_ZOOM, 0.0),
+                "0" => session.settle_to_fit(),
+                _ => {
+                    return self.canvas_press(ctx, session, info, press);
+                }
+            }
+            return true;
+        }
+        self.canvas_press(ctx, session, info, press)
+    }
+
+    /// Does the core's shortcut on `press`, if it has one; true if it did.
+    fn canvas_press(
+        &mut self,
+        ctx: &egui::Context,
+        session: &CanvasSession,
+        info: &CanvasInfo,
+        press: &KeyCombo,
+    ) -> bool {
+        let shortcut =
+            procraft_core::key_shortcut(press.key.clone(), press.command, press.shift, press.alt, self.transform.on);
+        let Some(shortcut) = shortcut else { return false };
+        self.key_shortcut(ctx, session, info, shortcut);
+        true
     }
 
     /// Does what a keyboard shortcut says.
@@ -2702,7 +2744,8 @@ fn escape_id() -> egui::Id {
     egui::Id::unique("escape taken")
 }
 
-/// The name the core's shortcuts know `key` by (keys.rs), if it has one.
+/// The name the core's shortcuts know `key` by (keys.rs, as a plugin is told a press), if it has
+/// one.
 fn key_name(key: Key) -> Option<&'static str> {
     Some(match key {
         Key::OpenBracket | Key::OpenCurlyBracket => "[",
@@ -2714,6 +2757,29 @@ fn key_name(key: Key) -> Option<&'static str> {
         Key::ArrowRight => "right",
         Key::ArrowUp => "up",
         Key::ArrowDown => "down",
+        Key::Space => "space",
+        Key::Escape => "escape",
+        Key::Minus => "-",
+        Key::Equals => "=",
+        Key::Plus => "plus",
+        Key::Comma => ",",
+        Key::Period => ".",
+        Key::Slash => "/",
+        Key::Backslash => "\\",
+        Key::Quote => "'",
+        Key::Backtick => "`",
+        Key::F1 => "f1",
+        Key::F2 => "f2",
+        Key::F3 => "f3",
+        Key::F4 => "f4",
+        Key::F5 => "f5",
+        Key::F6 => "f6",
+        Key::F7 => "f7",
+        Key::F8 => "f8",
+        Key::F9 => "f9",
+        Key::F10 => "f10",
+        Key::F11 => "f11",
+        Key::F12 => "f12",
         // the letters and digits by their names ("A", "0")
         _ => Some(key.name()).filter(|n| n.len() == 1)?,
     })
@@ -2865,6 +2931,33 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_go_by_the_names_the_core_knows_and_go_as_they_are_with_no_plugin() {
+        let named = [
+            (Key::Z, "Z"),
+            (Key::Num0, "0"),
+            (Key::OpenCurlyBracket, "["),
+            (Key::Space, "space"),
+            (Key::Escape, "escape"),
+            (Key::Plus, "plus"),
+            (Key::Equals, "="),
+            (Key::Backslash, "\\"),
+            (Key::F1, "f1"),
+            (Key::F12, "f12"),
+            (Key::ArrowUp, "up"),
+        ];
+        for (key, name) in named {
+            assert_eq!(key_name(key), Some(name), "{key:?}");
+        }
+        assert_eq!(key_name(Key::Tab), None);
+        assert_eq!(key_name(Key::F13), None);
+        // with no plugin rebinding keys, each press goes as it is (its key as the core names it)
+        let plugins = procraft_core::Plugins::new();
+        let press = KeyCombo { key: "Z".into(), command: true, shift: false, alt: false };
+        assert_eq!(plugins.key_press(press).map(|p| (p.key, p.command)), Some(("z".to_owned(), true)));
+        assert_eq!(plugins.key_shortcut_list(true, false), procraft_core::key_shortcut_list(true, false));
+    }
 
     #[test]
     fn a_background_pick_sends_each_change_and_keeps_the_last_as_it_closes() {
