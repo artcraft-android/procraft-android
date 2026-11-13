@@ -160,6 +160,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
     var renaming by remember { mutableStateOf<ULong?>(null) }
     var swiped by remember { mutableStateOf<ULong?>(null) }
     var titleMenu by remember { mutableStateOf(false) }
+    // the + offering plugins' kinds of layer beside a plain one
+    var addMenu by remember { mutableStateOf(false) }
     var deletingChosen by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
@@ -191,8 +193,13 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                 }, onDelete = { deletingChosen = true })
             },
         ) {
-            Box(Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { vm.addLayer() }, contentAlignment = Alignment.Center) {
+            val kinds = vm.layerKinds()
+            Box(
+                Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { if (kinds.isEmpty()) vm.addLayer() else addMenu = true },
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(PcIcons.PlusMedium, contentDescription = "New layer", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
+                NewLayerMenu(addMenu && kinds.isNotEmpty(), kinds, vm, onDismiss = { addMenu = false })
             }
         }
         // a layer added at the top of what shows comes in there, the rows under it sliding down,
@@ -500,6 +507,29 @@ private fun LayersTitleMenu(open: Boolean, vm: CanvasViewModel, onDismiss: () ->
         MenuItem(PcIcons.MenuTrash, "Delete", Pc.MenuDanger) {
             onDismiss()
             onDelete()
+        }
+    }
+}
+
+/** The + with plugins' kinds of layer on: a plain layer, or one of each kind, named as the plugin names it. */
+@Composable
+private fun NewLayerMenu(open: Boolean, kinds: List<io.github.artcraftandroid.procraft.core.PluginKind>, vm: CanvasViewModel, onDismiss: () -> Unit) {
+    LibraryMenu(
+        open,
+        androidx.compose.ui.graphics.TransformOrigin(1f, 0f),
+        MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) },
+        onDismiss,
+        overPanel = true,
+    ) {
+        MenuItem(PcIcons.MenuNewSet, "Layer") {
+            onDismiss()
+            vm.addLayer()
+        }
+        for (kind in kinds) {
+            MenuItem(PcIcons.MenuNewBrush, kind.label) {
+                onDismiss()
+                vm.addPluginLayer(kind.key)
+            }
         }
     }
 }

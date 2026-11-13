@@ -7467,6 +7467,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addLayer() = layerChange { if (it.addLayer() == 0uL) message = noRoom() }
 
+    /** The kinds of layer the plugins on add: the Layers panel's + offers them beside a plain layer. */
+    fun layerKinds(): List<io.github.artcraftandroid.procraft.core.PluginKind> = plugins.layerKinds()
+
+    /** A new layer of a plugin's [kind] above the current one. */
+    fun addPluginLayer(kind: String) = layerChange { if (it.addPluginLayer(kind) == 0uL) message = noRoom() }
+
     // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
     fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
 
