@@ -12,7 +12,8 @@
 //! Each macro exports the functions its hook asks for, with the memory handed over and back taken
 //! care of ([`picker!`] for the colour panel's Classic square, beside its `picture.wgsl`). A
 //! plugin's actions (things it does when tapped, [`actions!`]) call the app's functions
-//! in [`app`]: adding a layer, painting on it, setting the brush. Without the `std` feature only
+//! in [`app`]: adding a layer, painting on it, setting the brush. [`keys`] has a hardware keyboard's
+//! presses (rebinding them, a panel asking for one) and what a plugin keeps. Without the `std` feature only
 //! [`Controls`], [`controls!`], [`yes!`], [`answer!`] and [`position!`] are there, for the smallest
 //! plugins.
 
@@ -151,6 +152,8 @@ macro_rules! picker {
 pub mod app;
 #[cfg(feature = "std")]
 pub mod canvas;
+#[cfg(feature = "std")]
+pub mod keys;
 #[cfg(feature = "std")]
 mod with_std;
 #[cfg(feature = "std")]

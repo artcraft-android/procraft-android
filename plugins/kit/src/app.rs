@@ -201,6 +201,7 @@ pub fn say(words: &str) {
 pub struct Panel {
     title: String,
     rows: Vec<String>,
+    key_press: bool,
 }
 
 /// `text` as a JSON string.
@@ -222,7 +223,7 @@ fn quoted(text: &str) -> String {
 
 impl Panel {
     pub fn new(title: &str) -> Panel {
-        Panel { title: title.to_owned(), rows: Vec::new() }
+        Panel { title: title.to_owned(), rows: Vec::new(), key_press: false }
     }
 
     /// Words, a line or a few (`\n` between them).
@@ -263,9 +264,25 @@ impl Panel {
         self
     }
 
+    /// A row that is tapped, `presses` at its end written as the platform writes them ("Ctrl+Z", or
+    /// "⌘Z"; "None" for none). Eight at most.
+    pub fn keys(mut self, label: &str, presses: &[crate::keys::Press]) -> Panel {
+        let presses: Vec<String> = presses.iter().map(|p| quoted(&p.text())).collect();
+        self.rows.push(format!(r#"{{"type":"keys","label":{},"keys":[{}]}}"#, quoted(label), presses.join(",")));
+        self
+    }
+
+    /// It asks for the next key press, which goes to the plugin's `procraft_panel_key` (see
+    /// [`crate::panel_key!`]) rather than to the canvas.
+    pub fn key_press(mut self) -> Panel {
+        self.key_press = true;
+        self
+    }
+
     /// The panel as the app reads it.
     pub fn json(&self) -> String {
-        format!(r#"{{"title":{},"rows":[{}]}}"#, quoted(&self.title), self.rows.join(","))
+        let asks = if self.key_press { r#","key_press":true"# } else { "" };
+        format!(r#"{{"title":{},"rows":[{}]{asks}}}"#, quoted(&self.title), self.rows.join(","))
     }
 
     /// Shows it (or shows it again, changed); false if the app found it doesn't hold up (no rows, too
@@ -357,5 +374,11 @@ mod tests {
         assert!(json.ends_with(r#"{"type":"button","label":"Apply"}]}"#));
         // off the app, nothing shows
         assert!(!panel.show());
+        let undo = crate::keys::Press::read("command+z").unwrap();
+        let asking = Panel::new("Undo").keys("Now", &[undo]).keys("Default", &[]).key_press();
+        assert_eq!(
+            asking.json(),
+            r#"{"title":"Undo","rows":[{"type":"keys","label":"Now","keys":["command+z"]},{"type":"keys","label":"Default","keys":[]}],"key_press":true}"#
+        );
     }
 }
