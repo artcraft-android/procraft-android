@@ -14,14 +14,15 @@ A plugin holds one or both of these:
 - **Code**, which changes how the app behaves. It's a WebAssembly module, run under limits by an
   interpreter, that the app asks at named places called [hooks](#hooks). Code can also add buttons
   that change the artwork ([actions](#actions)), show a [panel](#panels) of its own, draw the colour
-  panel's Classic picker ([`picker`](#picker)), or make a kind of artwork of its own
-  ([artworks of its own](#artworks-of-its-own)).
+  panel's Classic picker ([`picker`](#picker)), make a kind of artwork of its own
+  ([artworks of its own](#artworks-of-its-own)), or add a kind of layer whose strokes it keeps
+  ([layers of its own](#layers-of-its-own)).
 - **A [filter](#filters)**, which adds a new adjustment. It's a function the GPU runs over a layer.
 
 The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with code and `gap-closing`
 the largest. `extract-lines`, `posterise` and `outline` are filters. `grid-layer` has an action,
-`colour-triangle` is a picker, `vector-canvas` makes artworks of its own, and `keyboard-shortcuts`
-rebinds keys from a panel of its own and keeps what it binds.
+`colour-triangle` is a picker, `vector-canvas` makes artworks of its own, `vector-layers` adds layers
+of its own, and `keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds.
 
 ## What you write
 
@@ -57,9 +58,10 @@ or both. The file has to hold exactly that. The import screen tells people what 
 plugin do.
 
 `hooks` lists the hooks the code uses, and only a plugin that holds `"hooks"` may have it. Code
-needs at least one hook, one action (see [Actions](#actions)) or one kind of artwork (see
-[Artworks of its own](#artworks-of-its-own)). `interface` is 1 here; actions, permissions, panels,
-the `picker` hook and kinds of artwork need 2.
+needs at least one hook, one action (see [Actions](#actions)), one kind of artwork (see
+[Artworks of its own](#artworks-of-its-own)) or one kind of layer (see
+[Layers of its own](#layers-of-its-own)). `interface` is 1 here; actions, permissions, panels,
+the `picker` hook and kinds of artwork need 2, and kinds of layer 3.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -570,6 +572,9 @@ own sound, or none. All of it is in the plugin, made sample by sample with a few
 | Steps for a fill | 20,000,000, and 1,024 for each pixel of its box, for at most 30 seconds |
 | A fill's box | 8,194 × 8,194 pixels in area |
 | What a plugin keeps | 64 KiB |
+| Memory, with kinds of layer | 256 MiB |
+| A layer's data | 64 MiB |
+| Steps for a call on a layer | 800,000,000, for at most 5 seconds |
 
 A pen sends a sample every 4 ms at 240 Hz, so a `position` call has to be far quicker than that. Use a
 few hundred steps, not thousands.
@@ -767,6 +772,90 @@ The kit's `canvas` module writes it: an `Artwork` (new, the brush a stroke start
 into a `DrawList`, save, load) and `kit::canvas!(MyArtwork)`. `plugins/vector-canvas` is one to start
 from.
 
+## Layers of its own
+
+Code can add a kind of layer of its own (interface 3): a vector layer, say, whose strokes stay
+strokes. It sits in the layer stack as any other layer: the app shows, blends, groups, moves,
+duplicates and deletes it, and undoes every change to it. Every stroke on it is painted as on any
+layer, with whatever brush is chosen, by the app's own brush engine. The app then records the stroke
+as an item and hands it to the plugin, which keeps the layer's items in data of its own. When the
+plugin changes items already drawn, the app draws the layer again from them. The manifest lists the
+kinds:
+
+```json
+  "compat": { "procraft": { "interface": 3 } },
+  "layer_kinds": [{ "key": "vector", "label": "Vector layer" }]
+```
+
+While the plugin is on, the Layers panel's + offers each kind beside a plain layer, named after its
+`label`. A plugin can list up to four kinds. The import screen says the plugin can add kinds of layer.
+
+- The app keeps each such layer's data in the artwork beside the layer's pixels (`layers/<id>.vector`
+  next to `layers/<id>.png`), written whole, and puts it back with the pixels when a stroke is undone
+  or redone.
+- With its plugin off or removed, or its data file gone or unreadable, the layer shows its pixels, as
+  locked: it takes no strokes, and its data is left as it is through saves.
+- A file in another app's format, such as a layered PSD or the package format, has the layer as its
+  pixels.
+- Only strokes change the layer. Clear, Fill, Invert, adjustments and transforms wait until it is
+  rasterized, as with a text layer. Rasterize makes it a plain layer, and so does merging another
+  layer into it, flipping the canvas or cropping it.
+- QuickShape doesn't snap a stroke on it.
+
+Its module exports:
+
+```
+procraft_layer_in(len: i32) -> i32               // where `len` bytes go, for the next call
+procraft_layer_out() -> i32                      // where an answer is
+procraft_layer_load(kind: i32, len: i32) -> i32  // a layer's data (none: a new one): 0 if it took it
+procraft_layer_add(len: i32) -> i32              // an item on that layer: 0 kept as drawn, 1 draw again
+procraft_layer_save() -> i32                     // the layer's data now: its length
+procraft_layer_draw() -> i32                     // the layer's items to draw: its length
+```
+
+For each change, the app first hands over the layer's data with `procraft_layer_load`. `kind` is the
+kind's place in `layer_kinds`, and `len` is 0 for a layer with no data yet. Then it calls one of the
+others, so the plugin keeps nothing between changes. As a stroke ends:
+
+1. The app calls `procraft_layer_add` with the item.
+2. It asks `procraft_layer_save` for the data from then on.
+3. If `procraft_layer_add` answered 1, it asks `procraft_layer_draw`. It then clears the layer and lays
+   those items on it, in order, as one step with the stroke.
+
+If the data afterwards is the same as before, nothing changes and no step is made. A plugin answers 1
+when the stroke changed what was drawn before, such as an eraser taking strokes away whole. An
+answer other than 0 or 1 stops the plugin.
+
+An item is a record: fields one after another, each a 16-bit id, a 32-bit length and that many bytes,
+all little-endian. A reader passes over ids it doesn't know, so a later app can add fields. Ids from
+`0x8000` up are the plugin's own: the app ignores them in what it is handed back. The app writes:
+
+| Id | Field |
+|---|---|
+| 1 | The tool, u8: 0 paint, 1 mask (the eraser, laid as it erased), 2 smudge |
+| 2 | The samples, 32 bytes each: x, y (canvas pixels), pressure, tilt, azimuth and roll as 32-bit floats, then the milliseconds since the first sample as a 64-bit float |
+| 3, 4 | The colour and the secondary colour, three 32-bit floats each, sRGB 0 to 1 |
+| 5, 6 | The size and opacity sliders, 32-bit floats, 0 to 1 |
+| 7 | The brush's width at full pressure, canvas pixels, 32-bit float: for hit tests |
+| 8 | The brush, whole, in the app's own words (keep it as it is) |
+| 9 | The brush's name, UTF-8 |
+| 10 to 16, 18 to 20 | What else the app needs to lay the stroke again as it was laid: its randomness, the pointer, the brush scale, the view, alpha lock, the app's smoothing and pressure, symmetry, how its samples came, when, and the brush's exact sizes |
+
+The brush is kept as the brush library keeps one: the brush it came from among those the app comes
+with, and every setting changed from there. An item draws the same however the brush is changed
+later, or if it's deleted. The items to draw are a record too. Field 1 holds a brush's bytes, the
+first 0, the next 1 and so on, so each brush is there once. Field 2 holds an item, which names its
+brush by that number in field 17 (u32) in place of field 8.
+
+The kit's `layer` module writes all of this. Implement `kit::layer::Layer` (new, load, save, add an
+`Item`, draw into a `Drawn`) and add `kit::layers!(MyLayer)`. `Item` reads the tool, the width and the
+samples' points, and keeps the record as it came. `plugins/vector-layers` is one to start from. It
+keeps each brush once, and its card's Eraser chooses what the eraser does:
+
+- Mask (as it starts) keeps an erasing stroke as an item that hides what is under it, so taking it
+  away later brings the strokes back.
+- Whole takes away every stroke the eraser's path comes within reach of, whole.
+
 ## Filters
 
 A filter shows under Adjustments in a Plugins row while its plugin is on. It redraws the current layer
@@ -901,7 +990,7 @@ and have `Plugins::with_bundled` add none. What was added stays, as if imported.
 a filter's function, what a filter is given, the kinds of control, and the app's functions. Interface
 2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork; later,
 within it, the `key_shortcut` hook, panels that show keys or ask for a key press, and what a plugin
-keeps. What a
+keeps. Interface 3 added kinds of layer. What a
 hook calls stays as it's written here, and the app keeps every interface's template, so a plugin goes
 on working as it was written.
 
