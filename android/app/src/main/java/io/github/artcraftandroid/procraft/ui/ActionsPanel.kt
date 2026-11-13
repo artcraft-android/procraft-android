@@ -176,6 +176,12 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             vm.exportImage(jpeg)?.let { runCatching { shareFile(context, it, if (jpeg) "image/jpeg" else "image/png") } }
         }
     }
+    // a file a plugin makes of the artwork's layers of a kind it adds
+    fun share(e: io.github.artcraftandroid.procraft.core.PluginExport) {
+        vm.viewModelScope.launch {
+            vm.exportPlugin(e)?.let { runCatching { shareFile(context, it, e.mime) } }
+        }
+    }
     // whether the picture being picked or taken goes on a private layer
     var privately by remember { mutableStateOf(false) }
     val pickPhoto = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -258,6 +264,8 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("TIFF") { share(CanvasViewModel.Export.TIFF) },
                 // a plugin's artwork, its shapes kept
                 Act("SVG") { share(CanvasViewModel.Export.SVG) }.takeIf { vm.session?.exportsSvg() == true },
+                // files plugins make of the artwork's layers of kinds they add, under their own names
+                *vm.session?.pluginExports().orEmpty().map { e -> Act(e.label) { share(e) } }.toTypedArray(),
             ),
             listOf(
                 Heading("Share Layers"),

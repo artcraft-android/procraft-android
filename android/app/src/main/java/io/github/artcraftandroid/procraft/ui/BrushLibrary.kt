@@ -11,6 +11,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -235,7 +236,11 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     // the Recent set, or one of the library's
     val recent = vm.shownSet == RECENT_SET
     val shown = sets.getOrNull(vm.shownSet)
-    if (shown == null && !recent) return
+    // every library's card, or a library with no sets yet: a panel of their own
+    if (vm.showingLibraries || sets.isEmpty() || (shown == null && !recent)) {
+        LibrariesPanel(vm, arrowX, modifier)
+        return
+    }
     // the brushes shown, and whether each is pinned in the Recent set
     val listed = if (recent) {
         vm.recentBrushes.mapNotNull { r -> sets.getOrNull(r.set.toInt())?.brushes?.getOrNull(r.index.toInt())?.let { it to r.pinned } }
@@ -247,7 +252,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     val density = LocalDensity.current
     val focus = androidx.compose.ui.platform.LocalFocusManager.current
     var adding by remember { mutableStateOf(false) }
-    // the title's menu: the brushes the app comes with, back
+    // the title's menu: the library renamed, or every library's card
     var titleMenu by remember { mutableStateOf(false) }
     var setMenu by remember { mutableStateOf<Int?>(null) }
     var recentMenu by remember { mutableStateOf(false) }
@@ -319,30 +324,17 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     }
 
     Popover(LibraryWidth, arrowX, modifier) {
+        val renaming = vm.renamingLibrary == vm.libraryPlace
         PanelHeader(
-            when (vm.tool) {
-                ToolKind.ERASE -> "Erase library"
-                ToolKind.SMUDGE -> "Smudge library"
-                else -> "Brush library"
-            },
+            if (renaming) "" else vm.libraryName,
             start = 20.dp,
             end = 12.dp,
             height = 52.dp,
             chevronOn = titleMenu,
             onTitle = { titleMenu = !titleMenu },
             menu = {
-                LibraryMenu(
-                    titleMenu,
-                    androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f),
-                    MenuPlace { a, size -> IntOffset(a.center.x - size.width / 2, a.bottom) },
-                    onDismiss = { titleMenu = false },
-                    overPanel = true,
-                ) {
-                    MenuItem(PcIcons.MenuRestore, "Restore default brushes") {
-                        titleMenu = false
-                        vm.restoreShippedBrushes()
-                    }
-                }
+                if (renaming) InlineName(vm.libraryName, Pc.PanelTitle, 24.sp) { vm.renameLibrary(vm.libraryPlace, it) }
+                LibraryTitleMenu(vm, titleMenu) { titleMenu = false }
             },
         ) {
             // brushes picked: Delete in the plus's place, and Combine for one with the current brush
@@ -821,10 +813,14 @@ internal fun LibraryMenu(
 /** A menu row: its icon (a 40 frame) centred 29.5 in, the label from 52, a chevron 27.5 from the right. */
 @Composable
 internal fun MenuItem(icon: ImageVector, label: String, ink: Color = Pc.MenuInk, trailing: ImageVector? = null, iconSize: Dp = 40.dp, onClick: () -> Unit) {
+    MenuItem(label, ink, trailing, onClick) { Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.requiredSize(iconSize)) }
+}
+
+/** A menu row whose glyph [content] draws, centred where an icon's 40 frame sits. */
+@Composable
+internal fun MenuItem(label: String, ink: Color, trailing: ImageVector?, onClick: () -> Unit, content: @Composable () -> Unit) {
     Row(Modifier.fillMaxWidth().height(40.dp).clickable(onClick = onClick), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.padding(start = 9.5.dp).size(40.dp), contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.requiredSize(iconSize))
-        }
+        Box(Modifier.padding(start = 9.5.dp).size(40.dp), contentAlignment = Alignment.Center) { content() }
         // the menus' 17 pt system text is as wide as 18 here
         Text(label, color = ink, fontSize = 18.sp, maxLines = 1, modifier = Modifier.padding(start = 2.5.dp).weight(1f))
         if (trailing != null) Icon(trailing, contentDescription = null, tint = ink, modifier = Modifier.padding(end = 7.5.dp).requiredSize(40.dp))
@@ -849,5 +845,204 @@ internal class MenuPlace(private val top: Int = 0, private val place: (IntRect, 
             p.x.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0)),
             p.y.coerceIn(top, (windowSize.height - popupContentSize.height).coerceAtLeast(top)),
         )
+    }
+}
+
+/** A library's title menu: rename it, share it, or go back to every library's card. */
+@Composable
+private fun LibraryTitleMenu(vm: CanvasViewModel, open: Boolean, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    LibraryMenu(open, androidx.compose.ui.graphics.TransformOrigin(0f, 0f), MenuPlace { a, _ -> IntOffset(a.left, a.bottom) }, onDismiss = onDismiss, overPanel = true) {
+        MenuItem(PcIcons.MenuRename, "Rename") {
+            onDismiss()
+            vm.renamingLibrary = vm.libraryPlace
+        }
+        MenuItem(PcIcons.MenuShare, "Share") {
+            onDismiss()
+            scope.launch { vm.libraryFileToShare()?.let { shareFile(context, it, "application/octet-stream") } }
+        }
+        MenuDivider(11.dp)
+        MenuItem(PcIcons.MenuLibraries, "Back to libraries") {
+            onDismiss()
+            vm.showingLibraries = true
+        }
+    }
+}
+
+private val CardHeight = 490.dp
+private val CardGap = 8.dp
+private val CardCorner = 16.dp
+private val CardSetRow = 19.dp
+private val CardBrushHeight = 30.dp
+
+/**
+ * The library popover showing every library's card (tapped, that library is brought into use;
+ * held, its menu), with "+" for a new one or one from a file and the title's menu to put the
+ * shipped one back; or a library with no sets yet, with "+" to make one.
+ */
+@Composable
+private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) {
+    val showing = vm.showingLibraries
+    var titleMenu by remember { mutableStateOf(false) }
+    var adding by remember { mutableStateOf(false) }
+    var cardMenu by remember { mutableStateOf<Int?>(null) }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.importBrushes(it) } }
+    Popover(LibraryWidth, arrowX, modifier) {
+        val renaming = !showing && vm.renamingLibrary == vm.libraryPlace
+        PanelHeader(
+            when {
+                showing -> "Brush libraries"
+                renaming -> ""
+                else -> vm.libraryName
+            },
+            start = 20.dp,
+            end = 12.dp,
+            height = 52.dp,
+            chevronOn = titleMenu,
+            onTitle = { titleMenu = true },
+            menu = {
+                if (renaming) InlineName(vm.libraryName, Pc.PanelTitle, 24.sp) { vm.renameLibrary(vm.libraryPlace, it) }
+                if (showing) {
+                    LibraryMenu(titleMenu, androidx.compose.ui.graphics.TransformOrigin(0f, 0f), MenuPlace { a, _ -> IntOffset(a.left, a.bottom) }, onDismiss = { titleMenu = false }, overPanel = true) {
+                        MenuItem(PcIcons.MenuRestore, "Restore default library") {
+                            titleMenu = false
+                            vm.restoreLibraries()
+                        }
+                    }
+                } else {
+                    LibraryTitleMenu(vm, titleMenu) { titleMenu = false }
+                }
+            },
+        ) {
+            Box(Modifier.padding(top = 12.dp).size(41.dp, 40.dp).clickable { adding = true }, contentAlignment = Alignment.Center) {
+                Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
+                LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
+                    if (showing) {
+                        MenuItem(PcIcons.MenuNewLibrary, "Create new library") {
+                            adding = false
+                            vm.newLibrary()
+                        }
+                        MenuItem(PcIcons.MenuFolder, "Import from Files") {
+                            adding = false
+                            pick.launch(arrayOf("*/*"))
+                        }
+                    } else {
+                        MenuItem(PcIcons.MenuNewSet, "Create new set") {
+                            adding = false
+                            vm.newBrushSet()
+                        }
+                        MenuDivider(11.dp)
+                        MenuItem(PcIcons.MenuFolder, "Import from Files") {
+                            adding = false
+                            pick.launch(arrayOf("*/*"))
+                        }
+                    }
+                }
+            }
+        }
+        if (showing) {
+            LazyVerticalGrid(
+                GridCells.Fixed(2),
+                Modifier.weight(1f, fill = false),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(CardGap),
+                verticalArrangement = Arrangement.spacedBy(CardGap),
+            ) {
+                items(vm.brushLibraries.size) { i ->
+                    val library = vm.brushLibraries[i]
+                    Box {
+                        LibraryCard(vm, i, library, onOpen = { vm.openLibrary(i) }, onMenu = { cardMenu = i })
+                        LibraryMenu(cardMenu == i, androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f), MenuPlace { a, size -> IntOffset(a.left + (a.width - size.width) / 2, a.top + a.height / 4) }, onDismiss = { cardMenu = null }) {
+                            MenuItem(PcIcons.MenuRename, "Rename") {
+                                cardMenu = null
+                                vm.renamingLibrary = i
+                            }
+                            MenuItem(PcIcons.MenuDuplicate, "Duplicate") {
+                                cardMenu = null
+                                vm.duplicateLibrary(i)
+                            }
+                            if (vm.brushLibraries.size > 1) {
+                                MenuDivider(11.dp)
+                                MenuItem(PcIcons.MenuTrash, "Delete", Pc.MenuDanger) {
+                                    cardMenu = null
+                                    vm.deletingLibrary = i
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // a library with no sets yet
+            Column(Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("This library has no brushes yet", color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                Text(
+                    "Make a set with +, then brushes in it, or bring brushes in from your files.",
+                    color = Pc.PanelGlyph,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        }
+    }
+    Alert(
+        vm.deletingLibrary,
+        title = { "Delete this library?" },
+        message = { "Its sets and brushes go with it." },
+        action = "Delete",
+        onCancel = { vm.deletingLibrary = null },
+        onAction = { vm.deleteLibrary(it) },
+    )
+}
+
+/**
+ * A library's card: its name over a small likeness of it, its sets down the left and the brushes
+ * of one of them beside them; the one in use outlined in blue.
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun LibraryCard(vm: CanvasViewModel, i: Int, library: io.github.artcraftandroid.procraft.core.BrushLibraryInfo, onOpen: () -> Unit, onMenu: () -> Unit) {
+    val shape = RoundedCornerShape(CardCorner)
+    Column(
+        Modifier.fillMaxWidth().height(CardHeight).clip(shape).background(Pc.SetCell)
+            .then(if (library.current) Modifier.border(2.dp, Pc.Accent, shape) else Modifier)
+            .combinedClickable(onClick = onOpen, onLongClick = onMenu)
+            .padding(10.dp),
+    ) {
+        if (vm.renamingLibrary == i) {
+            InlineName(library.name, Pc.PanelTitle, 14.sp) { vm.renameLibrary(i, it) }
+        } else {
+            Text(library.name, color = Pc.PanelTitle, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        // the one in use's shown set; another's first with a brush chosen in it
+        val chosen = if (library.current) vm.shownSet else library.sets.indexOfFirst { it.chosen != null }.coerceAtLeast(0)
+        Row(Modifier.padding(top = 8.dp).fillMaxSize()) {
+            Column(Modifier.weight(0.45f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                library.sets.forEachIndexed { s, set ->
+                    Row(
+                        Modifier.fillMaxWidth().height(CardSetRow).clip(RoundedCornerShape(5.dp))
+                            .background(if (s == chosen) Pc.RowSelected else Pc.PopoverFill.copy(alpha = 0.35f)),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val ink = if (s == chosen) Color.White else Pc.PanelTitle
+                        Icon(PcIcons.SetIcons.getOrElse(set.icon.toInt()) { PcIcons.BrushSet }, contentDescription = null, tint = ink, modifier = Modifier.requiredSize(18.dp))
+                        Text(set.name, color = ink, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            Column(Modifier.weight(0.55f).padding(start = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                library.sets.getOrNull(chosen)?.brushes?.forEach { b ->
+                    // its name over its stroke, drawn small
+                    val key = "$i-${b.set}-${b.index}"
+                    val stroke = vm.cardPreviews[key]
+                    LaunchedEffect(key, stroke == null) { if (stroke == null) vm.loadCardPreview(i, b.set.toInt(), b.index.toInt()) }
+                    Box(Modifier.fillMaxWidth().height(CardBrushHeight)) {
+                        stroke?.let { androidx.compose.foundation.Image(it, contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.FillBounds, modifier = Modifier.fillMaxSize()) }
+                        Text(b.name, color = Pc.PanelTitle, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 3.dp, top = 1.dp))
+                    }
+                }
+            }
+        }
     }
 }

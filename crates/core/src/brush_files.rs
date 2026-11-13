@@ -1,5 +1,6 @@
-//! Brush and set files as other painting apps share them (`.brush`, `.brushset`): read into the
-//! library, and written from it. A brush's shape and grain images go with it; an image a file only
+//! Brush, set and library files as other painting apps share them (`.brush`, `.brushset`,
+//! `.brushlibrary`): read into the library (a library file as a library of its own), and written
+//! from it. A brush's shape and grain images go with it; an image a file only
 //! names (one that came with the app that made it) is stood in for by the nearest of ours.
 
 use procraft_engine::brush::{
@@ -7,6 +8,7 @@ use procraft_engine::brush::{
     StockImages,
 };
 use procraft_engine::brushfile::{self, BrushFile, Pictures, Texture};
+use procraft_engine::brushlibrary;
 use procraft_engine::curve::Curve;
 use procraft_engine::stroke::LEAST_ROUNDNESS;
 use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
@@ -133,9 +135,11 @@ pub fn is_brush_zip(bytes: Vec<u8>) -> bool {
     procraft_engine::zip::ZipReader::new(&bytes).is_some_and(|zip| brush_names(zip.names()))
 }
 
-/// Whether a zip holding `names` holds brushes.
-pub(crate) fn brush_names<'n>(mut names: impl Iterator<Item = &'n str>) -> bool {
-    names.any(|n| n == "Brush.archive" || n == "brushset.plist" || n.ends_with("/Brush.archive"))
+/// Whether a zip holding `names` holds brushes (a library's among them).
+pub(crate) fn brush_names<'n>(names: impl Iterator<Item = &'n str>) -> bool {
+    let names: Vec<&str> = names.collect();
+    names.iter().any(|n| *n == "Brush.archive" || *n == "brushset.plist" || n.ends_with("/Brush.archive"))
+        || brushlibrary::is_library(names.iter().copied())
 }
 
 /// Brushes read from a file, not yet in the library: reading another app's takes a while, so it
@@ -149,6 +153,27 @@ pub enum ReadBrushes {
     One(Box<Brush>),
     /// A file of ours from before (a set, or a brush for the set shown), as its text.
     Text(String),
+    /// A library of their own called `name` (numbered if another has it): its sets (name, icon,
+    /// brushes) and its tools' brushes (paint, erase, smudge).
+    Library { name: String, sets: Vec<(String, u32, Vec<Brush>)>, tools: [(usize, usize); 3] },
+}
+
+/// A library file's sets in `bytes`, as a library called `name`; none if it isn't one.
+fn read_library(bytes: &[u8], name: String) -> Option<ReadBrushes> {
+    let file = brushlibrary::read(bytes)?;
+    let sets = file
+        .sets
+        .iter()
+        .map(|set| {
+            // its icon as the stock set it names has it
+            let icon = crate::brush_library::shipped_icon(set.icon.as_deref().unwrap_or(&set.name));
+            let brushes = procraft_engine::par::side_by_side(&set.brushes, brush_from).into_iter().flatten().collect();
+            (set.name.clone(), icon, brushes)
+        })
+        .collect();
+    // the file's tools are paint, smudge and erase
+    let [paint, smudge, erase] = file.tools;
+    Some(ReadBrushes::Library { name, sets, tools: [paint, erase, smudge].map(|t| t.unwrap_or((0, 0))) })
 }
 
 /// Our brush file's or set file's brushes in `bytes`.
@@ -176,6 +201,12 @@ pub fn read_any_brushes(bytes: &[u8], file_name: Option<String>) -> Option<ReadB
     let other = name
         .rsplit_once('.')
         .is_some_and(|(_, ext)| OTHER_BRUSH_EXTENSIONS.iter().any(|o| o.eq_ignore_ascii_case(ext)));
+    // a library, by its name or by what the zip holds
+    let library = name.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case(brushlibrary::EXTENSION))
+        || procraft_engine::zip::ZipReader::new(bytes).is_some_and(|zip| brushlibrary::is_library(zip.names()));
+    if library && let Some(read) = read_library(bytes, stem.clone()) {
+        return Some(read);
+    }
     if other {
         return read_other(bytes, stem);
     }
@@ -229,6 +260,7 @@ impl CanvasSession {
                 Some(at as u32)
             }
             ReadBrushes::Text(text) => self.import_brush_file(shown, text),
+            ReadBrushes::Library { name, sets, tools } => self.add_brush_library(name, sets, tools),
         }
     }
 }
@@ -243,6 +275,16 @@ pub struct BrushesRead(std::sync::Mutex<Option<ReadBrushes>>);
 #[uniffi::export]
 pub fn read_brushes(bytes: Vec<u8>, file_name: Option<String>) -> Option<std::sync::Arc<BrushesRead>> {
     read_any_brushes(&bytes, file_name).map(|read| std::sync::Arc::new(BrushesRead(std::sync::Mutex::new(Some(read)))))
+}
+
+#[uniffi::export]
+impl BrushesRead {
+    /// Whether they are a library of their own: added, it is brought into use, which reads and
+    /// writes its files (best off the interface's thread). False once added.
+    pub fn is_library(&self) -> bool {
+        let read = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(*read, Some(ReadBrushes::Library { .. }))
+    }
 }
 
 #[uniffi::export]
@@ -304,6 +346,51 @@ impl CanvasSession {
         let seed =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
         Some(brushfile::write_set(&name, &list, |i| folder_id(seed, i)))
+    }
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// The library in use as a library file: its sets and their brushes in order, each tool's
+    /// brush; none if it has no brushes.
+    pub fn brush_library_as_file(&self) -> Option<Vec<u8>> {
+        let (sets, tools) = {
+            let st = self.shared.lock();
+            let sets: Vec<(String, u32, Vec<Brush>)> = st
+                .library
+                .iter()
+                .enumerate()
+                .map(|(s, set)| {
+                    let brushes = set.brushes.iter().enumerate().map(|(i, b)| st.with_sliders(b, s, i)).collect();
+                    (set.name.clone(), set.icon, brushes)
+                })
+                .collect();
+            let tools = [crate::ToolKind::Paint, crate::ToolKind::Smudge, crate::ToolKind::Erase]
+                .map(|tool| Some(st.brush_ref(tool)));
+            (sets, tools)
+        };
+        if sets.iter().all(|(_, _, brushes)| brushes.is_empty()) {
+            return None;
+        }
+        let made: Vec<Vec<Made>> = sets
+            .iter()
+            .enumerate()
+            .map(|(s, (_, _, brushes))| {
+                brushes.iter().enumerate().map(|(i, b)| self.brush_pictures(b, s as u32, i as u32)).collect()
+            })
+            .collect();
+        let out: Vec<brushlibrary::SetOut<'_>> = sets
+            .iter()
+            .zip(&made)
+            .map(|((name, icon, brushes), made)| brushlibrary::SetOut {
+                name,
+                icon: crate::brush_library::shipped_icon_name(*icon),
+                brushes: brushes.iter().zip(made).map(|(b, m)| (b, author_name(b), m.pictures())).collect(),
+            })
+            .collect();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let seed = now.as_nanos() as u64;
+        Some(brushlibrary::write(&out, tools, |i| folder_id(seed, i).replace('-', "").to_lowercase(), now.as_secs()))
     }
 }
 
@@ -1436,6 +1523,19 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
             }
         },
         Texture::Stock { name, inverted } => {
+            // a tip printed in dots: ours dotted on the same lattice, each dot as big as the stock
+            // tip's ink there
+            if let Some(lattice) = halftone_lattice(name)
+                && let (Some(rows), Some(cols), Some(tones)) = (
+                    textures::stock_shape_rows(name, *inverted),
+                    textures::stock_shape_cols(name, *inverted),
+                    textures::stock_shape_tones(name, *inverted),
+                )
+            {
+                let cover = tones.iter().map(|&t| f32::from(t)).sum::<f32>() / (tones.len().max(1) as f32 * 255.0);
+                let dots = Source::new(textures::halftone_shape(lattice, &rows, &cols, cover));
+                return (Some(shape::STOCK_DOTS), dots, None);
+            }
             let (image, source, hardness) = stock_stand_in(name, *inverted);
             // our shape with the stock one's own lights and darks and its rows' share of the ink,
             // where they were measured: all of the stock one as its brush shows it (inverted, for
@@ -1445,6 +1545,16 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                 .zip(textures::stock_shape_tones(name, *inverted))
                 .and_then(|(i, tones)| {
                     let mut shape = textures::shapes().into_iter().nth(i as usize)?;
+                    // as wide and tall as the real tip, where it lies in its square (the grainy
+                    // square, standing in for a tip we know nothing else of, takes its outline
+                    // across and down below)
+                    if i != shape::STOCK_GRAINY_SQUARE
+                        && let (Some(rows), Some(cols)) =
+                            (textures::stock_shape_rows(name, *inverted), textures::stock_shape_cols(name, *inverted))
+                        && let Some(fitted) = textures::fitted_to_box(&shape.pixels, &rows, &cols)
+                    {
+                        shape.pixels = fitted;
+                    }
                     // its marks as fine as the real tip's: standing in for a tip we know nothing
                     // else of, the grainy square (smooth for a solid one); any other shape of ours
                     // takes them over itself
@@ -1472,6 +1582,14 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
             (image, retoned.or(source), hardness)
         }
     }
+}
+
+/// The lattice a stock tip printed in dots has its dots on, as [`textures::halftone_shape`] takes it
+/// (each set of rows as its cycles across and down the image), as measured; none for any other.
+fn halftone_lattice(name: &str) -> Option<[(f32, f32); 2]> {
+    let n = name.to_lowercase();
+    // its dots about 47 to the side, on rows turned 17 degrees and their crossing ones 109
+    n.contains("phoenix_secondary_shape").then_some([(-45.30, -13.85), (14.75, -42.60)])
 }
 
 /// Our stand-in for the stock shape `name`: our nearest shape, or the round tip at a hardness, or
@@ -1669,6 +1787,18 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             // one drawn to the stock image's proportions as it is drawn (measured smaller, the
             // stock image's fine lines and dots go grey, which would take the pattern's contrast)
             let source = image.and_then(|i| {
+                // a paper or a wash: noise as strong at each size as the stock image is, with its
+                // tones (tiled as a share of that image is)
+                if textures::drawn_by_octaves(i)
+                    && let (Some((_, octaves)), Some(tones)) =
+                        (textures::stock_grain_octaves(name), textures::stock_grain_tones(name))
+                {
+                    let mut pixels = textures::octave_grain(&octaves, &tones);
+                    if *inverted {
+                        pixels.iter_mut().for_each(|v| *v = 255 - *v);
+                    }
+                    return Source::new(pixels);
+                }
                 let pattern = textures::grains().into_iter().nth(i as usize)?;
                 let mut pixels = if textures::drawn_to_stock_size(i) {
                     pattern.pixels
@@ -1916,6 +2046,75 @@ mod tests {
         assert_eq!(named_grain("brush-preset-diagonal.png"), Some(grain::DIAGONAL_STRIPES));
         assert_eq!(named_grain("tessellated.png"), Some(grain::LABYRINTH));
         assert_eq!(named_grain("stone_wall.png"), Some(grain::CONCRETE));
+    }
+
+    #[test]
+    fn a_stock_tip_only_older_brushes_name_stands_in_as_faint_as_it_is() {
+        // no brush the other app comes with names this tip (older brushes and people's own still
+        // do): unmeasured, it stood in as our bright chunk, so a dual brush's second drawn with it
+        // built up solid and passed its first through uncut
+        let tip = Texture::Stock { name: "Gouache-Drop-3.jpg".to_owned(), inverted: false };
+        let (_, source, _) = shape_for(&tip);
+        let pixels = source.expect("retoned to its measured tones").pixels;
+        let mean = pixels.iter().map(|&v| f32::from(v)).sum::<f32>() / pixels.len() as f32 / 255.0;
+        assert!(mean < 0.1, "{mean}");
+        // and a dual brush's second's own tip and grain are measured as its first's are
+        assert!(textures::stock_shape_tones("nightjar_secondary_shape.png", false).is_some());
+        assert!(textures::stock_grain_tones("lumita_secondary_grain.png").is_some());
+    }
+
+    #[test]
+    fn a_stock_tip_stands_in_as_wide_as_it_inks() {
+        // a dab inked across 85% of its square and down 70% (ours, a chunk, had 68% and 66%): its
+        // stroke came out a fifth too narrow
+        let tip = Texture::Stock { name: "Acrylic-Dab-3.jpg".to_owned(), inverted: false };
+        let (_, source, _) = shape_for(&tip);
+        let pixels = source.expect("retoned").pixels;
+        let n = TEXTURE_SIZE;
+        let span = |across: bool| {
+            let inked =
+                |i: usize| (0..n).filter(|&j| pixels[if across { j * n + i } else { i * n + j }] > 13).count() > n / 50;
+            let first = (0..n).find(|&i| inked(i)).unwrap_or(0);
+            let last = (0..n).rev().find(|&i| inked(i)).unwrap_or(0);
+            (last - first) as f32 / n as f32
+        };
+        assert!(span(true) > 0.74, "{}", span(true));
+        assert!((0.62..0.76).contains(&span(false)), "{}", span(false));
+    }
+
+    #[test]
+    fn a_stock_tip_printed_in_dots_stands_in_as_dots_on_its_lattice() {
+        let tip = Texture::Stock { name: "Phoenix_Secondary_Shape.png".to_owned(), inverted: true };
+        let (image, source, _) = shape_for(&tip);
+        assert_eq!(image, Some(shape::STOCK_DOTS));
+        let pixels = source.expect("dots drawn").pixels;
+        let n = TEXTURE_SIZE;
+        let a: Vec<f32> = pixels.iter().map(|&v| f32::from(v) / 255.0).collect();
+        // as much ink as the stock tip inverted holds (about a sixth), most of it on its right
+        let mean = a.iter().sum::<f32>() / a.len() as f32;
+        assert!((0.1..0.25).contains(&mean), "{mean}");
+        let half = |right: bool| {
+            (0..n * n).filter(|k| (k % n >= n / 2) == right).map(|k| a[k]).sum::<f32>() / (n * n / 2) as f32
+        };
+        assert!(half(true) > 2.0 * half(false), "{} {}", half(true), half(false));
+        // the dots repeat along the lattice's rows: shifted by one step of it, the inky middle of the
+        // tip matches itself far better than shifted half a step
+        let [(ax, ay), (bx, by)] = halftone_lattice("phoenix_secondary_shape.png").unwrap();
+        let det = ax * by - ay * bx;
+        // one step of the lattice, a row of the first set across, along a row of the second
+        let step = (by / det * n as f32, -bx / det * n as f32);
+        let differ = |k: f32| {
+            let (dx, dy) = ((step.0 * k).round() as i32, (step.1 * k).round() as i32);
+            let mut sum = 0.0;
+            for y in 96..160i32 {
+                for x in 150..214i32 {
+                    let at = |x: i32, y: i32| a[(y as usize) * n + x as usize];
+                    sum += (at(x, y) - at(x + dx, y + dy)).abs();
+                }
+            }
+            sum
+        };
+        assert!(differ(1.0) < 0.5 * differ(0.5), "{} {}", differ(1.0), differ(0.5));
     }
 
     #[test]

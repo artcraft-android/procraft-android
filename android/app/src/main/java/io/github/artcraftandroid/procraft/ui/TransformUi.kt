@@ -81,7 +81,7 @@ import io.github.artcraftandroid.procraft.core.TransformKind
 import kotlin.math.atan2
 import kotlin.math.roundToInt
 
-private val NodeBlue = Color(0xFF0171EA)
+internal val NodeBlue = Color(0xFF0171EA)
 private val RotateGreen = Color(0xFF00E607)
 private val RotateLine = Color(0xFF00E400)
 private val TurnOrange = Color(0xFFFEB800)

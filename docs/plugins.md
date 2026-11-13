@@ -14,14 +14,14 @@ A plugin holds one or both of these:
 - **Code**, which changes how the app behaves. It's a WebAssembly module, run under limits by an
   interpreter, that the app asks at named places called [hooks](#hooks). Code can also add buttons
   that change the artwork ([actions](#actions)), show a [panel](#panels) of its own, draw the colour
-  panel's Classic picker ([`picker`](#picker)), or make a kind of artwork of its own
-  ([artworks of its own](#artworks-of-its-own)).
+  panel's Classic picker ([`picker`](#picker)), make a kind of artwork of its own
+  ([artworks of its own](#artworks-of-its-own)), or add a kind of layer whose strokes it keeps
+  ([layers of its own](#layers-of-its-own)).
 - **A [filter](#filters)**, which adds a new adjustment. It's a function the GPU runs over a layer.
 
-The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with code and `gap-closing`
+The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with code and `vector-layers`
 the largest. `extract-lines`, `posterise` and `outline` are filters. `grid-layer` has an action,
-`colour-triangle` is a picker, `vector-canvas` makes artworks of its own, and `keyboard-shortcuts`
-rebinds keys from a panel of its own and keeps what it binds.
+`colour-triangle` is a picker, `vector-layers` adds layers of its own, and `keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds.
 
 ## What you write
 
@@ -57,9 +57,10 @@ or both. The file has to hold exactly that. The import screen tells people what 
 plugin do.
 
 `hooks` lists the hooks the code uses, and only a plugin that holds `"hooks"` may have it. Code
-needs at least one hook, one action (see [Actions](#actions)) or one kind of artwork (see
-[Artworks of its own](#artworks-of-its-own)). `interface` is 1 here; actions, permissions, panels,
-the `picker` hook and kinds of artwork need 2.
+needs at least one hook, one action (see [Actions](#actions)), one kind of artwork (see
+[Artworks of its own](#artworks-of-its-own)) or one kind of layer (see
+[Layers of its own](#layers-of-its-own)). `interface` is 1 here; actions, permissions, panels,
+the `picker` hook and kinds of artwork need 2, and kinds of layer 3.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -570,6 +571,9 @@ own sound, or none. All of it is in the plugin, made sample by sample with a few
 | Steps for a fill | 20,000,000, and 1,024 for each pixel of its box, for at most 30 seconds |
 | A fill's box | 8,194 × 8,194 pixels in area |
 | What a plugin keeps | 64 KiB |
+| Memory, with kinds of layer | 256 MiB |
+| A layer's data | 64 MiB |
+| Steps for a call on a layer | 800,000,000, for at most 5 seconds |
 
 A pen sends a sample every 4 ms at 240 Hz, so a `position` call has to be far quicker than that. Use a
 few hundred steps, not thousands.
@@ -730,7 +734,7 @@ its own format. The app hands it the strokes, shows what it draws, and keeps wha
 stroke as a step for undo and redo. The manifest lists the kinds (interface 2):
 
 ```json
-  "kinds": [{ "key": "vector", "label": "Vector artwork" }]
+  "kinds": [{ "key": "dots", "label": "Dots" }]
 ```
 
 While the plugin is on, the gallery's New canvas list has a row for each kind under the presets,
@@ -764,8 +768,215 @@ the colour (`0xRRGGBBAA`), the brush's width in canvas pixels, and its opacity (
   other calls 800,000,000, for at most 5 seconds.
 
 The kit's `canvas` module writes it: an `Artwork` (new, the brush a stroke starts with, touch, draw
-into a `DrawList`, save, load) and `kit::canvas!(MyArtwork)`. `plugins/vector-canvas` is one to start
-from.
+into a `DrawList`, save, load) and `kit::canvas!(MyArtwork)`.
+
+## Layers of its own
+
+Code can add a kind of layer of its own (interface 3): a vector layer, say, whose strokes stay
+strokes. It sits in the layer stack as any other layer: the app shows, blends, groups, moves,
+duplicates and deletes it, and undoes every change to it. Every stroke on it is painted as on any
+layer, with whatever brush is chosen, by the app's own brush engine. The app then records the stroke
+as an item and hands it to the plugin, which keeps the layer's items in data of its own. When the
+plugin changes items already drawn, the app draws the layer again from them. The manifest lists the
+kinds:
+
+```json
+  "compat": { "procraft": { "interface": 3 } },
+  "layer_kinds": [
+    {
+      "key": "vector",
+      "label": "Vector layer",
+      "badge": {
+        "lines": [{ "points": [0.22, 0.72, 0.38, 0.05, 0.62, 0.95, 0.78, 0.28], "curved": true }],
+        "dots": [0.22, 0.72, 0.78, 0.28]
+      },
+      "exports": [{ "key": "svg", "label": "SVG (vector layers)", "extension": "svg", "mime": "image/svg+xml" }]
+    }
+  ]
+```
+
+While the plugin is on, the Layers panel's + offers each kind beside a plain layer, named after its
+`label`. A plugin can list up to four kinds. The import screen says the plugin can add kinds of layer.
+
+`badge` is optional. It is what the kind's layers show in the corner of their thumbnails, drawn in
+white over a small dark box, and what the + shows beside the kind's name, drawn larger in the menu's
+colour. Its numbers are places in that box, 0 to 1 across and down:
+
+- `lines`: up to eight, each up to 32 points, x then y. A line goes straight from point to point, or
+  with `"curved": true` it is cubic curves: a start, then two handles and an end for each curve.
+- `dots`: up to eight small squares, x then y.
+
+Without a badge, the + and the kind's layers show a plug, as do its layers while the plugin is off or
+gone.
+
+`exports` is optional too: up to four files the plugin makes of an artwork's layers of the kind. While
+the plugin is on and the artwork has a layer of the kind, Share Image lists each under its `label`,
+beside the app's own formats. `extension` is the file's, a few lower-case letters or digits, and
+`mime` its media type. The plugin makes the file with `procraft_layer_export` (below).
+
+- The app keeps each such layer's data in the artwork beside the layer's pixels
+  (`layers/<id>.layerdata` next to `layers/<id>.png`), written whole, and puts it back with the pixels
+  when a stroke is undone or redone. Artworks saved by earlier versions have it in
+  `layers/<id>.vector`, which is read when there is no `.layerdata` file and replaced by one at the next
+  save.
+- With its plugin off or removed, or its data file gone or unreadable, the layer shows its pixels, as
+  locked: it takes no strokes, and its data is left as it is through saves.
+- A file in another app's format, such as a layered PSD or the package format, has the layer as its
+  pixels.
+- Only its strokes change the layer. With a plugin that changes its items (below), Clear deletes the
+  strokes a selection takes (all of them with nothing selected), the layer's options offer Recolour
+  and Apply Brush for them, Transform moves them as strokes, and flipping or cropping the canvas
+  moves every stroke with the pixels.
+- ColorDrop on it goes to the plugin, if it exports `procraft_layer_fill` (below). Otherwise ColorDrop,
+  and always Invert and adjustments, wait until it is rasterized, as with a text layer. Rasterize makes it
+  a plain layer, and so does merging another layer into it. Flipping or cropping the canvas does too
+  when its plugin can't move its items.
+- A stroke drawn inside a selection is kept with that selection and is always laid again inside it.
+- A stroke held still on it snaps with QuickShape as on any layer. It is kept as the shape: its
+  samples along the shape's outline, its kind and nodes in field 26, laid along them exactly again.
+  QuickShape on the last stroke, after it was kept, doesn't snap one on it.
+
+Its module exports:
+
+```
+procraft_layer_in(len: i32) -> i32               // where `len` bytes go, for the next call
+procraft_layer_out() -> i32                      // where an answer is
+procraft_layer_load(kind: i32, len: i32) -> i32  // a layer's data (none: a new one): 0 if it took it
+procraft_layer_add(len: i32) -> i32              // an item on that layer: 0 kept as drawn, 1 draw again
+procraft_layer_save() -> i32                     // the layer's data now: its length
+procraft_layer_draw() -> i32                     // the layer's items to draw: its length
+procraft_layer_select(len: i32) -> i32           // if it exports it: the ids a selection takes
+procraft_layer_edit(len: i32) -> i32             // if it exports it: changes to items, not 0 if made
+procraft_layer_fill(len: i32) -> i32             // if it exports it: a colour dropped, not 0 if items changed
+procraft_layer_export(len: i32) -> i32           // if it exports it: a file of an artwork's layers: its length
+procraft_layer_hit(len: i32) -> i32              // if it exports it: the item at a point: 4 (its id), or 0
+```
+
+For each change, the app first hands over the layer's data with `procraft_layer_load`. `kind` is the
+kind's place in `layer_kinds`, and `len` is 0 for a layer with no data yet. Then it calls one of the
+others, so the plugin keeps nothing between changes. As a stroke ends:
+
+1. The app calls `procraft_layer_add` with the item.
+2. It asks `procraft_layer_save` for the data from then on.
+3. If `procraft_layer_add` answered 1, it asks `procraft_layer_draw`. It then clears the layer and lays
+   those items on it, in order, as one step with the stroke.
+
+If the data afterwards is the same as before, nothing changes and no step is made. A plugin answers 1
+when the stroke changed what was drawn before, such as an eraser taking strokes away whole. An
+answer other than 0 or 1 stops the plugin.
+
+A plugin that exports both of the last two has its items selected and changed as items. Each item to
+draw then says the plugin's id for it (field 21, u32).
+
+- `procraft_layer_select` is handed the selection as a record. Fields 1 to 4 hold its box, x, y,
+  width and height (u32). Field 5 holds how much it takes of each pixel there, a byte each (0 none,
+  255 all), rows from the top. The plugin answers with the ids of the items it takes, as u32 each.
+- `procraft_layer_edit` is handed a record of changes, field 1 each. A change is a record too:
+  - field 1, the item's id (u32);
+  - field 2, u8 1 if the item goes;
+  - field 3, the fields the item takes in place of its own (an item record: a new colour, size,
+    brush or transform, say).
+
+  The plugin answers not 0 if anything changed. The app then asks for the data and the items to draw,
+  and lays the layer again as one step.
+
+While the Selection tool is open on such a layer, a box like the transform box shows round the
+strokes the selection takes, and the arrow keys move them a pixel at a time, the selection with them.
+An edit lays the layer again only where what changed reaches. Zoomed in, once the view settles, the
+layer's items are laid again at the screen's resolution over the canvas, so they stay sharp; the
+layer's own pixels, which saving and exporting read, stay as they are.
+
+`procraft_layer_fill` is handed a colour dropped on the layer with ColorDrop, as a record:
+
+- fields 1 and 2, where it landed, x and y in canvas pixels (32-bit floats);
+- field 3, the colour, three 32-bit floats, sRGB 0 to 1;
+- field 4, the threshold ColorDrop is at, 0 to 1 (32-bit float);
+- field 5, how many canvas pixels across each pixel of the picture in field 6 is (32-bit float);
+- field 6, what bounds a fill there, as a selection is handed over (box and a byte a pixel), in that
+  picture's pixels: how much of each is drawn. It is the layer's own pixels, every layer seen while a
+  plugin says to fill from all of them, or the reference layer when another layer is it. A canvas
+  over 2048 pixels a side comes shrunk by whole steps, each pixel the most of those it stands for.
+
+The plugin answers not 0 if it changed its items. The app then asks for the data and the items to
+draw, and lays the layer again as one step called ColorDrop.
+
+`procraft_layer_hit` is handed a point as a record: x and y (fields 1 and 2) in canvas pixels, and
+how far about it counts as there (field 3), each a 32-bit float. It answers 4 with the id of the
+topmost item there at `procraft_layer_out()` (u32), or 0 for none. With it, a tap of the Selection
+tool on the layer selects the item under it as a selection of that item alone would, joined to the
+selection as Add or Remove says, and a tap on nothing lets the selection go (a freehand path being
+tapped out point by point goes on as it does).
+
+`procraft_layer_export` is handed what a file is to be made of, as a record, and needs no layer
+loaded first:
+
+- field 1, which of the kind's `exports` (u32, its place in the manifest);
+- field 2, which kind (u32, its place in `layer_kinds`);
+- fields 3 and 4, the canvas's width and height (u32);
+- field 5 for each of the artwork's layers of the kind, bottom up: a record of its name (field 1,
+  UTF-8), whether it shows (field 2, u8), its opacity (field 3, 32-bit float) and its data (field 4,
+  none for a layer with nothing on it yet).
+
+It answers with the file's length, the file at `procraft_layer_out()`, or below 0 for none. The app
+writes the file whole.
+
+An item is a record: fields one after another, each a 16-bit id, a 32-bit length and that many bytes,
+all little-endian. A reader passes over ids it doesn't know, so a later app can add fields. Ids from
+`0x8000` up are the plugin's own: the app ignores them in what it is handed back. The app writes:
+
+| Id | Field |
+|---|---|
+| 1 | The tool, u8: 0 paint, 1 mask (the eraser, laid as it erased), 2 smudge |
+| 2 | The samples, 32 bytes each: x, y (canvas pixels), pressure, tilt, azimuth and roll as 32-bit floats, then the milliseconds since the first sample as a 64-bit float |
+| 3, 4 | The colour and the secondary colour, three 32-bit floats each, sRGB 0 to 1 |
+| 5, 6 | The size and opacity sliders, 32-bit floats, 0 to 1 |
+| 7 | The brush's width at full pressure, canvas pixels, 32-bit float: for hit tests |
+| 8 | The brush, whole, in the app's own words (keep it as it is) |
+| 9 | The brush's name, UTF-8 |
+| 10 to 16, 18 to 20 | What else the app needs to lay the stroke again as it was laid: its randomness, the pointer, the brush scale, the view, alpha lock, the app's smoothing and pressure, symmetry, how its samples came, when, and the brush's exact sizes |
+| 22 | Where it is laid, six 32-bit floats `a b c d e f`: each sample's (x, y) goes to (a·x + c·y + e, b·x + d·y + f), its brush scaled and its pen's lean turned with it. None: where it was drawn |
+| 23 | The smoothing it is laid with in place of its brush's own, 32-bit float, 0 to 1 |
+| 24 | The selection it was drawn inside, if any: its box (x, y, width, height, u32), then its coverage in runs, each a u32 count and the byte |
+| 25 | A region it fills, in place of samples: u32 how many outlines, then each a u32 count of points and them, x and y as 32-bit floats (canvas pixels). The app fills them even-odd in the item's colour (field 3) at its opacity (field 6), smoothed, over what is under it, moved by its transform (field 22). Such an item needs no brush |
+| 26 | The shape it snapped to with QuickShape: u8 its kind (0 line, 1 polyline, 2 arc, 3 curve, 4 ellipse, 5 circle, 6 triangle, 7 equilateral triangle, 8 quadrilateral, 9 rectangle, 10 square), then its nodes, x and y as 32-bit floats (canvas pixels). Its samples are laid exactly as they are, nothing smoothing them, and a dual brush's first alone |
+
+The brush is kept as the brush library keeps one: the brush it came from among those the app comes
+with, and every setting changed from there. An item draws the same however the brush is changed
+later, or if it's deleted. The items to draw are a record too. Field 1 holds a brush's bytes, the
+first 0, the next 1 and so on, so each brush is there once. Field 2 holds an item, which names its
+brush by that number in field 17 (u32) in place of field 8.
+
+The kit's `layer` module writes all of this. Implement `kit::layer::Layer` and add
+`kit::layers!(MyLayer)`:
+
+- The trait's calls are new, load, save, add an `Item`, draw into a `Drawn`, and, if you want them,
+  select (an `Area`), edit (`Change`s), fill (a `Dropped` colour) and export (an `Export`).
+- `Item` reads the tool, the width, the samples and where they are drawn (its transform applied, and
+  its symmetry's copies, `paths`). It cuts samples into a new item (`with_samples`), and keeps the
+  record as it came.
+
+`plugins/vector-layers` is one to start from. It keeps each brush once, and its card chooses what
+the eraser does, and what a selection takes:
+
+- Eraser: Mask (as it starts) keeps an erasing stroke as an item that hides what is under it, so
+  deleting it later brings the strokes back. Soft mask does the same, hiding only part of what is
+  under it, as the eraser does at half its opacity.
+- Eraser: Whole takes away every stroke the eraser's path comes within reach of, whole.
+- Eraser: Cut takes away the parts of strokes the eraser passes over. What is left of each becomes
+  strokes of its own, its samples as they were, cut where the eraser's edge crosses it.
+- Erasing reaches a stroke's symmetry copies as well as the stroke itself.
+- A selection takes the strokes wholly inside it. It takes those it touches too while "Selections
+  take touching strokes" is on, and masks too while "Selections take masks" is on. A tap takes the
+  stroke or fill under it.
+- A colour dropped on the layer fills the region round where it lands, bounded by what is drawn, and
+  kept out of gaps in the lines up to "Fills close gaps" wide. The fill is an item of its own, behind
+  the strokes: it moves, recolours and deletes as a stroke does, and a selection takes it by its
+  outline. Dropped on a stroke or a fill, the colour recolours that.
+- With "Smudge nudges strokes" on (as it starts), the smudge tool pushes the strokes under it along
+  as it goes, bending them, and keeps no smudge.
+- Share Image offers "SVG (vector layers)": each vector layer a group, each stroke its outline (as
+  wide as its brush where the pen pressed), each fill its region, and each mask hiding what is under
+  it in its layer.
 
 ## Filters
 
@@ -901,7 +1112,7 @@ and have `Plugins::with_bundled` add none. What was added stays, as if imported.
 a filter's function, what a filter is given, the kinds of control, and the app's functions. Interface
 2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork; later,
 within it, the `key_shortcut` hook, panels that show keys or ask for a key press, and what a plugin
-keeps. What a
+keeps. Interface 3 added kinds of layer. What a
 hook calls stays as it's written here, and the app keeps every interface's template, so a plugin goes
 on working as it was written.
 

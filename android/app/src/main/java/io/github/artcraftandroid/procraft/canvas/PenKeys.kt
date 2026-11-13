@@ -2,12 +2,40 @@ package io.github.artcraftandroid.procraft.canvas
 
 import android.view.InputDevice
 import android.view.KeyEvent
+import android.view.MotionEvent
 
 /** The key Huawei's M-Pencil gives for a double-tap, twice over for each one. */
 internal const val PEN_DOUBLE_TAP_KEY = 718
 
 /** Presses of that key closer than this (ms) are one double-tap given twice. */
 private const val DOUBLE_TAP_GIVEN_TWICE_MS = 300L
+
+/** What a pen's button that comes as a key did: pressed, let go, or (a double-tap's key) tapped, never held. */
+enum class PenKeyAction { PRESSED, LET_GO, DOUBLE_TAPPED }
+
+/** A pen's two side buttons, as a motion event's button state has them. */
+internal const val PEN_BUTTONS = MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY
+
+/** Whether a pointer of [toolType] is a pen's (its tip or its eraser end). */
+internal fun isPen(toolType: Int) = toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
+
+/** The pen's side buttons as its events say they are held, from one event to the next. */
+internal class PenButtons {
+    private var held = 0
+
+    /**
+     * The buttons pressed and let go ([PEN_BUTTONS] bits) since the last event, by this one's
+     * [buttonState]. An event without the pen in it ([penIn] false: a hand's touch, whose buttons read
+     * as none held) changes nothing, or a hand landing while a button is held would let it go.
+     */
+    fun next(buttonState: Int, penIn: Boolean): Pair<Int, Int> {
+        if (!penIn) return 0 to 0
+        val now = buttonState and PEN_BUTTONS
+        val change = (now and held.inv()) to (held and now.inv())
+        held = now
+        return change
+    }
+}
 
 /** Tells a pen's next double-tap from the second press of the one just heard. */
 internal class PenDoubleTaps {

@@ -420,6 +420,121 @@ fn band_shares(means: &[u8; 64], inverted: bool) -> [u8; 64] {
     ink.map(|v| ((u32::from(v) * 255 + top / 2) / top).min(255) as u8)
 }
 
+/// A halftone tip: round dots on a lattice, the lattice's two sets of rows as the cycles of each
+/// across and down the tile (`lattice`), each dot as big as the ink there says: the ink a stock tip
+/// holds row by row and column by column (`rows`, `cols`, as [`stock_shape_rows`] gives them),
+/// all of it `cover` of the tile on average. A stand-in for a stock tip printed in dots, whose
+/// stroke shows their rows where the stamps overlap.
+pub fn halftone_shape(lattice: [(f32, f32); 2], rows: &[u8; 64], cols: &[u8; 64], cover: f32) -> Vec<u8> {
+    let [(ax, ay), (bx, by)] = lattice;
+    let det = ax * by - ay * bx;
+    if det.abs() < 1e-6 {
+        return vec![0; TEXTURE_SIZE * TEXTURE_SIZE];
+    }
+    // the area of the tile each dot has (a share of the tile)
+    let cell = 1.0 / det.abs();
+    let band = |bands: &[u8; 64], t: f32| {
+        let place = (t * bands.len() as f32 - 0.5).clamp(0.0, (bands.len() - 1) as f32);
+        let (low, f) = (place.floor() as usize, place.fract());
+        let at = |i: usize| f32::from(bands.get(i.min(bands.len() - 1)).copied().unwrap_or(0)) / 255.0;
+        at(low) * (1.0 - f) + at(low + 1) * f
+    };
+    // how much of its cell each dot fills, from the ink across and down, scaled until the whole
+    // averages `cover` (held to the cell: past it the dots run together)
+    let n = TEXTURE_SIZE;
+    let ink: Vec<f32> = (0..n * n)
+        .map(|k| {
+            let (x, y) = (((k % n) as f32 + 0.5) / n as f32, ((k / n) as f32 + 0.5) / n as f32);
+            (band(rows, y) * band(cols, x)).sqrt()
+        })
+        .collect();
+    let target = cover.clamp(0.0, 1.0) * ink.len() as f32;
+    let filled = |k: f32| ink.iter().map(|&v| (v * k).min(1.0)).sum::<f32>();
+    let (mut low, mut high) = (0.0f32, 64.0f32);
+    for _ in 0..40 {
+        let mid = (low + high) / 2.0;
+        if filled(mid) < target { low = mid } else { high = mid }
+    }
+    let scale = (low + high) / 2.0;
+    field(|x, y| {
+        // the nearest dot: the point's place in each set of rows, to the nearest whole row, back
+        // across the tile
+        let (p, q) = (ax * x + ay * y, bx * x + by * y);
+        let (dp, dq) = (p - p.round(), q - q.round());
+        let (dx, dy) = ((by * dp - ay * dq) / det, (ax * dq - bx * dp) / det);
+        let distance = dx.hypot(dy);
+        let (i, j) = (((x * n as f32) as usize).min(n - 1), ((y * n as f32) as usize).min(n - 1));
+        let share = (ink.get(j * n + i).copied().unwrap_or(0.0) * scale).min(1.0);
+        let radius = (share * cell / std::f32::consts::PI).sqrt();
+        ((radius - distance) * n as f32 + 0.5).clamp(0.0, 1.0)
+    })
+}
+
+/// `pixels`, a shape, stretched across and down so that the bands of its rows and columns holding
+/// ink span as many as `rows` and `cols` (a stock tip's, as [`stock_shape_rows`] gives them) say
+/// theirs do, and lie where theirs lie: a stand-in as wide and tall as the tip it stands for. Only
+/// ever grown: a soft tip's faint rim, under a twentieth of its fullest band, still paints, so a tip
+/// that measures smaller than ours is no sure sign that ours reaches too far. None where it already
+/// is (within a twentieth), or where either holds no ink.
+pub fn fitted_to_box(pixels: &[u8], rows: &[u8; 64], cols: &[u8; 64]) -> Option<Vec<u8>> {
+    let n = TEXTURE_SIZE;
+    if pixels.len() != n * n {
+        return None;
+    }
+    let per = n / rows.len();
+    let mut ours_rows = [0.0f32; 64];
+    let mut ours_cols = [0.0f32; 64];
+    for (i, &v) in pixels.iter().enumerate() {
+        if let Some(r) = ours_rows.get_mut(i / n / per) {
+            *r += f32::from(v);
+        }
+        if let Some(c) = ours_cols.get_mut(i % n / per) {
+            *c += f32::from(v);
+        }
+    }
+    // the first and last band holding a twentieth of the fullest band's ink, as texels (end past)
+    let span = |bands: &[f32]| {
+        let top = bands.iter().copied().fold(0.0, f32::max);
+        if top <= 0.0 {
+            return None;
+        }
+        let first = bands.iter().position(|&b| b > top * 0.05)?;
+        let last = bands.iter().rposition(|&b| b > top * 0.05)?;
+        Some(((first * per) as f32, ((last + 1) * per) as f32))
+    };
+    let theirs = |bands: &[u8; 64]| span(&bands.map(f32::from));
+    let ((oy0, oy1), (ox0, ox1)) = (span(&ours_rows)?, span(&ours_cols)?);
+    let ((ty0, ty1), (tx0, tx1)) = (theirs(rows)?, theirs(cols)?);
+    // how far ours stretches each way (grown, to twice at most), about the middles of the two boxes
+    let (sx, sy) = (((ox1 - ox0) / (tx1 - tx0)).clamp(0.5, 1.0), ((oy1 - oy0) / (ty1 - ty0)).clamp(0.5, 1.0));
+    let (ocx, ocy, tcx, tcy) = ((ox0 + ox1) / 2.0, (oy0 + oy1) / 2.0, (tx0 + tx1) / 2.0, (ty0 + ty1) / 2.0);
+    let off = |a: f32, b: f32| (a - b).abs() / n as f32;
+    if sx > 0.95 && sy > 0.95 && off(ocx, tcx) < 0.05 && off(ocy, tcy) < 0.05 {
+        return None;
+    }
+    let at = |x: i32, y: i32| {
+        if x < 0 || y < 0 || x >= n as i32 || y >= n as i32 {
+            0.0
+        } else {
+            f32::from(pixels.get(y as usize * n + x as usize).copied().unwrap_or(0))
+        }
+    };
+    Some(
+        (0..n * n)
+            .map(|k| {
+                // where in ours this texel of theirs falls, read between texels
+                let (x, y) = ((k % n) as f32 + 0.5, (k / n) as f32 + 0.5);
+                let (u, v) = (ocx + (x - tcx) * sx - 0.5, ocy + (y - tcy) * sy - 0.5);
+                let (i, j) = (u.floor() as i32, v.floor() as i32);
+                let (fx, fy) = (u - u.floor(), v - v.floor());
+                let top = at(i, j) * (1.0 - fx) + at(i + 1, j) * fx;
+                let bottom = at(i, j + 1) * (1.0 - fx) + at(i + 1, j + 1) * fx;
+                (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8
+            })
+            .collect(),
+    )
+}
+
 /// `pixels`, a shape, its rows weighted as [`striped`] weights them, then its columns as `cols`
 /// says the same way: a stand-in takes a stock shape's outline across as well as down.
 pub fn shaped(pixels: &[u8], rows: &[u8; 64], cols: &[u8; 64]) -> Vec<u8> {
@@ -463,9 +578,59 @@ pub fn striped(pixels: &[u8], rows: &[u8; 64]) -> Vec<u8> {
     pixels.iter().enumerate().map(|(i, &v)| (f32::from(v) * at(i / n) / most).round().clamp(0.0, 255.0) as u8).collect()
 }
 
-fn stock_tones<const N: usize>(table: &[(u64, [u8; N])], name: &str) -> Option<[u8; N]> {
+fn stock_tones<T: Copy, const N: usize>(table: &[(u64, [T; N])], name: &str) -> Option<[T; N]> {
     let key = name_key(name);
     table.binary_search_by_key(&key, |&(k, _)| k).ok().and_then(|i| table.get(i)).map(|&(_, t)| t)
+}
+
+/// How many octaves of noise [`octave_grain`] lays together.
+pub const OCTAVES: usize = 8;
+
+/// How much of a stock grain's side our stand-in drawn by its octaves spans (see [`octave_grain`]):
+/// a quarter, its texels the image's pixels with the image at 1024 a side.
+pub const OCTAVE_SHARE: f32 = 0.25;
+
+/// How wide the stock grain a brush file names `name` is (pixels), and how strong each octave of
+/// [`octave_grain`]'s noise is (finest first) for it to vary as much at each size as that image
+/// does, as measured, if it is one we know.
+pub fn stock_grain_octaves(name: &str) -> Option<(f32, [f32; OCTAVES])> {
+    let [width, octaves @ ..] = stock_tones(crate::stock_tones::STOCK_GRAIN_OCTAVES, name)?;
+    Some((f32::from(width), octaves.map(|a| f32::from(a) / 10000.0)))
+}
+
+/// Whether our grain `index` stands in for a stock grain by the stock image's own octaves of noise
+/// (see [`octave_grain`]) where they were measured: papers and washes, whose fibres, veins and
+/// blotches, each at its own size, our patterns of them lack.
+pub fn drawn_by_octaves(index: u32) -> bool {
+    matches!(index, grain::SHEET | grain::WASH | grain::WORN)
+}
+
+/// Noise in [`OCTAVES`] octaves as `amplitudes` says (finest first: cells of 1, 2, 4 ... texels),
+/// each a random value at its cells' corners eased between them, wrapping round so it tiles; its
+/// values then moved onto `tones` (a stock grain's, at [`TONE_SHARES`]) keeping their order. A
+/// stand-in that varies as much at each size as the stock image it was measured from.
+pub fn octave_grain(amplitudes: &[f32; OCTAVES], tones: &[u8; 9]) -> Vec<u8> {
+    let n = TEXTURE_SIZE;
+    let raw: Vec<f32> = (0..n * n)
+        .map(|k| {
+            let (i, j) = ((k % n) as f32 + 0.5, (k / n) as f32 + 0.5);
+            amplitudes
+                .iter()
+                .enumerate()
+                .filter(|&(_, &amplitude)| amplitude > 0.0)
+                .map(|(octave, &amplitude)| {
+                    // (each cell's corner on a texel's middle: the finest octave is the texels'
+                    // own values)
+                    let cell = (1u32 << octave) as f32;
+                    let period = (n >> octave).max(1) as i32;
+                    let seed = 9001 + octave as u32 * 7919;
+                    amplitude * (value_noise(i / cell - 0.5, j / cell - 0.5, period, seed) - 0.5)
+                })
+                .sum()
+        })
+        .collect();
+    let spread: Vec<(f32, f32)> = tones.iter().zip(TONE_SHARES).map(|(&t, s)| (f32::from(t) / 255.0, s)).collect();
+    ranked(&raw, &spread)
 }
 
 /// The key the stock tables keep an image's measurements under: FNV-1a of its file's name in lower
@@ -2573,6 +2738,61 @@ mod tests {
         assert!(at(grain::SOFT_DOTS, 1.0 / 56.0, 0.0) < 140 && at(grain::SOFT_DOTS, 1.0 / 40.0, 0.0) > 170);
         assert!((share(grain::LABYRINTH) - 0.45).abs() < 0.02, "{}", share(grain::LABYRINTH));
         assert_eq!(drawn_to_stock_width(grain::SOFT_DOTS), Some(1792.0));
+    }
+
+    #[test]
+    fn a_paper_stands_in_varying_at_each_size_as_much_as_it_does() {
+        let (width, octaves) = stock_grain_octaves("Wax-Crayon-Paper.jpg").expect("measured");
+        assert_eq!(width, 2048.0);
+        let tones = stock_grain_tones("Wax-Crayon-Paper.jpg").expect("measured");
+        let pixels = octave_grain(&octaves, &tones);
+        let n = TEXTURE_SIZE;
+        let a: Vec<f32> = pixels.iter().map(|&v| f32::from(v) / 255.0).collect();
+        // how much it varies between softenings of `from` and `to` texels
+        let band = |from: f32, to: f32| {
+            let (fine, broad) = (gaussian_wrapped(&a, n, from), gaussian_wrapped(&a, n, to));
+            let d: Vec<f32> = fine.iter().zip(&broad).map(|(f, b)| f - b).collect();
+            let mean = d.iter().sum::<f32>() / d.len() as f32;
+            (d.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / d.len() as f32).sqrt()
+        };
+        // its veins and blotches, 4 to 64 texels: our paper sheet standing in for it had next to
+        // none (0.007 and 0.002), the paper as much as its fibres
+        assert!(band(4.0, 16.0) > 0.025, "{}", band(4.0, 16.0));
+        assert!(band(16.0, 64.0) > 0.015, "{}", band(16.0, 64.0));
+        // with the paper's own tones
+        let mean = a.iter().sum::<f32>() / a.len() as f32;
+        assert!((mean - 0.73).abs() < 0.02, "{mean}");
+        // only papers and washes stand in so
+        assert!(drawn_by_octaves(grain::SHEET) && drawn_by_octaves(grain::WASH));
+        assert!(!drawn_by_octaves(grain::CHARCOAL));
+    }
+
+    #[test]
+    fn a_stand_in_is_stretched_to_the_box_its_stock_tip_inks() {
+        // ours a square across the middle fifth to four fifths...
+        let n = TEXTURE_SIZE;
+        let inside = |v: usize, from: usize, to: usize| v >= from * n / 20 && v < to * n / 20;
+        let square: Vec<u8> =
+            (0..n * n).map(|k| if inside(k % n, 6, 14) && inside(k / n, 6, 14) { 255 } else { 0 }).collect();
+        // ...the stock tip's ink wide (from 10 to 54 of 64 bands across) and as tall but lower (26
+        // to 52 down)
+        let bands =
+            |from: usize, to: usize| std::array::from_fn::<u8, 64, _>(|b| if b >= from && b < to { 255 } else { 0 });
+        let (rows, cols) = (bands(26, 52), bands(10, 54));
+        let fitted = fitted_to_box(&square, &rows, &cols).expect("stretched");
+        let span = |along: bool| {
+            let inked = |i: usize| (0..n).any(|j| fitted[if along { j * n + i } else { i * n + j }] > 127);
+            let first = (0..n).find(|&i| inked(i)).unwrap();
+            let last = (0..n).rev().find(|&i| inked(i)).unwrap();
+            (first, last)
+        };
+        let ((x0, x1), (y0, y1)) = (span(true), span(false));
+        assert!(x0.abs_diff(40) <= 2 && x1.abs_diff(215) <= 2, "{x0}..{x1}");
+        assert!(y0.abs_diff(104) <= 2 && y1.abs_diff(207) <= 2, "{y0}..{y1}");
+        // one as big as its tip already, where it lies, is left alone, and one bigger than its tip
+        // isn't shrunk
+        assert!(fitted_to_box(&square, &bands(19, 45), &bands(19, 45)).is_none());
+        assert!(fitted_to_box(&square, &bands(24, 40), &bands(24, 40)).is_none());
     }
 
     #[test]

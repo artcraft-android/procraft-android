@@ -66,7 +66,8 @@ pub enum KeyShortcut {
 
 /// The shortcut on `key`, if any: a letter or digit (either case), "[", "]", ";", "space",
 /// "delete", "backspace", or an arrow ("left", "right", "up", "down"); `command` is Ctrl (⌘), and
-/// the arrows nudge only while `transforming`. Ctrl and Alt together are AltGr typing a key, so
+/// the arrows nudge only while `transforming` (or while the selection tool shows the strokes a
+/// selection takes on a plugin's layer: [`CanvasSession::nudge_plugin_items`]). Ctrl and Alt together are AltGr typing a key, so
 /// they count as neither. A plugin may take a press as another first:
 /// [`crate::Plugins::key_shortcut`].
 ///

@@ -65,6 +65,8 @@ pub enum Action {
     SaveAs,
     /// The artwork written as this format; a PDF keeps its pictures at this JPEG quality.
     Export(Format, u8),
+    /// The file a plugin makes of the artwork's layers (by its place among those offered).
+    PluginExport(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -179,6 +181,9 @@ pub struct Interface {
     quick_menu: crate::quick_menu::QuickMenu,
     /// A pen button set to the eyedropper is held: its loupe follows the pen until it is let go.
     pen_picking: bool,
+    /// The pen's first and second buttons as held last frame: let go, one held to erase gives the
+    /// eraser back.
+    pen_held: [bool; 2],
     /// An open adjustment's bar, panel and tap menu; Gradient Map's library (kept between runs).
     adjustments: crate::adjustments::Adjustments,
     gradients: std::sync::Arc<procraft_core::Gradients>,
@@ -285,6 +290,7 @@ impl Default for Interface {
             artwork_dir: None,
             quick_menu: crate::quick_menu::QuickMenu::default(),
             pen_picking: false,
+            pen_held: [false; 2],
             adjustments: crate::adjustments::Adjustments::default(),
             gradients: procraft_core::Gradients::open(
                 crate::files::app_dir().join("gradients.json").to_string_lossy().into_owned(),
@@ -502,9 +508,10 @@ impl Interface {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
-        // do (the first, set to nothing, the eraser and back), where the pointer is; one set to
-        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it;
-        // with the canvas out of sight they do nothing, then or later: the tool would change unseen
+        // do (the first, set to nothing, the eraser and back; set to erase, the eraser while it is
+        // held), where the pointer is; one set to the eyedropper picks while it is held, where the
+        // pen hovers, and lets go to take it; with the canvas out of sight they do nothing, then
+        // or later: the tool would change unseen (and one held to erase is let go)
         let covered = self.studio.open || self.time_lapse.replaying();
         let presses = crate::pen::take_button_presses().map(|n| if covered { 0 } else { n });
         let held = crate::pen::buttons_held().map(|h| h && !covered);
@@ -517,13 +524,19 @@ impl Interface {
                     self.pen_picking = true;
                     ctx.request_repaint();
                 }
-                continue;
+            } else {
+                for _ in 0..pressed {
+                    input.commands.extend(session.touch_pen_button(button == 1, x, y));
+                    self.library.tool_changed();
+                }
             }
-            for _ in 0..pressed {
-                input.commands.extend(session.touch_pen_button(button == 1, x, y));
+            // let go since the last frame (or pressed and let go within this one)
+            let was_held = self.pen_held.get(button).copied().unwrap_or(false);
+            if !is_held && (was_held || pressed > 0) && session.touch_pen_button_up(button == 1) {
                 self.library.tool_changed();
             }
         }
+        self.pen_held = held;
         let eyedropper_held = held.iter().zip(&purposes).any(|(h, p)| *h && *p == Some(GesturePurpose::Eyedropper));
         if self.pen_picking && !eyedropper_held {
             self.pen_picking = false;
@@ -788,7 +801,7 @@ impl Interface {
             self.adjustments.showing_filters = false;
         }
         if let Some(open) = self.open {
-            self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
+            self.popover(&ctx, session, open, anchor(open), &mut backdrops);
         }
         // the background's colour is kept, however its panel closed
         if self.open != Some(Popover::Layers) {
@@ -2292,7 +2305,6 @@ impl Interface {
         session: &Arc<CanvasSession>,
         which: Popover,
         button: Option<Rect>,
-        tool: ToolKind,
         backdrops: &mut Vec<f32>,
     ) {
         let Some(button) = button else {
@@ -2303,7 +2315,7 @@ impl Interface {
         let modal = self.modal(which);
         let shown = match which {
             Popover::Brushes => {
-                let shown = self.library.show(ctx, &mut self.look, session, tool, button, backdrops);
+                let shown = self.library.show(ctx, &mut self.look, session, button, backdrops);
                 // what was done in the library is kept
                 self.keep_brushes |= std::mem::take(&mut self.library.changed);
                 shown
@@ -2311,6 +2323,7 @@ impl Interface {
             Popover::Layers if self.background_pick.is_some() => self.background_panel(ctx, session, button, backdrops),
             Popover::Layers => {
                 self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
+                self.layers.layer_kinds = self.prefs.plugins.layer_kinds();
                 let shown = self.layers.show(ctx, &mut self.look, session, &mut self.colours, button, backdrops);
                 if let Some(key) = self.layers.run_action.take() {
                     self.run_plugin_action(ctx, session, key);
@@ -2394,6 +2407,7 @@ impl Interface {
                     model_flat: self.model && session.model_flat(),
                     paint_through: self.model && session.paint_through(),
                     svg: session.exports_svg(),
+                    plugin_exports: session.plugin_exports().into_iter().map(|e| e.label).collect(),
                 };
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
@@ -2473,6 +2487,10 @@ impl Interface {
                     }
                     Some(Act::Share(format)) => {
                         self.actions.push(Action::Export(format, 100));
+                        self.open = None;
+                    }
+                    Some(Act::PluginExport(i)) => {
+                        self.actions.push(Action::PluginExport(i));
                         self.open = None;
                     }
                     Some(Act::About) => crate::files::about(),
@@ -2665,8 +2683,13 @@ impl Interface {
         info: &CanvasInfo,
         press: &KeyCombo,
     ) -> bool {
-        let shortcut =
-            procraft_core::key_shortcut(press.key.clone(), press.command, press.shift, press.alt, self.transform.on);
+        let shortcut = procraft_core::key_shortcut(
+            press.key.clone(),
+            press.command,
+            press.shift,
+            press.alt,
+            self.transform.on || self.selection.nudges(),
+        );
         let Some(shortcut) = shortcut else { return false };
         self.key_shortcut(ctx, session, info, shortcut);
         true
@@ -2701,7 +2724,11 @@ impl Interface {
             KeyShortcut::QuickMenu => self.quick_menu.toggle(middle),
             KeyShortcut::GreyView => session.set_grey_view(!session.grey_view()),
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
-            KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
+            KeyShortcut::Nudge { dx, dy } if self.transform.on => self.transform.moved(session.transform_arrow(dx, dy)),
+            // the strokes the selection takes, and the selection with them
+            KeyShortcut::Nudge { dx, dy } => {
+                session.nudge_plugin_items(dx, dy);
+            }
         }
     }
 

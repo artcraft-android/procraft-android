@@ -141,7 +141,7 @@ impl CanvasSession {
         let st = &mut *guard;
         let id = LayerId(id);
         let Some(layer) = st.doc.layer(id).cloned() else { return false };
-        if st.doc.is_locked(id) || layer.text.is_some() {
+        if st.doc.is_locked(id) || layer.drawn_from_data() {
             return false;
         }
         let [r, g, b] = st.color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
@@ -189,7 +189,7 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let id = LayerId(id);
-        if st.doc.is_locked(id) || st.doc.layer(id).is_none_or(|l| l.text.is_some()) {
+        if st.doc.is_locked(id) || st.doc.layer(id).is_none_or(|l| l.drawn_from_data()) {
             return false;
         }
         // only what is painted changes, inverted on the GPU (nothing read back)

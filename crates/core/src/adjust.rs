@@ -330,7 +330,7 @@ impl CanvasSession {
         st.finish_stroke();
         st.settle();
         let current = st.doc.current();
-        if st.doc.is_locked(current) || st.doc.layer(current).is_none_or(|l| !l.visible || l.text.is_some()) {
+        if st.doc.is_locked(current) || st.doc.layer(current).is_none_or(|l| !l.visible || l.drawn_from_data()) {
             return false;
         }
         let alpha_locked = st.doc.layer(current).is_some_and(|l| l.alpha_lock);

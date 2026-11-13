@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -199,10 +198,64 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
         }
     }
     // the bar rides on the keyboard: put away, it goes with it
-    val keyboardUp = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
-    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.ime)) {
-        if (vm.textStyleOpen) TextStyleSheet(vm, info) else if (keyboardUp) TextBar(vm)
+    val reach = rememberKeyboardReach()
+    val reachDp = with(androidx.compose.ui.platform.LocalDensity.current) { reach.toDp() }
+    Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = reachDp)) {
+        if (vm.textStyleOpen) TextStyleSheet(vm, info) else if (reach > 0) TextBar(vm)
     }
+}
+
+/** Less of the window than this share between its bottom and what shows above is a system bar, not a keyboard. */
+private const val KEYBOARD_LEAST = 0.15f
+
+/**
+ * How far up from the bottom of a window ending at [windowBottom] (screen pixels, [windowHeight]
+ * tall) the keyboard reaches, what shows of the screen ending at [visibleBottom]: none while that
+ * gap is only a system bar's.
+ */
+internal fun keyboardReach(windowBottom: Int, visibleBottom: Int, windowHeight: Int): Int {
+    val reach = windowBottom - visibleBottom
+    return if (reach > windowHeight * KEYBOARD_LEAST) reach else 0
+}
+
+/**
+ * How far up from the window's bottom the on-screen keyboard reaches, pixels (0 while it is put
+ * away). Android 11 on says so itself. Before that a window that stays as it is under the keyboard,
+ * as ours does, is told nothing of it (the bar never showed): there a strip of a window that does
+ * make room for the keyboard, too narrow to see or touch, is measured instead.
+ */
+@Composable
+private fun rememberKeyboardReach(): Int {
+    val ime = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current)
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) return ime
+    val view = androidx.compose.ui.platform.LocalView.current
+    var reach by remember { mutableIntStateOf(0) }
+    androidx.compose.runtime.DisposableEffect(view) {
+        val strip = android.view.View(view.context)
+        val popup = android.widget.PopupWindow(strip, 0, android.view.ViewGroup.LayoutParams.MATCH_PARENT).apply {
+            softInputMode = android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+            inputMethodMode = android.widget.PopupWindow.INPUT_METHOD_NEEDED
+            isTouchable = false
+        }
+        val frame = android.graphics.Rect()
+        val at = IntArray(2)
+        val measure = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            strip.getWindowVisibleDisplayFrame(frame)
+            val root = view.rootView
+            root.getLocationOnScreen(at)
+            reach = keyboardReach(at[1] + root.height, frame.bottom, root.height)
+        }
+        strip.viewTreeObserver.addOnGlobalLayoutListener(measure)
+        // once the window is there to hang it from
+        val show = Runnable { runCatching { popup.showAtLocation(view, android.view.Gravity.NO_GRAVITY, 0, 0) } }
+        view.post(show)
+        onDispose {
+            view.removeCallbacks(show)
+            strip.viewTreeObserver.removeOnGlobalLayoutListener(measure)
+            popup.dismiss()
+        }
+    }
+    return maxOf(ime, reach)
 }
 
 /** A stroke on a text layer: it takes paint once rasterized. */

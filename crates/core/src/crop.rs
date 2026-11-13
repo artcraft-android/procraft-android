@@ -66,10 +66,23 @@ impl CanvasSession {
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
-        let (Some(old), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return false };
+        if st.canvas.is_none() || st.gpu.is_none() {
+            return false;
+        }
         let (sw, sh) = (st.doc.width(), st.doc.height());
         let c = crop([x, y, width, height], angle, resample_to.then_some((new_width, new_height)));
-        let doc = st.doc.resized(c.width, c.height);
+        let mut doc = st.doc.resized(c.width, c.height);
+        // plugins' layers' items moved with their pixels (those whose plugin can't move them become
+        // ordinary layers); undoing the crop brings back the document as it was
+        if let Some(to_new) = c.to_old.inverse() {
+            st.move_all_items(to_new, &mut doc);
+        } else {
+            let plugin_layers: Vec<_> = doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
+            for id in plugin_layers {
+                doc.rasterize(id);
+            }
+        }
+        let (Some(old), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return false };
         let ids: Vec<_> = st.doc.pixel_layer_ids().collect();
         // the old canvas stays for undo, so this is all more: refused while there is still room,
         // not left to the system to find out
@@ -146,6 +159,16 @@ impl CanvasSession {
     pub fn take_failure(&self) -> Option<String> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // layers whose files couldn't be read as the artwork opened (shown empty, their files kept)
+        if !st.unreadable_untold.is_empty() {
+            let names: Vec<String> = std::mem::take(&mut st.unreadable_untold)
+                .into_iter()
+                .filter_map(|id| st.doc.layer(id).map(|l| l.name.clone()))
+                .collect();
+            if !names.is_empty() {
+                return Some(crate::project::unreadable_said(&names));
+            }
+        }
         if st.gpu.as_ref().is_some_and(Gpu::is_lost) && !std::mem::replace(&mut st.crop_edit.lost_told, true) {
             st.crop_edit.failure = None;
             return Some(LOST_SAID.to_owned());

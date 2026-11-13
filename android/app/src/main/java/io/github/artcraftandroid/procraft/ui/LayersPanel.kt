@@ -160,6 +160,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
     var renaming by remember { mutableStateOf<ULong?>(null) }
     var swiped by remember { mutableStateOf<ULong?>(null) }
     var titleMenu by remember { mutableStateOf(false) }
+    // the + offering plugins' kinds of layer beside a plain one
+    var addMenu by remember { mutableStateOf(false) }
     var deletingChosen by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
@@ -191,8 +193,13 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                 }, onDelete = { deletingChosen = true })
             },
         ) {
-            Box(Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { vm.addLayer() }, contentAlignment = Alignment.Center) {
+            val kinds = vm.layerKinds()
+            Box(
+                Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { if (kinds.isEmpty()) vm.addLayer() else addMenu = true },
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(PcIcons.PlusMedium, contentDescription = "New layer", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
+                NewLayerMenu(addMenu && kinds.isNotEmpty(), kinds, vm, onDismiss = { addMenu = false })
             }
         }
         // a layer added at the top of what shows comes in there, the rows under it sliding down,
@@ -503,6 +510,39 @@ private fun LayersTitleMenu(open: Boolean, vm: CanvasViewModel, onDismiss: () ->
         }
     }
 }
+
+/** The + with plugins' kinds of layer on: a plain layer, or one of each kind, named as the plugin names it. */
+@Composable
+private fun NewLayerMenu(open: Boolean, kinds: List<io.github.artcraftandroid.procraft.core.PluginKind>, vm: CanvasViewModel, onDismiss: () -> Unit) {
+    LibraryMenu(
+        open,
+        androidx.compose.ui.graphics.TransformOrigin(1f, 0f),
+        MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) },
+        onDismiss,
+        overPanel = true,
+    ) {
+        MenuItem(PcIcons.MenuNewLayer, "Layer") {
+            onDismiss()
+            vm.addLayer()
+        }
+        for (kind in kinds) {
+            // beside its badge, as its layers' thumbnails show it (a plug when it draws none)
+            val badge = remember(kind) { io.github.artcraftandroid.procraft.core.pluginKindBadge(kind) }
+            val ink = Pc.MenuInk
+            MenuItem(kind.label, ink, null, onClick = {
+                onDismiss()
+                vm.addPluginLayer(kind.key)
+            }) {
+                androidx.compose.foundation.Canvas(Modifier.size(MenuBadgeWidth, MenuBadgeHeight)) { badgeDrawing(badge, ink, MenuBadgeLine.toPx()) }
+            }
+        }
+    }
+}
+
+/** A kind's badge as a menu row's glyph: its box 1.6 times a thumbnail's (18 by 14), its lines as thick as the menu glyphs'. */
+private val MenuBadgeWidth = 28.8.dp
+private val MenuBadgeHeight = 22.4.dp
+private val MenuBadgeLine = 2.4.dp
 
 /** Drops [l] where its row's middle came to rest: just above or below the row it is over. */
 /**
@@ -855,6 +895,47 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
                 Image(it, contentDescription = null, contentScale = ContentScale.Fit, filterQuality = FilterQuality.None, modifier = Modifier.fillMaxSize())
             }
         }
+        // a plugin's layer: its kind's badge in its corner, as its manifest draws it
+        l.pluginBadge?.let { badge ->
+            androidx.compose.foundation.Canvas(Modifier.align(Alignment.BottomEnd).padding(3.dp).size(18.dp, 14.dp)) {
+                drawRoundRect(PluginBadgeBehind, cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()))
+                badgeDrawing(badge, Color.White, 1.5.dp.toPx())
+            }
+        }
+    }
+}
+
+/** The badge behind a plugin's layer's glyph on its thumbnail. */
+private val PluginBadgeBehind = Color(0x99000000)
+
+/**
+ * A plugin's [badge]'s lines and dots in [ink] over the whole of this scope (its box, 0 to 1 across and down): its lines
+ * [width] thick, its dots squares twice that across.
+ */
+private fun DrawScope.badgeDrawing(badge: io.github.artcraftandroid.procraft.core.PluginBadge, ink: Color, width: Float) {
+    val (w, h) = size.width to size.height
+    for (line in badge.lines) {
+        val p = line.points
+        if (p.size < 4) continue
+        val path = Path().apply {
+            moveTo(w * p[0], h * p[1])
+            var i = 2
+            while (i + 1 < p.size) {
+                if (line.curved && i + 5 < p.size) {
+                    cubicTo(w * p[i], h * p[i + 1], w * p[i + 2], h * p[i + 3], w * p[i + 4], h * p[i + 5])
+                    i += 6
+                } else {
+                    lineTo(w * p[i], h * p[i + 1])
+                    i += 2
+                }
+            }
+        }
+        drawPath(path, ink, style = androidx.compose.ui.graphics.drawscope.Stroke(width))
+    }
+    val node = width * 2
+    for (i in 0 until badge.dots.size / 2) {
+        val (x, y) = w * badge.dots[2 * i] to h * badge.dots[2 * i + 1]
+        drawRect(ink, Offset(x - node / 2, y - node / 2), Size(node, node))
     }
 }
 
@@ -1025,6 +1106,8 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         LayerOption.REFERENCE -> { { vm.toggleReference(l) } }
                         LayerOption.EDIT_TEXT -> { { vm.editText(l) } }
                         LayerOption.RASTERIZE -> { { vm.rasterize(l) } }
+                        LayerOption.RECOLOUR -> { { vm.restyleStrokes(l, colour = true) } }
+                        LayerOption.APPLY_BRUSH -> { { vm.restyleStrokes(l, colour = false) } }
                         LayerOption.MERGE_DOWN -> { { vm.mergeDown(l) } }
                         LayerOption.COMBINE_DOWN -> { { vm.combineDown(l) } }
                         LayerOption.MERGE_MASK -> { { vm.mergeMask(l) } }

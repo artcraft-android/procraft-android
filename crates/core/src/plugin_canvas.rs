@@ -1,7 +1,7 @@
 //! A plugin's own canvas (interface 2): an artwork of a kind a plugin makes, a vector drawing say.
 //! The plugin keeps the artwork itself, in its own format; the app hands it the touches, asks it
 //! what to draw, keeps what it saves as each step and hands an older one back to undo. Its manifest
-//! lists the kinds (`"kinds": [{ "key": "vector", "label": "Vector artwork" }]`), and its module
+//! lists the kinds (`"kinds": [{ "key": "dots", "label": "Dots" }]`), and its module
 //! exports:
 //!
 //! - `procraft_canvas_new(width: i32, height: i32) -> i32`: a new artwork that size, canvas pixels
@@ -238,11 +238,66 @@ pub(crate) fn svg(paths: &[DrawPath], width: u32, height: u32) -> String {
     out
 }
 
-/// A plugin's kind of artwork, as the gallery lists it: `key` is `<id>.<key>`.
+/// A plugin's kind of artwork, as the gallery lists it, or of layer: `key` is `<id>.<key>`.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct PluginKind {
     pub key: String,
     pub label: String,
+    /// What a kind of layer's layers are known by on their thumbnails, if its manifest draws it.
+    #[uniffi(default = None)]
+    pub badge: Option<PluginBadge>,
+    /// What a kind of layer's layers can be exported as, by its plugin.
+    pub exports: Vec<PluginExport>,
+}
+
+/// A file a plugin makes of an artwork's layers of a kind it adds (an SVG picture of vector
+/// layers, say), offered under Share beside the app's own: `key` is `<id>.<kind>.<key>`, `label`
+/// what Share calls it, and the file's extension and media type.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginExport {
+    pub key: String,
+    pub label: String,
+    pub extension: String,
+    pub mime: String,
+}
+
+/// A small drawing a kind of layer is known by on its layers' thumbnails: lines and dots in a box
+/// 1 across and 1 down (x to the right, y down), drawn light over a dark badge.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginBadge {
+    pub lines: Vec<BadgeLine>,
+    /// Small squares at these points: x, y, x, y and so on.
+    pub dots: Vec<f32>,
+}
+
+/// One of a badge's lines: its points (x, y, x, y and so on), straight from each to the next, or
+/// `curved`: cubic curves, a start, then two handles and an end for each.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct BadgeLine {
+    pub points: Vec<f32>,
+    pub curved: bool,
+}
+
+impl PluginBadge {
+    /// The badge of a layer whose kind draws none, or whose plugin is gone: a plug.
+    pub fn plug() -> PluginBadge {
+        let line = |points: &[f32]| BadgeLine { points: points.to_vec(), curved: false };
+        PluginBadge {
+            lines: vec![
+                line(&[0.33, 0.42, 0.67, 0.42, 0.67, 0.62, 0.5, 0.8, 0.33, 0.62, 0.33, 0.42]),
+                line(&[0.43, 0.42, 0.43, 0.2]),
+                line(&[0.57, 0.42, 0.57, 0.2]),
+            ],
+            dots: Vec::new(),
+        }
+    }
+}
+
+/// What a kind of layer is known by beside its name in the Layers panel's +, as on its layers'
+/// thumbnails: the badge its manifest draws, or a plug.
+#[uniffi::export]
+pub fn plugin_kind_badge(kind: PluginKind) -> PluginBadge {
+    kind.badge.unwrap_or_else(PluginBadge::plug)
 }
 
 /// A plugin's artwork open: the copy of its code that keeps it, and its size.

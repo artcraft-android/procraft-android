@@ -92,6 +92,21 @@
 //!   something new: into `procraft_kept_buffer(len: i32) -> i32`, then `procraft_kept(len: i32)`.
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
+//! - For kinds of layer of its own (interface 3, its manifest's `layer_kinds`; see
+//!   `plugin_layers.rs`): `procraft_layer_in(len: i32) -> i32` says where `len` bytes go and
+//!   `procraft_layer_out() -> i32` where an answer is; `procraft_layer_load(kind: i32, len: i32) ->
+//!   i32` takes `len` bytes there as the data of a layer of its kind `kind` (by its place in
+//!   `layer_kinds`; none for a new, empty one), 0 if it could; `procraft_layer_add(len: i32) -> i32`
+//!   takes an item recorded on that layer (0: kept as drawn, 1: kept, and the layer is drawn again
+//!   from its items); `procraft_layer_save() -> i32` gives the layer's data now and
+//!   `procraft_layer_draw() -> i32` its items to draw, each its length at `procraft_layer_out()`.
+//!   If it has them, `procraft_layer_select(len: i32) -> i32` gives the ids of the items a selection
+//!   (`len` bytes) takes, and `procraft_layer_edit(len: i32) -> i32` makes the changes `len` bytes
+//!   ask of its items (not 0: something changed); `procraft_layer_fill(len: i32) -> i32` takes a
+//!   colour dropped on the layer (not 0: its items changed); `procraft_layer_export(len: i32) -> i32`
+//!   makes a file of an artwork's layers of a kind (its length at `procraft_layer_out()`, below 0
+//!   none); `procraft_layer_hit(len: i32) -> i32` says which item is at a point (4 bytes, its id, at
+//!   `procraft_layer_out()`, or 0 for none).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
@@ -206,6 +221,17 @@ const CANVAS_SAVE: &str = "procraft_canvas_save";
 const CANVAS_IN: &str = "procraft_canvas_in";
 const CANVAS_LOAD: &str = "procraft_canvas_load";
 const CANVAS_TOOL: &str = "procraft_canvas_tool";
+const LAYER_IN: &str = "procraft_layer_in";
+const LAYER_OUT: &str = "procraft_layer_out";
+const LAYER_LOAD: &str = "procraft_layer_load";
+const LAYER_ADD: &str = "procraft_layer_add";
+const LAYER_SAVE: &str = "procraft_layer_save";
+const LAYER_DRAW: &str = "procraft_layer_draw";
+const LAYER_SELECT: &str = "procraft_layer_select";
+const LAYER_EDIT: &str = "procraft_layer_edit";
+const LAYER_FILL: &str = "procraft_layer_fill";
+const LAYER_EXPORT: &str = "procraft_layer_export";
+const LAYER_HIT: &str = "procraft_layer_hit";
 /// What a call on a plugin's own artwork may spend (its drawing, its saving), and how long; a touch,
 /// which comes with each sample while the canvas waits, far less.
 const CANVAS_FUEL: u64 = 800_000_000;
@@ -213,6 +239,11 @@ const MOST_CANVAS_TIME: Duration = Duration::from_secs(5);
 const TOUCH_FUEL: u64 = 20_000_000;
 const MOST_TOUCH_TIME: Duration = Duration::from_millis(250);
 /// What an action may spend and how long it may take: it does the plugin's work on the artwork.
+/// What a call on a plugin's layer may take: as a call on its own artwork, the steps and the time;
+/// and the memory a plugin with kinds of layer may ask for (a layer's data in, out and worked on).
+const LAYER_FUEL: u64 = CANVAS_FUEL;
+const MOST_LAYER_TIME: Duration = MOST_CANVAS_TIME;
+const MOST_LAYER_MEMORY: usize = 256 << 20;
 const ACTION_FUEL: u64 = 4_000_000_000;
 const MOST_ACTION_TIME: Duration = Duration::from_secs(20);
 pub(crate) const KEY_BUFFER: &str = "procraft_key_buffer";
@@ -256,6 +287,9 @@ pub(crate) enum Hook {
     LayerAdded,
     /// A hardware keyboard's presses taken as others before the app's shortcuts see them.
     KeyShortcut,
+    /// Kinds of layer of its own (interface 3): not named in `hooks`, but on it whenever its
+    /// manifest lists `layer_kinds`.
+    Layers,
 }
 
 impl Hook {
@@ -308,6 +342,7 @@ impl Hook {
             Hook::StrokeKept => "This plugin can act on your artwork each time you finish a stroke.",
             Hook::LayerAdded => "This plugin can act on your artwork each time you add a layer.",
             Hook::KeyShortcut => "This plugin can change what your keyboard's keys do.",
+            Hook::Layers => "This plugin can add kinds of layer whose strokes it keeps, and draw them again.",
         }
     }
 
@@ -330,6 +365,15 @@ impl Hook {
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
             Hook::StrokeKept | Hook::LayerAdded => exports(module, EVENT, &[ValType::I32], &[ValType::I32]),
+            Hook::Layers => {
+                exports(module, LAYER_IN, &[ValType::I32], &[ValType::I32])
+                    && exports(module, LAYER_OUT, &[], &[ValType::I32])
+                    && exports(module, LAYER_LOAD, &[ValType::I32, ValType::I32], &[ValType::I32])
+                    && exports(module, LAYER_ADD, &[ValType::I32], &[ValType::I32])
+                    && exports(module, LAYER_SAVE, &[], &[ValType::I32])
+                    && exports(module, LAYER_DRAW, &[], &[ValType::I32])
+                    && has_memory(module)
+            }
             Hook::KeyShortcut => {
                 exports(module, KEY_BUFFER, &[ValType::I32], &[ValType::I32])
                     && exports(module, KEY_SHORTCUT, &[ValType::I32], &[ValType::I64])
@@ -543,6 +587,35 @@ struct CanvasCalls {
     tool: Option<TypedFunc<(i32, i32, f32, f32), ()>>,
 }
 
+/// What a plugin's own kinds of layer are reached through (`plugin_layers.rs`).
+struct LayerCalls {
+    input: TypedFunc<i32, i32>,
+    out: TypedFunc<(), i32>,
+    load: TypedFunc<(i32, i32), i32>,
+    add: TypedFunc<i32, i32>,
+    save: TypedFunc<(), i32>,
+    draw: TypedFunc<(), i32>,
+    /// Which items a selection takes, and changes to items, if it has them.
+    select: Option<TypedFunc<i32, i32>>,
+    edit: Option<TypedFunc<i32, i32>>,
+    /// A colour dropped on the layer, if it takes one.
+    fill: Option<TypedFunc<i32, i32>>,
+    /// A file of an artwork's layers, if it makes any.
+    export: Option<TypedFunc<i32, i32>>,
+    /// The item at a point, if it says.
+    hit: Option<TypedFunc<i32, i32>>,
+}
+
+/// What a plugin says of an item recorded on its layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayerAdded {
+    /// Kept: the layer's pixels, the stroke painted as it was drawn, are as its items draw it.
+    Kept,
+    /// Kept, and what was drawn before changed (strokes taken away, say): the layer is drawn again
+    /// from its items.
+    DrawAgain,
+}
+
 /// Whether `module` exports what a plugin's own artwork is reached through.
 fn has_canvas(module: &Module) -> bool {
     use ValType::{F32, I32};
@@ -636,6 +709,7 @@ pub(crate) struct Running {
     panel_event: Option<TypedFunc<(i32, f32), i32>>,
     event: Option<TypedFunc<i32, i32>>,
     canvas: Option<CanvasCalls>,
+    layers: Option<LayerCalls>,
     key_buffer: Option<TypedFunc<i32, i32>>,
     key_shortcut: Option<TypedFunc<i32, i64>>,
     key_shortcut_keys: Option<TypedFunc<i32, i64>>,
@@ -681,7 +755,9 @@ impl Running {
         hooks: &[Hook],
         permissions: &[PluginPermission],
     ) -> Result<Running, Stop> {
-        let most_memory = if hooks.contains(&Hook::Inbetween) {
+        let most_memory = if hooks.contains(&Hook::Layers) {
+            MOST_LAYER_MEMORY
+        } else if hooks.contains(&Hook::Inbetween) {
             MOST_BETWEEN_MEMORY
         } else if hooks.contains(&Hook::StrokeSound) {
             MOST_SOUND_MEMORY
@@ -793,6 +869,21 @@ impl Running {
                     tool: instance.get_typed_func(&store, CANVAS_TOOL).ok(),
                 })
             })();
+            let layers = (|| {
+                Some(LayerCalls {
+                    input: instance.get_typed_func(&store, LAYER_IN).ok()?,
+                    out: instance.get_typed_func(&store, LAYER_OUT).ok()?,
+                    load: instance.get_typed_func(&store, LAYER_LOAD).ok()?,
+                    add: instance.get_typed_func(&store, LAYER_ADD).ok()?,
+                    save: instance.get_typed_func(&store, LAYER_SAVE).ok()?,
+                    draw: instance.get_typed_func(&store, LAYER_DRAW).ok()?,
+                    select: instance.get_typed_func(&store, LAYER_SELECT).ok(),
+                    edit: instance.get_typed_func(&store, LAYER_EDIT).ok(),
+                    fill: instance.get_typed_func(&store, LAYER_FILL).ok(),
+                    export: instance.get_typed_func(&store, LAYER_EXPORT).ok(),
+                    hit: instance.get_typed_func(&store, LAYER_HIT).ok(),
+                })
+            })();
             let key_buffer = instance.get_typed_func(&store, KEY_BUFFER).ok();
             let key_shortcut = instance.get_typed_func(&store, KEY_SHORTCUT).ok();
             let key_shortcut_keys = instance.get_typed_func(&store, KEY_SHORTCUT_KEYS).ok();
@@ -837,6 +928,7 @@ impl Running {
                 panel_event,
                 event,
                 canvas,
+                layers,
                 key_buffer,
                 key_shortcut,
                 key_shortcut_keys,
@@ -1100,6 +1192,172 @@ impl Running {
                 usize::try_from(long_call(store, &calls.input, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
             memory.write(&mut *store, at, data).map_err(|_| Stop::Nonsense)?;
             Ok(long_call(store, &calls.load, (), &mut left, until)? == 0)
+        })
+    }
+
+    /// `bytes` written where its layer calls take what they are handed: their length.
+    fn layer_in(&mut self, bytes: &[u8], left: &mut u64, until: Instant) -> Result<i32, Stop> {
+        let Running { store, layers, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (layers.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let len = i32::try_from(bytes.len()).map_err(|_| Stop::Nonsense)?;
+        guarded(|| {
+            let at = usize::try_from(long_call(store, &calls.input, len, left, until)?).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, at, bytes).map_err(|_| Stop::Nonsense)?;
+            Ok(len)
+        })
+    }
+
+    /// What `call` (one of its layer calls, answering a length) leaves at `procraft_layer_out()`,
+    /// at most `most` bytes.
+    fn layer_out(&mut self, call: fn(&LayerCalls) -> &TypedFunc<(), i32>, most: usize) -> Result<Vec<u8>, Stop> {
+        let Running { store, layers, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (layers.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        guarded(|| {
+            let len =
+                usize::try_from(long_call(store, call(calls), (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            if len > most {
+                return Err(Stop::Nonsense);
+            }
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut bytes = vec![0_u8; len];
+            memory.read(&*store, at, &mut bytes).map_err(|_| Stop::Nonsense)?;
+            Ok(bytes)
+        })
+    }
+
+    /// `data` handed to it as a layer of its kind `kind` (none: a new, empty one) to work on:
+    /// whether it took it.
+    pub(crate) fn layer_load(&mut self, kind: usize, data: &[u8]) -> Result<bool, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(data, &mut left, until)?;
+        let kind = i32::try_from(kind).map_err(|_| Stop::Nonsense)?;
+        let Running { store, layers, .. } = self;
+        let Some(calls) = layers.as_ref() else { return Err(Stop::Damaged) };
+        Ok(guarded(|| long_call(store, &calls.load, (kind, len), &mut left, until))? == 0)
+    }
+
+    /// `item` recorded on the layer it works on: what it says of it. Any answer but its two makes
+    /// no sense.
+    pub(crate) fn layer_add(&mut self, item: &[u8]) -> Result<LayerAdded, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(item, &mut left, until)?;
+        let Running { store, layers, .. } = self;
+        let Some(calls) = layers.as_ref() else { return Err(Stop::Damaged) };
+        match guarded(|| long_call(store, &calls.add, len, &mut left, until))? {
+            0 => Ok(LayerAdded::Kept),
+            1 => Ok(LayerAdded::DrawAgain),
+            _ => Err(Stop::Nonsense),
+        }
+    }
+
+    /// The data of the layer it works on, as it is now (at most `most` bytes).
+    pub(crate) fn layer_save(&mut self, most: usize) -> Result<Vec<u8>, Stop> {
+        self.layer_out(|calls| &calls.save, most)
+    }
+
+    /// The items the layer it works on draws, in order (at most `most` bytes).
+    pub(crate) fn layer_draw(&mut self, most: usize) -> Result<Vec<u8>, Stop> {
+        self.layer_out(|calls| &calls.draw, most)
+    }
+
+    /// Whether it says which items a selection takes and changes them.
+    pub(crate) fn layer_edits(&self) -> bool {
+        self.layers.as_ref().is_some_and(|calls| calls.select.is_some() && calls.edit.is_some())
+    }
+
+    /// The ids of the items of the layer it works on that `area` (a selection) takes, at most
+    /// `most` of them.
+    pub(crate) fn layer_select(&mut self, area: &[u8], most: usize) -> Result<Vec<u32>, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(area, &mut left, until)?;
+        let Running { store, layers, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (layers.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let Some(select) = calls.select.as_ref() else { return Ok(Vec::new()) };
+        guarded(|| {
+            let bytes =
+                usize::try_from(long_call(store, select, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            if bytes % 4 != 0 || bytes / 4 > most {
+                return Err(Stop::Nonsense);
+            }
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut out = vec![0_u8; bytes];
+            memory.read(&*store, at, &mut out).map_err(|_| Stop::Nonsense)?;
+            Ok(out.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect())
+        })
+    }
+
+    /// The changes `changes` asks of the items of the layer it works on, made: whether anything
+    /// changed.
+    pub(crate) fn layer_edit(&mut self, changes: &[u8]) -> Result<bool, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(changes, &mut left, until)?;
+        let Running { store, layers, .. } = self;
+        let Some(edit) = layers.as_ref().and_then(|calls| calls.edit.as_ref()) else { return Ok(false) };
+        Ok(guarded(|| long_call(store, edit, len, &mut left, until))? != 0)
+    }
+
+    /// Whether it takes a colour dropped on its layer.
+    pub(crate) fn layer_fills(&self) -> bool {
+        self.layers.as_ref().is_some_and(|calls| calls.fill.is_some())
+    }
+
+    /// A colour dropped on the layer it works on (`drop`, a record): whether its items changed.
+    pub(crate) fn layer_fill(&mut self, drop: &[u8]) -> Result<bool, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(drop, &mut left, until)?;
+        let Running { store, layers, .. } = self;
+        let Some(fill) = layers.as_ref().and_then(|calls| calls.fill.as_ref()) else { return Ok(false) };
+        Ok(guarded(|| long_call(store, fill, len, &mut left, until))? != 0)
+    }
+
+    /// The id of the item of the layer it works on at the point `request` (a record) says: none if
+    /// there is none there, or it doesn't say (`Ok(None)` either way).
+    pub(crate) fn layer_hit(&mut self, request: &[u8]) -> Result<Option<u32>, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(request, &mut left, until)?;
+        let Running { store, layers, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (layers.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let Some(hit) = calls.hit.as_ref() else { return Ok(None) };
+        guarded(|| match long_call(store, hit, len, &mut left, until)? {
+            0 => Ok(None),
+            4 => {
+                let at =
+                    usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+                let mut id = [0_u8; 4];
+                memory.read(&*store, at, &mut id).map_err(|_| Stop::Nonsense)?;
+                Ok(Some(u32::from_le_bytes(id)))
+            }
+            _ => Err(Stop::Nonsense),
+        })
+    }
+
+    /// Whether it says which item is at a point.
+    pub(crate) fn layer_hits(&self) -> bool {
+        self.layers.as_ref().is_some_and(|calls| calls.hit.is_some())
+    }
+
+    /// The file it makes of the layers `request` hands it (a record), at most `most` bytes: none if
+    /// it makes none.
+    pub(crate) fn layer_export(&mut self, request: &[u8], most: usize) -> Result<Option<Vec<u8>>, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(request, &mut left, until)?;
+        let Running { store, layers, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (layers.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let Some(export) = calls.export.as_ref() else { return Ok(None) };
+        guarded(|| {
+            let made = long_call(store, export, len, &mut left, until)?;
+            let Ok(bytes) = usize::try_from(made) else { return Ok(None) };
+            if bytes > most {
+                return Err(Stop::Nonsense);
+            }
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut out = vec![0_u8; bytes];
+            memory.read(&*store, at, &mut out).map_err(|_| Stop::Nonsense)?;
+            Ok(Some(out))
         })
     }
 
@@ -1593,6 +1851,107 @@ pub(crate) mod tests {
         (func (export "procraft_canvas_in") (param i32) (result i32) (i32.const 2048))
         (func (export "procraft_canvas_load") (result i32)
             (i64.store (i32.const 0) (i64.load (i32.const 2048))) (i32.const 0)))"#;
+
+    /// A plugin's artwork of marks: each touch of a stroke leaves a 10-pixel square in the colour the
+    /// stroke started with (its tool told it), a stroke called off takes its marks back, the eraser
+    /// takes away every mark within 8 pixels of it, and it keeps and draws all of them (each list
+    /// beginning as the last did, while marks are only added). Its data: the count, then each
+    /// mark's x, y and colour.
+    pub(crate) const MARKS: &str = r#"(module
+        (memory (export "memory") 1)
+        (func $copy (param $to i32) (param $from i32) (param $len i32)
+            (local $i i32)
+            (block $done (loop $each
+                (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+                (i32.store (i32.add (local.get $to) (local.get $i)) (i32.load (i32.add (local.get $from) (local.get $i))))
+                (local.set $i (i32.add (local.get $i) (i32.const 4)))
+                (br $each))))
+        (func (export "procraft_canvas_new") (param i32 i32) (result i32)
+            (i32.store (i32.const 0) (i32.const 0))
+            (i32.store (i32.const 4) (i32.const 0x000000FF))
+            (i32.store (i32.const 8) (i32.const 0))
+            (i32.const 0))
+        (func (export "procraft_canvas_tool") (param $tool i32) (param $colour i32) (param f32) (param f32)
+            (i32.store (i32.const 8) (local.get $tool))
+            (i32.store (i32.const 4) (local.get $colour)))
+        (func (export "procraft_canvas_touch") (param $phase i32) (param $x f32) (param $y f32) (param f32) (result i32)
+            (local $n i32) (local $i i32) (local $keep i32) (local $at i32) (local $dx f32) (local $dy f32)
+            (local.set $n (i32.load (i32.const 0)))
+            ;; called off: as many marks as it began with
+            (if (i32.eq (local.get $phase) (i32.const 3))
+                (then
+                    (if (i32.lt_u (i32.load (i32.const 12)) (local.get $n))
+                        (then (i32.store (i32.const 0) (i32.load (i32.const 12))) (return (i32.const 1))))
+                    (return (i32.const 0))))
+            (if (i32.eqz (local.get $phase)) (then (i32.store (i32.const 12) (local.get $n))))
+            (if (i32.eq (i32.load (i32.const 8)) (i32.const 1))
+                (then
+                    (block $done (loop $each
+                        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+                        (local.set $at (i32.add (i32.const 64) (i32.mul (local.get $i) (i32.const 12))))
+                        (local.set $dx (f32.sub (f32.load (local.get $at)) (local.get $x)))
+                        (local.set $dy (f32.sub (f32.load offset=4 (local.get $at)) (local.get $y)))
+                        (if (f32.ge (f32.add (f32.mul (local.get $dx) (local.get $dx)) (f32.mul (local.get $dy) (local.get $dy))) (f32.const 64))
+                            (then
+                                (call $copy (i32.add (i32.const 64) (i32.mul (local.get $keep) (i32.const 12))) (local.get $at) (i32.const 12))
+                                (local.set $keep (i32.add (local.get $keep) (i32.const 1)))))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br $each)))
+                    (i32.store (i32.const 0) (local.get $keep))
+                    (return (i32.ne (local.get $keep) (local.get $n)))))
+            (if (i32.ge_u (local.get $n) (i32.const 256)) (then (return (i32.const 0))))
+            (local.set $at (i32.add (i32.const 64) (i32.mul (local.get $n) (i32.const 12))))
+            (f32.store (local.get $at) (local.get $x))
+            (f32.store offset=4 (local.get $at) (local.get $y))
+            (i32.store offset=8 (local.get $at) (i32.load (i32.const 4)))
+            (i32.store (i32.const 0) (i32.add (local.get $n) (i32.const 1)))
+            (i32.const 1))
+        (func (export "procraft_canvas_draw") (result i32)
+            (local $n i32) (local $i i32) (local $m i32) (local $o i32) (local $x f32) (local $y f32)
+            (local.set $n (i32.load (i32.const 0)))
+            (local.set $o (i32.const 8192))
+            (block $done (loop $each
+                (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+                (local.set $m (i32.add (i32.const 64) (i32.mul (local.get $i) (i32.const 12))))
+                (local.set $x (f32.load (local.get $m)))
+                (local.set $y (f32.load offset=4 (local.get $m)))
+                (i32.store (local.get $o) (i32.const 1))
+                (i32.store offset=4 (local.get $o) (i32.load offset=8 (local.get $m)))
+                (i32.store offset=8 (local.get $o) (i32.const 0))
+                (f32.store offset=12 (local.get $o) (f32.const 0))
+                (i32.store offset=16 (local.get $o) (i32.const 0))
+                (i32.store offset=20 (local.get $o) (i32.const 2))
+                (f32.store offset=24 (local.get $o) (f32.sub (local.get $x) (f32.const 5)))
+                (f32.store offset=28 (local.get $o) (f32.sub (local.get $y) (f32.const 5)))
+                (i32.store offset=32 (local.get $o) (i32.const 3))
+                (f32.store offset=36 (local.get $o) (f32.add (local.get $x) (f32.const 5)))
+                (f32.store offset=40 (local.get $o) (f32.sub (local.get $y) (f32.const 5)))
+                (i32.store offset=44 (local.get $o) (i32.const 3))
+                (f32.store offset=48 (local.get $o) (f32.add (local.get $x) (f32.const 5)))
+                (f32.store offset=52 (local.get $o) (f32.add (local.get $y) (f32.const 5)))
+                (i32.store offset=56 (local.get $o) (i32.const 3))
+                (f32.store offset=60 (local.get $o) (f32.sub (local.get $x) (f32.const 5)))
+                (f32.store offset=64 (local.get $o) (f32.add (local.get $y) (f32.const 5)))
+                (i32.store offset=68 (local.get $o) (i32.const 5))
+                (local.set $o (i32.add (local.get $o) (i32.const 72)))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $each)))
+            (i32.sub (local.get $o) (i32.const 8192)))
+        (func (export "procraft_canvas_out") (result i32) (i32.const 8192))
+        (func (export "procraft_canvas_save") (result i32)
+            (local $len i32)
+            (local.set $len (i32.mul (i32.load (i32.const 0)) (i32.const 12)))
+            (i32.store (i32.const 8192) (i32.load (i32.const 0)))
+            (call $copy (i32.const 8196) (i32.const 64) (local.get $len))
+            (i32.add (local.get $len) (i32.const 4)))
+        (func (export "procraft_canvas_in") (param i32) (result i32) (i32.const 40000))
+        (func (export "procraft_canvas_load") (result i32)
+            (local $n i32)
+            (local.set $n (i32.load (i32.const 40000)))
+            (if (i32.gt_u (local.get $n) (i32.const 256)) (then (return (i32.const 1))))
+            (i32.store (i32.const 0) (local.get $n))
+            (call $copy (i32.const 64) (i32.const 40004) (i32.mul (local.get $n) (i32.const 12)))
+            (i32.const 0)))"#;
 
     /// A picture: red across, green down, the hue in blue.
     pub(crate) const PICTURE: &str =

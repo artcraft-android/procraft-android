@@ -30,6 +30,8 @@ struct OnHook {
     /// On an event's hook: a copy of its code of its own for them, so that what an event calls in
     /// the app never waits on this one (its other hooks' copy).
     events: Option<Shared>,
+    /// The kinds of layer it adds (keys `<id>.<key>`), in its manifest's order.
+    layer_kinds: Vec<crate::PluginKind>,
 }
 
 #[derive(Default)]
@@ -455,7 +457,10 @@ impl Hooks {
         let at = working.on.partition_point(|p| p.id < id);
         let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
         let running = Arc::new(Mutex::new(running));
-        working.on.insert(at, OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None });
+        working.on.insert(
+            at,
+            OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None, layer_kinds: Vec::new() },
+        );
         self.rehook(&working);
     }
 
@@ -501,6 +506,65 @@ impl Hooks {
             None,
             |running, got| if got.is_some() { Ok(got) } else { running.picker_point(s, v) },
         )
+    }
+
+    /// The kinds of layer `id` adds, in its manifest's order.
+    pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.layer_kinds = kinds;
+        }
+    }
+
+    /// What a plugin on calls layers of `kind` (`<id>.<key>`), if one adds them.
+    pub(crate) fn layer_kind_label(&self, kind: &str) -> Option<String> {
+        if !self.has(Hook::Layers) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).map(|k| k.label.clone()))
+    }
+
+    /// What layers of `kind` can be exported as by the plugin on that adds them.
+    pub(crate) fn layer_kind_exports(&self, kind: &str) -> Vec<crate::PluginExport> {
+        if !self.has(Hook::Layers) {
+            return Vec::new();
+        }
+        let working = self.working();
+        working
+            .on
+            .iter()
+            .find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).map(|k| k.exports.clone()))
+            .unwrap_or_default()
+    }
+
+    /// What layers of `kind` are known by on their thumbnails, if a plugin on adds them and draws it.
+    pub(crate) fn layer_kind_badge(&self, kind: &str) -> Option<crate::PluginBadge> {
+        if !self.has(Hook::Layers) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).and_then(|k| k.badge.clone()))
+    }
+
+    /// `work` done by the plugin on that adds layers of `kind`, handed its code and the kind's place
+    /// among its kinds: none if no plugin on adds them, or it stopped (it goes off, and says why).
+    pub(crate) fn on_layer<T>(
+        &self,
+        kind: &str,
+        work: impl FnOnce(&mut Running, usize) -> Result<T, Stop>,
+    ) -> Option<T> {
+        if !self.has(Hook::Layers) {
+            return None;
+        }
+        let (id, running, index) = {
+            let working = self.working();
+            working.on.iter().find_map(|p| {
+                let index = p.layer_kinds.iter().position(|k| k.key == kind)?;
+                Some((p.id.clone(), Arc::clone(&p.running), index))
+            })?
+        };
+        let done = work(&mut at_work(&running), index);
+        done.inspect_err(|stop| self.stopped(&id, *stop)).ok()
     }
 
     /// The keys of `id`'s rows in the brush studio, in their order.
@@ -1288,16 +1352,22 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn the_vector_canvas_plugin_draws_strokes_in_the_brush_colour_and_undoes_them() {
-        let Some(s) = session() else { return };
-        let dir = store("vector-canvas");
+    /// Plugins with the artworks of marks (`MARKS`) on, going through a store `name` of their own,
+    /// and the kind those artworks are.
+    fn marking(name: &str) -> (String, Arc<Plugins>, String) {
+        let dir = store(name);
         let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
-        assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.vector-canvas";
-        assert!(plugins.set_on(id.to_owned(), true));
-        let kind = plugins.kinds().into_iter().find(|k| k.key == format!("{id}.vector")).expect("listed").key;
+        let file = crate::plugin_file::tests::marks_file(ID, json!([{ "key": "marks", "label": "Marks" }]));
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        (dir, plugins, format!("{ID}.marks"))
+    }
+
+    #[test]
+    fn a_plugin_s_artwork_draws_strokes_in_the_brush_colour_over_what_it_drew_and_undoes_them() {
+        let Some(s) = session() else { return };
+        let (dir, plugins, kind) = marking("plugin-artwork-marks");
+        let kind = plugins.kinds().into_iter().find(|k| k.key == kind).expect("listed").key;
         let canvas = plugins.open_canvas(kind.clone(), 200, 200, None).unwrap();
         assert!(s.attach_plugin_canvas(kind, canvas));
         s.set_color(0.0, 0.0, 1.0);
@@ -1334,13 +1404,7 @@ pub(crate) mod tests {
     #[test]
     fn a_plugin_s_artwork_keeps_its_layer_its_steps_and_its_data_honestly() {
         let Some(s) = session() else { return };
-        let dir = store("plugin-artwork-honest");
-        let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
-        assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.vector-canvas";
-        assert!(plugins.set_on(id.to_owned(), true));
-        let kind = format!("{id}.vector");
+        let (dir, plugins, kind) = marking("plugin-artwork-honest");
         let canvas = plugins.open_canvas(kind.clone(), 200, 200, None).unwrap();
         assert!(s.attach_plugin_canvas(kind.clone(), canvas));
         let art_layer = s.layers().iter().find(|l| l.current).unwrap().id;
@@ -1382,15 +1446,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_eraser_cuts_a_vector_stroke_on_the_canvas() {
+    fn a_plugin_s_artwork_is_told_the_eraser_and_takes_away_what_it_passes_over() {
         let Some(s) = session() else { return };
-        let dir = store("vector-eraser");
-        let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
-        assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.vector-canvas";
-        assert!(plugins.set_on(id.to_owned(), true));
-        let kind = format!("{id}.vector");
+        let (dir, plugins, kind) = marking("plugin-artwork-eraser");
         assert!(s.attach_plugin_canvas(kind.clone(), plugins.open_canvas(kind, 200, 200, None).unwrap()));
         s.set_color(0.0, 0.0, 1.0);
         s.set_brush_size(0.5);
@@ -1407,12 +1465,11 @@ pub(crate) mod tests {
         assert_eq!((alpha(&s, 60), alpha(&s, 100), alpha(&s, 140)), (255, 0, 255));
         s.undo();
         assert_eq!(alpha(&s, 100), 255);
-        // its switch turned on with the artwork open: the eraser takes the whole stroke at once
-        assert!(plugins.set_switch(format!("{id}.whole"), true));
-        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 80.0, 0.0)]);
-        s.stroke_add((1..10).map(|i| sample(100.0, 80.0 + i as f32 * 4.0, f64::from(i) * 8.0)).collect());
-        s.stroke_end(vec![sample(100.0, 120.0, 88.0)]);
-        assert_eq!((alpha(&s, 60), alpha(&s, 100), alpha(&s, 140)), (0, 0, 0), "all of it gone");
+        // painting again, it adds
+        s.set_tool(crate::ToolKind::Paint);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 20.0, 0.0)]);
+        s.stroke_end(vec![sample(100.0, 20.0, 8.0)]);
+        assert_eq!(picture(&s)[(20 * 200 + 100) * 4 + 3], 255);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

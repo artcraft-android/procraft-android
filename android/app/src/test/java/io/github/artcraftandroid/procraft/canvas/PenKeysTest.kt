@@ -2,6 +2,7 @@ package io.github.artcraftandroid.procraft.canvas
 
 import android.view.InputDevice
 import android.view.KeyEvent
+import android.view.MotionEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -64,5 +65,19 @@ class PenKeysTest {
         for (key in listOf(KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_MOVE_HOME, KeyEvent.KEYCODE_STYLUS_BUTTON_PRIMARY)) {
             assertNull(penKeyButton(key, pen, noLetters, "Smart Pen"))
         }
+    }
+
+    @Test
+    fun aPensButtonsArePressedAndLetGoByWhatItsEventsSay() {
+        val first = MotionEvent.BUTTON_STYLUS_PRIMARY
+        val second = MotionEvent.BUTTON_STYLUS_SECONDARY
+        val buttons = PenButtons()
+        assertEquals(first to 0, buttons.next(first, penIn = true))
+        // still held: nothing new; another button's state that isn't a pen's counts for nothing
+        assertEquals(0 to 0, buttons.next(first or MotionEvent.BUTTON_PRIMARY, penIn = true))
+        // a hand landing while it is held reads as none held, and lets nothing go
+        assertEquals(0 to 0, buttons.next(0, penIn = false))
+        assertEquals(second to first, buttons.next(second, penIn = true))
+        assertEquals(0 to second, buttons.next(0, penIn = true))
     }
 }

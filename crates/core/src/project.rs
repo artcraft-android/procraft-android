@@ -180,6 +180,9 @@ pub(crate) struct SaveSnapshot {
     reference_picture: Option<Arc<Vec<u8>>>,
     /// A plugin's artwork's data, if it is one.
     plugin_data: Option<Vec<u8>>,
+    /// The data of each plugin's layer (empty while it has none yet), for its file beside the
+    /// layer's pixels; those whose data couldn't be read left out.
+    layer_data: Vec<(LayerId, Arc<Vec<u8>>)>,
 }
 
 /// How much of a save's layers may still be on their way back from the GPU when the lock is let
@@ -198,6 +201,8 @@ pub(crate) struct Saved {
     autosave: u64,
     /// A hash of the Reference window's picture as the folder has it, if it has one.
     reference_picture: Option<u64>,
+    /// A hash of each plugin's layer's data as its file in the folder has it.
+    pub(crate) layer_data: std::collections::HashMap<LayerId, u64>,
 }
 
 impl Saved {
@@ -212,6 +217,7 @@ impl Saved {
         self.dir = dir.to_path_buf();
         self.layers.clear();
         self.reference_picture = None;
+        self.layer_data.clear();
     }
 
     /// Layer `id` read from its file, its pixels' [`pixels_hash`]: a save that finds it unchanged
@@ -335,6 +341,18 @@ impl crate::State {
                     if !changed_now.contains(&id) && known.contains_key(&id) && layer_path(dir, id).exists() {
                         continue;
                     }
+                    // its file couldn't be read (the layer shows empty): never written over until
+                    // the layer is painted on, and then kept aside first
+                    if self.unreadable.contains(&id) {
+                        if !changed_now.contains(&id) {
+                            continue;
+                        }
+                        let (from, to) = (layer_path(dir, id), unreadable_path(dir, id));
+                        if from.exists() && !to.exists() {
+                            fs::copy(&from, &to).map_err(|e| file_error("keeping a layer's unreadable file", e))?;
+                        }
+                        self.unreadable.remove(&id);
+                    }
                     let read = canvas.start_reading_layer(gpu, id).map_err(|e| file_error("reading a layer", e))?;
                     let after: usize = reading.iter().map(|(_, r): &(LayerId, procraft_gpu::Readback)| r.bytes()).sum();
                     if after + read.bytes() <= READ_AFTER_LOCK {
@@ -377,6 +395,16 @@ impl crate::State {
                 });
             }
         }
+        // one whose file couldn't be read, deleted: its file kept aside before the save tidies it
+        // away
+        let gone: Vec<LayerId> = self.unreadable.iter().copied().filter(|id| self.doc.layer(*id).is_none()).collect();
+        for id in gone {
+            let (from, to) = (layer_path(dir, id), unreadable_path(dir, id));
+            if from.exists() && !to.exists() {
+                fs::copy(&from, &to).map_err(|e| file_error("keeping a layer's unreadable file", e))?;
+            }
+            self.unreadable.remove(&id);
+        }
         let gpu = self.gpu.clone();
         let reference_picture = self.reference_picture.clone();
         let plugin_data = self
@@ -384,6 +412,13 @@ impl crate::State {
             .as_ref()
             .map(|a| a.kept.clone())
             .or_else(|| self.plugin_opened.as_ref().and_then(|o| o.data.clone()));
+        let layer_data = self
+            .doc
+            .layers()
+            .iter()
+            .filter(|l| !self.layer_data_unread.contains(&l.id))
+            .filter_map(|l| Some((l.id, l.plugin.as_ref()?.data.clone().unwrap_or_default())))
+            .collect();
         Ok(SaveSnapshot {
             changed: changed_ids,
             file,
@@ -396,6 +431,7 @@ impl crate::State {
             gpu,
             reference_picture,
             plugin_data,
+            layer_data,
         })
     }
 }
@@ -508,6 +544,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         gpu,
         reference_picture,
         plugin_data,
+        layer_data,
         ..
     } = snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
@@ -530,6 +567,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         saved.layers.clear();
         saved.sets.clear();
         saved.reference_picture = None;
+        saved.layer_data.clear();
     }
     let (w, h) = (file.document.width(), file.document.height());
     fs::create_dir_all(dir.join("layers")).map_err(|e| file_error("making the folder", e))?;
@@ -595,6 +633,17 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             });
             stage(written, picture_path, &mut staged)?;
         }
+        // plugins' layers' data, each whole, unless its file there has it already
+        for (id, data) in &layer_data {
+            let path = layer_data_path(dir, *id);
+            if saved.layer_data.get(id) == Some(&pixels_hash(data)) && path.exists() {
+                continue;
+            }
+            let written = write_beside(&path, |p| {
+                fs::write(p, data.as_slice()).map_err(|e| file_error("writing a layer's plugin data", e))
+            });
+            stage(written, path, &mut staged)?;
+        }
         // a plugin's artwork's own data, whole, before the document that names its kind
         if let Some(data) = plugin_data.as_deref() {
             let path = dir.join(PLUGIN_DATA);
@@ -623,6 +672,9 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     for (id, hash, _) in &layers {
         saved.layers.insert(*id, *hash);
     }
+    for (id, data) in &layer_data {
+        saved.layer_data.insert(*id, pixels_hash(data));
+    }
     // a picture taken away goes once the document without it is in place
     saved.reference_picture = reference_picture.as_deref().map(|png| pixels_hash(png));
     if reference_picture.is_none() {
@@ -635,8 +687,15 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     // layer files the document no longer has (and any left beside by a save cut short), now that
     // the document saying so is in place
     saved.layers.retain(|id, _| file.document.layer(*id).is_some());
+    saved.layer_data.retain(|id, _| file.document.layer(*id).is_some());
     if let Ok(entries) = fs::read_dir(dir.join("layers")) {
-        let keep: Vec<PathBuf> = file.document.layer_ids().map(|id| layer_path(dir, id)).collect();
+        // (a plugin's layer's data file stays while the layer is there, even one never read, under
+        // its earlier name until there is one under its own)
+        let plugins = file.document.layers().iter().filter(|l| l.plugin.is_some()).map(|l| {
+            let path = layer_data_path(dir, l.id);
+            if path.exists() { path } else { old_layer_data_path(dir, l.id) }
+        });
+        let keep: Vec<PathBuf> = file.document.layer_ids().map(|id| layer_path(dir, id)).chain(plugins).collect();
         for entry in entries.flatten() {
             let path = entry.path();
             if !keep.contains(&path) {
@@ -729,18 +788,43 @@ impl CanvasSession {
                 reason: format!("not an artwork this version can open ({} {})", file.format, file.version),
             });
         }
-        let doc = file.document.repaired();
+        let mut doc = file.document.repaired();
+        // plugins' layers' data, as it is (an empty file: none yet). One whose file is gone or can't
+        // be read takes no strokes, which would draw it again without what its pixels show, and
+        // its file is left as it is
+        let mut data_hashes = Vec::new();
+        let mut data_unread = Vec::new();
+        let plugin_layers: Vec<LayerId> = doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
+        for id in plugin_layers {
+            let path = layer_data_path(&dir, id);
+            let path = if path.exists() { path } else { old_layer_data_path(&dir, id) };
+            match fs::read(&path).or_else(|_| fs::read(&path)) {
+                Ok(bytes) => {
+                    data_hashes.push((id, pixels_hash(&bytes)));
+                    doc.set_plugin_data(id, Some(Arc::new(bytes)).filter(|b| !b.is_empty()));
+                }
+                Err(e) => {
+                    log::error!("layer {id:?}'s plugin data: {e}");
+                    data_unread.push(id);
+                }
+            }
+        }
         // each layer's file as it is, decoded as it goes to the GPU
         let mut pngs = Vec::new();
+        let mut unread = Vec::new();
         for layer in doc.layers() {
             let path = layer_path(&dir, layer.id);
             // a layer with no file is empty
             if !path.exists() {
                 continue;
             }
-            match fs::read(&path) {
+            // (tried twice: the file is there)
+            match fs::read(&path).or_else(|_| fs::read(&path)) {
                 Ok(bytes) => pngs.push((layer.id, Opened::Png(bytes))),
-                Err(e) => log::error!("layer {:?}: {e}", layer.id),
+                Err(e) => {
+                    log::error!("layer {:?}: {e}", layer.id);
+                    unread.push(layer.id);
+                }
             }
         }
         let scene = file.model.as_ref().map(|m| crate::scene3d::open_saved_model(&dir, m)).transpose()?;
@@ -751,10 +835,13 @@ impl CanvasSession {
             let mut saving = session.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
             saving.opened(&dir);
             saving.reference_picture = reference_picture.as_deref().map(pixels_hash);
+            saving.layer_data.extend(data_hashes);
         }
         {
             let mut st = session.shared.lock();
             st.pending_pixels = pngs;
+            st.layers_unread(unread);
+            st.layer_data_unread.extend(data_unread);
             st.info = file.info;
             st.saved_view = file.view;
             st.scene = scene;
@@ -1291,6 +1378,17 @@ fn layer_path(dir: &Path, id: LayerId) -> PathBuf {
     dir.join("layers").join(format!("{}.png", id.0))
 }
 
+/// Where a plugin's layer's data is kept, beside its pixels.
+pub(crate) fn layer_data_path(dir: &Path, id: LayerId) -> PathBuf {
+    dir.join("layers").join(format!("{}.layerdata", id.0))
+}
+
+/// Where earlier versions kept it: read when the file above isn't there, and left until a save
+/// writes that.
+fn old_layer_data_path(dir: &Path, id: LayerId) -> PathBuf {
+    dir.join("layers").join(format!("{}.vector", id.0))
+}
+
 /// What the apps say when saving an artwork failed for `reason` (a save's error).
 #[uniffi::export]
 pub fn save_failure_said(reason: String) -> String {
@@ -1382,18 +1480,43 @@ pub(crate) fn opened(layers: Vec<(LayerId, Vec<u8>)>) -> Vec<(LayerId, Opened)> 
     layers.into_iter().map(|(id, rgba)| (id, Opened::Pixels(rgba))).collect()
 }
 
-/// Waiting layers' pixels, `width` × `height`; one that can't be read is left out.
-pub(crate) fn opened_pixels(layers: Vec<(LayerId, Opened)>, width: u32, height: u32) -> Vec<(LayerId, Vec<u8>)> {
-    layers
+/// Waiting layers' pixels, `width` × `height`, and the layers that couldn't be read (left out).
+pub(crate) fn opened_pixels(
+    layers: Vec<(LayerId, Opened)>,
+    width: u32,
+    height: u32,
+) -> (Vec<(LayerId, Vec<u8>)>, Vec<LayerId>) {
+    let mut unread = Vec::new();
+    let pixels = layers
         .into_iter()
         .filter_map(|(id, layer)| match layer.pixels(width, height) {
             Ok(rgba) => Some((id, rgba)),
             Err(e) => {
                 log::error!("layer {id:?}: {e}");
+                unread.push(id);
                 None
             }
         })
-        .collect()
+        .collect();
+    (pixels, unread)
+}
+
+/// The layers named `names` couldn't be read, as the app tells it.
+pub(crate) fn unreadable_said(names: &[String]) -> String {
+    match names {
+        [one] => format!("The layer “{one}” couldn't be read and shows empty. Its file is kept as it was."),
+        _ => format!(
+            "{} layers couldn't be read and show empty: {}. Their files are kept as they were.",
+            names.len(),
+            names.join(", ")
+        ),
+    }
+}
+
+/// Where a layer's file that couldn't be read is kept once the layer is painted on: beside the
+/// layers (whose folder a save tidies), never written over.
+pub(crate) fn unreadable_path(dir: &Path, id: LayerId) -> PathBuf {
+    dir.join(format!("unreadable-{}.png", id.0))
 }
 
 /// A PNG's RGBA8 pixels, which must be `width` × `height`.
@@ -1599,6 +1722,7 @@ pub fn import_pages(
             text: None,
             private: false,
             assisted: false,
+            plugin: None,
         });
     }
     let mut doc = Document::from_layers(w, h, layers, LayerId(1));

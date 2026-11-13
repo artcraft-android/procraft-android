@@ -95,6 +95,8 @@ pub enum Act {
     ImportPlugin,
     /// A plugin's action tapped on its card: [`ActionsPanel::take_plugin_action`] says which.
     PluginAction,
+    /// A file a plugin makes of the artwork's layers, by its place in [`Showing::plugin_exports`].
+    PluginExport(u8),
     GestureControls,
     CanvasInfo,
     AnimationAssist,
@@ -266,6 +268,20 @@ pub struct Showing {
     pub paint_through: bool,
     /// The artwork is a plugin's: Share Image offers SVG too.
     pub svg: bool,
+    /// What Share Image calls the files plugins make of the artwork's layers of kinds they add.
+    pub plugin_exports: Vec<String>,
+}
+
+/// `label` for as long as the app runs, each once: a row's words are kept so.
+fn kept_label(label: &str) -> &'static str {
+    static KEPT: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut kept = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = kept.iter().find(|k| **k == label) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(label.to_owned().into_boxed_str());
+    kept.push(leaked);
+    leaked
 }
 
 /// The groups of rows of tab `tab`.
@@ -330,6 +346,15 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ]
             .into_iter()
             .chain(showing.svg.then_some(Button("SVG", None, Some(Act::Share(Format::Svg)))))
+            // files plugins make of the artwork's layers, under their own names
+            .chain(
+                showing
+                    .plugin_exports
+                    .iter()
+                    .enumerate()
+                    .take(usize::from(u8::MAX))
+                    .map(|(i, label)| Button(kept_label(label), None, Some(Act::PluginExport(i as u8)))),
+            )
             .collect(),
             vec![
                 Heading("Share Layers"),
@@ -1980,6 +2005,7 @@ mod tests {
             brush_controls: Vec::new(),
             actions: Vec::new(),
             kinds: Vec::new(),
+            layer_kinds: Vec::new(),
             permissions: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),

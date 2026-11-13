@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.vector-layers",
+  "name": "Vector layers",
+  "version": "1.2.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Layers whose strokes stay strokes: drawn with any brush, then moved, restyled, cut or hidden as strokes, and filled by dropping a colour in them.",
+  "compat": { "procraft": { "interface": 3 } },
+  "permissions": [],
+  "hooks": [],
+  "layer_kinds": [
+    {
+      "key": "vector",
+      "label": "Vector layer",
+      "badge": {
+        "lines": [{ "points": [0.22, 0.72, 0.38, 0.05, 0.62, 0.95, 0.78, 0.28], "curved": true }],
+        "dots": [0.22, 0.72, 0.78, 0.28]
+      },
+      "exports": [{ "key": "svg", "label": "SVG (vector layers)", "extension": "svg", "mime": "image/svg+xml" }]
+    }
+  ],
+  "controls": [
+    { "key": "eraser", "type": "slider", "label": "Eraser", "least": 0, "most": 3, "step": 1, "starts": 0, "names": ["Mask", "Whole", "Cut", "Soft mask"] },
+    { "key": "touching", "type": "switch", "label": "Selections take touching strokes", "starts": false },
+    { "key": "masks", "type": "switch", "label": "Selections take masks", "starts": true },
+    { "key": "gaps", "type": "slider", "label": "Fills close gaps", "least": 0, "most": 32, "step": 1, "starts": 6, "unit": " px", "at_least": "Off" },
+    { "key": "nudge", "type": "switch", "label": "Smudge nudges strokes", "starts": true }
+  ]
+}

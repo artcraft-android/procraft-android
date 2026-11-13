@@ -9,6 +9,9 @@ struct DisplayUniform {
     c0: vec4<f32>,
     c1: vec4<f32>,
     c2: vec4<f32>,
+    // how far the quad reaches past the canvas's sides (its 0..1 across and down), then 1 to
+    // smooth the edge over that; all 0 for a quad drawn exactly
+    edge: vec4<f32>,
 }
 
 @group(0) @binding(0) var composite: texture_2d<f32>;
@@ -31,7 +34,8 @@ fn vs_display(@builtin(vertex_index) vi: u32) -> Out {
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
     );
-    let uv = corners[vi % 6u];
+    // pushed out past each side as far as the edge is smoothed (not at all for a quad drawn exactly)
+    let uv = corners[vi % 6u] * (1.0 + 2.0 * du.edge.xy) - du.edge.xy;
     var o: Out;
     o.pos = vec4<f32>(du.m0.x * uv.x + du.m0.z * uv.y + du.m1.x, du.m0.y * uv.x + du.m0.w * uv.y + du.m1.y, 0.0, 1.0);
     o.uv = uv;
@@ -52,7 +56,14 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_display(i: Out) -> @location(0) vec4<f32> {
-    return shown(textureSample(composite, smp, i.uv));
+    // how much of this target pixel the canvas covers, by how far in from each side its middle
+    // is (in target pixels): a turned canvas's sides show no steps
+    let across = length(vec2<f32>(dpdx(i.uv.x), dpdy(i.uv.x)));
+    let down = length(vec2<f32>(dpdx(i.uv.y), dpdy(i.uv.y)));
+    let inside = min(i.uv, vec2<f32>(1.0) - i.uv) / max(vec2<f32>(across, down), vec2<f32>(1e-9));
+    let covered = clamp(inside + 0.5, vec2<f32>(0.0), vec2<f32>(1.0));
+    let cover = select(1.0, covered.x * covered.y, du.edge.z > 0.5);
+    return shown(textureSample(composite, smp, i.uv)) * cover;
 }
 
 // a canvas colour (premultiplied) as the target shows it

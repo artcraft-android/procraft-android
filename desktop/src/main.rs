@@ -13,7 +13,6 @@ mod animation;
 mod canvas_info;
 mod chrome;
 mod colour_drop;
-mod colour_models;
 mod colours;
 mod compact_colours;
 mod companion;
@@ -1393,6 +1392,12 @@ impl App {
             }
             Action::Export(format, pdf_quality) => {
                 files::export(session, format, self.ui.artwork_dir.as_deref(), pdf_quality, &mut self.ui.export_card);
+                None
+            }
+            Action::PluginExport(i) => {
+                if let Some(export) = session.plugin_exports().into_iter().nth(usize::from(i)) {
+                    files::export_plugin(session, &export.key, &mut self.ui.export_card);
+                }
                 None
             }
         };

@@ -94,6 +94,8 @@ object Pc {
     val BrushColumn: Color get() = pick(0x26000000, 0xFFE0E0E0)
     val Grabber: Color get() = pick(0x7AC6C6C6, 0xFFB0B0B0)
     val SwatchEdge: Color get() = pick(0xFF5A5A5A, 0xFFC0C0C0)
+    /** The colour model's button left of the colour panel's swatches. */
+    val ModelButton: Color get() = pick(0xFF3A3A3A, 0xFFDCDCDC)
     val SaturationGrey = Color(0xFF7F7F7F)
     val ClearText: Color get() = pick(0xFFB5B5B5, 0xFF4A4A4A)
     val EmptySwatch: Color get() = pick(0xFF2A2A2A, 0xFFD9D9D9)

@@ -134,6 +134,24 @@ impl ShapeEdit {
     pub(crate) fn can_redo(&self) -> bool {
         !self.later.is_empty()
     }
+
+    /// The samples its stroke is drawn along: its outline, the pen doing as it did along the stroke
+    /// it was made of. An ellipse goes where the stroke went, each of its points taken onto it: a
+    /// stroke that didn't close stays open there, as drawn, rather than meeting itself in a seam.
+    pub(crate) fn samples(&self) -> Vec<Sample> {
+        let outline = match self.shape.kind {
+            ShapeKind::Ellipse | ShapeKind::Circle => {
+                along_ellipse(&self.shape.nodes, &self.drawn).unwrap_or_else(|| self.shape.outline())
+            }
+            _ => self.shape.outline(),
+        };
+        resample(&outline, &self.along)
+    }
+
+    /// Its kind as a plugin is told it, and its nodes (canvas pixels).
+    pub(crate) fn geometry(&self) -> (u8, Vec<Vec2>) {
+        (u8::try_from(shape_number(self.shape.kind)).unwrap_or(0), self.shape.nodes.clone())
+    }
 }
 
 /// A stroke made a shape, as it can be laid again: where, its builder as it began and its input.
@@ -203,6 +221,9 @@ impl LastStroke {
         Some(DrawnStroke { layer: self.layer, style: self.style, builder, samples })
     }
 }
+
+/// What a shape's stroke's randomness is seeded with.
+pub(crate) const SHAPE_SEED: u32 = 0x5eed_1234;
 
 /// The outline is redrawn with samples this far apart (canvas pixels), at the pace its stroke was
 /// drawn: this if that isn't known (canvas pixels a millisecond).
@@ -303,18 +324,10 @@ impl State {
     fn draw_shape(&mut self) {
         let (Some(edit), Some(old)) = (self.shape.as_ref(), self.stroke.as_ref()) else { return };
         // the outline is the path: nothing smooths it, or round its corners
-        let mut builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), 0x5eed_1234)
+        let mut builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), SHAPE_SEED)
             .scaled(self.brush_scale())
             .exact_path();
-        // an ellipse goes where the stroke went, each of its points taken onto it: a stroke that
-        // didn't close stays open there, as drawn, rather than meeting itself in a seam
-        let outline = match edit.shape.kind {
-            ShapeKind::Ellipse | ShapeKind::Circle => {
-                along_ellipse(&edit.shape.nodes, &edit.drawn).unwrap_or_else(|| edit.shape.outline())
-            }
-            _ => edit.shape.outline(),
-        };
-        let samples = resample(&outline, &edit.along);
+        let samples = edit.samples();
         builder.add(&samples);
         let stamps = builder.finish();
         // with a symmetry guide on, its copies too, as the stroke had them and as it is kept
@@ -657,6 +670,9 @@ impl CanvasSession {
         }
         st.flush();
         let last = st.last_stroke.take()?;
+        if st.plugin_layer_kind(last.layer).is_some() {
+            return None;
+        }
         let line = st.without_end_hook(last.shape_line(&last.samples, &last.drawn));
         let canvas = st.canvas.as_mut()?;
         if canvas.steps_made() != last.steps || canvas.can_redo() {
@@ -672,7 +688,7 @@ impl CanvasSession {
         let stroke = last.laid_again(last.samples.clone());
         let along = StrokeAlong::of(&last.samples, last.pace);
         st.stroke =
-            Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234).scaled(scale));
+            Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), SHAPE_SEED).scaled(scale));
         st.second = None;
         st.shape = Some(ShapeEdit::new(first, choices, line, along, None, stroke));
         st.draw_shape();

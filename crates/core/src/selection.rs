@@ -66,7 +66,7 @@ impl State {
 
     /// Joins `shape` to the selection; `record` makes it an undo step (otherwise it is only shown,
     /// as while a colour threshold is dragged).
-    fn join(&mut self, shape: Mask, how: SelectionJoin, record: bool) {
+    pub(crate) fn join(&mut self, shape: Mask, how: SelectionJoin, record: bool) {
         self.feather_base = None;
         let before = self.selection.clone();
         match (self.selection.as_mut(), how) {
@@ -148,8 +148,9 @@ impl CanvasSession {
         self.select_window_polygon(&window, join);
     }
 
-    /// Selects by colour: the pixels of the current layer joined to window point (`x`, `y`) whose
-    /// colour is within `threshold` (0..1) of its colour join the selection. While `live` (the
+    /// Selects by colour: the pixels of the current layer (or of the reference layer, when another
+    /// layer is it, as ColorDrop reads) joined to window point (`x`, `y`) whose colour is within
+    /// `threshold` (0..1) of its colour join the selection. While `live` (the
     /// threshold being dragged) each call replaces the last one's shape; the last call is not live.
     pub fn select_by_colour(&self, x: f32, y: f32, threshold: f32, join: SelectionJoin, live: bool) {
         let mut guard = self.shared.lock();
@@ -161,7 +162,9 @@ impl CanvasSession {
             Some((px, flood)) if flood.seed() == seed => (px, Some(flood)),
             Some((px, _)) => (px, None),
             None => {
-                let Some(px) = st.current_pixels() else { return };
+                let current = st.doc.current();
+                let source = st.doc.reference().filter(|&r| r != current).unwrap_or(current);
+                let Some(px) = st.layer_pixels(source) else { return };
                 st.selection_before = Some(st.selection.clone());
                 (px, None)
             }
@@ -344,7 +347,7 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let current = st.doc.current();
-        if st.doc.layer(current).is_none() || st.doc.is_locked(current) {
+        if st.doc.layer(current).is_none_or(|l| l.plugin.is_some()) || st.doc.is_locked(current) {
             return;
         }
         let Some(mask) = st.selection.clone() else { return };

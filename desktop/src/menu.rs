@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use egui::emath::TSTransform;
-use egui::{Align2, Id, LayerId, Order, Pos2, Rect, Sense, Ui, pos2, vec2};
+use egui::{Align2, Id, LayerId, Order, Pos2, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, cubic_bezier, text};
@@ -31,6 +31,10 @@ pub const EDGE: u32 = 0xFF5A5D5F;
 pub const RULE: u32 = 0xFF3F4347;
 pub const DANGER: Themed = Themed(0xFFE84F51, 0xFFD93A3D);
 pub const ITEM_HEIGHT: f32 = 40.0;
+/// A plugin's badge as an item's glyph: its box 1.6 times a layer thumbnail's (18 by 14), its
+/// lines as thick as the menu glyphs'.
+const BADGE_BOX: Vec2 = vec2(28.8, 22.4);
+const BADGE_LINE: f32 = 2.4;
 
 /// How a menu looks: its fill, an edge round it, whether the canvas is frosted behind it, how
 /// round it is, and whether it casts a shadow.
@@ -238,6 +242,8 @@ pub enum Entry<'a> {
     Item(&'a icons::Icon, &'a str, Themed),
     /// An item that opens more (a chevron at its end).
     More(&'a icons::Icon, &'a str, Themed),
+    /// An item whose glyph is a plugin's badge, drawn as on a layer's thumbnail.
+    Badge(procraft_core::PluginBadge, &'a str, Themed),
     Rule(f32),
 }
 
@@ -250,7 +256,7 @@ pub fn entries_height(entries: &[Entry]) -> f32 {
         + entries
             .iter()
             .map(|e| match e {
-                Entry::Item(..) | Entry::More(..) => ITEM_HEIGHT,
+                Entry::Item(..) | Entry::More(..) | Entry::Badge(..) => ITEM_HEIGHT,
                 Entry::Rule(gap) => 1.0 + gap * 2.0,
             })
             .sum::<f32>()
@@ -262,11 +268,19 @@ pub fn entries(ui: &Ui, look: &mut Look, rect: Rect, entries: &[Entry]) -> Optio
     let mut tapped = None;
     for (i, e) in entries.iter().enumerate() {
         match e {
-            Entry::Item(icon, label, ink) | Entry::More(icon, label, ink) => {
+            Entry::Item(_, label, ink) | Entry::More(_, label, ink) | Entry::Badge(_, label, ink) => {
                 let row = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), ITEM_HEIGHT));
                 // its icon (a 40 frame) centred 29.5 in, the label from 52
                 let ink = argb(*ink);
-                look.icon(ui, icon, pos2(row.left() + 29.5, row.center().y), 40.0, ink);
+                let glyph = pos2(row.left() + 29.5, row.center().y);
+                match e {
+                    Entry::Item(icon, ..) | Entry::More(icon, ..) => look.icon(ui, icon, glyph, 40.0, ink),
+                    Entry::Badge(badge, ..) => {
+                        let area = Rect::from_center_size(glyph, BADGE_BOX);
+                        crate::layers::badge_drawing(ui.painter(), area, badge, ink, BADGE_LINE);
+                    }
+                    Entry::Rule(_) => {}
+                }
                 text(
                     ui.painter(),
                     pos2(row.left() + 52.0, row.center().y),
@@ -300,7 +314,7 @@ pub fn entry_top(entries: &[Entry], index: usize) -> f32 {
         .iter()
         .take(index)
         .map(|e| match e {
-            Entry::Item(..) | Entry::More(..) => ITEM_HEIGHT,
+            Entry::Item(..) | Entry::More(..) | Entry::Badge(..) => ITEM_HEIGHT,
             Entry::Rule(gap) => 1.0 + gap * 2.0,
         })
         .sum::<f32>()

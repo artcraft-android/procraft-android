@@ -754,7 +754,7 @@ const ROW_CHOSEN: &str = "deselect material layer";
 
 /// The step undone (true) or redone by work on `canvas`, from its next undo and redo steps
 /// `before` it.
-fn stepped(before: (Option<u64>, Option<u64>), canvas: &Canvas) -> Option<(u64, bool)> {
+pub(crate) fn stepped(before: (Option<u64>, Option<u64>), canvas: &Canvas) -> Option<(u64, bool)> {
     match (before, (canvas.undo_step(), canvas.redo_step())) {
         ((Some(s), _), (u, Some(r))) if r == s && u != Some(s) => Some((s, true)),
         ((_, Some(s)), (Some(u), r)) if u == s && r != Some(s) => Some((s, false)),
@@ -2766,7 +2766,7 @@ impl State {
         let mut old = TextureSet {
             doc: std::mem::replace(&mut self.doc, Document::new(1, 1)),
             canvas: self.canvas.take(),
-            pending: crate::project::opened_pixels(std::mem::take(&mut self.pending_pixels), side, side),
+            pending: crate::project::opened_pixels(std::mem::take(&mut self.pending_pixels), side, side).0,
             fill: None,
         };
         if let Some(gpu) = self.gpu.as_ref() {
@@ -3122,7 +3122,7 @@ impl State {
         let mut old = TextureSet {
             doc: std::mem::replace(&mut self.doc, set.doc),
             canvas: std::mem::replace(&mut self.canvas, set.canvas),
-            pending: crate::project::opened_pixels(pending, w, h),
+            pending: crate::project::opened_pixels(pending, w, h).0,
             fill: None,
         };
         if let Some(gpu) = self.gpu.as_ref() {

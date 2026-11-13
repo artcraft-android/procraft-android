@@ -27,6 +27,10 @@ import io.github.artcraftandroid.procraft.core.BrushInfo
 import io.github.artcraftandroid.procraft.core.BrushSetInfo
 import io.github.artcraftandroid.procraft.core.RecentBrush
 import io.github.artcraftandroid.procraft.core.CanvasSession
+import io.github.artcraftandroid.procraft.core.ColourModel
+import io.github.artcraftandroid.procraft.core.ColourPlace
+import io.github.artcraftandroid.procraft.core.colourModelKey
+import io.github.artcraftandroid.procraft.core.colourModelOfKey
 import io.github.artcraftandroid.procraft.core.ModelFile
 import io.github.artcraftandroid.procraft.core.SourceKind
 import io.github.artcraftandroid.procraft.core.ChromaticKind
@@ -167,7 +171,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var opening by mutableStateOf(false)
         private set
-    var message by mutableStateOf<String?>(null)
+    private var messageText by mutableStateOf<String?>(null)
+
+    /**
+     * How many messages have been given: work that tells why it couldn't be done shows here even
+     * once its message has been shown and cleared, or when it repeats the one still showing.
+     */
+    private var messagesGiven = 0
+
+    /** A passing message to show; each one given is counted (see [messagesGiven]). */
+    var message: String?
+        get() = messageText
+        set(text) {
+            if (text != null) messagesGiven++
+            messageText = text
+        }
     private var artworkDir: File? = null
 
     /** A save failed and was told of: the next failure isn't, until one succeeds again. */
@@ -283,6 +301,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             colorModeState = mode
             interfacePrefs.edit().putInt(COLOR_MODE, mode.ordinal).apply()
         }
+
+    /**
+     * The colour model the colour panel's disc, Classic and Value work in (HSB, the panel's own,
+     * unless another is chosen on its model button), kept from one session to the next.
+     */
+    var colourModel by mutableStateOf(interfacePrefs.getString(COLOUR_MODEL, null)?.let(::colourModelOfKey) ?: ColourModel.HSB)
+        private set
+
+    fun changeColourModel(model: ColourModel) {
+        colourModel = model
+        interfacePrefs.edit().putString(COLOUR_MODEL, colourModelKey(model)).apply()
+    }
+
+    /** Where the colour painted with stands in [colourModel], kept while it is still the colour. */
+    val colourPlace = ColourPlace()
 
     /** The side bar on the right edge instead of the left. */
     var rightHanded by mutableStateOf(interfacePrefs.getBoolean(RIGHT_HANDED, false))
@@ -822,6 +855,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var colorFill by mutableStateOf(false)
         private set
     var hasSelection by mutableStateOf(false)
+        private set
+    /** While the selection tool is open on a plugin's layer: the box round the strokes the selection takes (four corners, x then y, canvas pixels), else empty. */
+    var takenBox by mutableStateOf<List<Float>>(emptyList())
         private set
     private var selectionPopupState by mutableStateOf(SelectionPopup.NONE)
     /** The popover over the selection toolbar; closing the feather popover keeps its feathering as one undo step. */
@@ -1886,7 +1922,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         importMade.clear()
         importStep = 0f
         importShown = ImportShown(name, 0f)
-        val told = message
+        // counted, not compared: the canvas shows a message and clears it at once, which can come
+        // before the work's end is looked at here
+        val told = messagesGiven
         val following = viewModelScope.launch {
             var creep = 0f
             while (true) {
@@ -1905,7 +1943,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 return null
             }
             // full, then the check drawn in it before the card goes
-            if (message == told) {
+            if (messagesGiven == told) {
                 importShown = ImportShown(name, 1f, done = true)
                 kotlinx.coroutines.delay(EXPORT_DONE_MS)
             }
@@ -2497,14 +2535,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = s.guide()
     }
 
-    /** The canvas view's ear for a pen's side button that comes as a key (true: the second). */
-    var penKeyHeard: ((second: Boolean) -> Unit)? = null
+    /** The canvas view's ear for a pen's side button that comes as a key (true: the second), and what it did. */
+    var penKeyHeard: ((second: Boolean, action: PenKeyAction) -> Unit)? = null
 
     /** A pen's side button came as a key (see [penKeyButton]): true if a canvas took it. */
-    fun penKey(second: Boolean): Boolean {
+    fun penKey(second: Boolean, action: PenKeyAction = PenKeyAction.PRESSED): Boolean {
         if (screen != Screen.CANVAS || session == null) return false
         val heard = penKeyHeard ?: return false
-        heard(second)
+        heard(second, action)
         return true
     }
 
@@ -2733,6 +2771,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readSliders()
         refresh()
         brushSets = s.brushLibrary()
+        readLibraries()
         readSetChoices()
         currentBrush = s.currentBrush()
         screen = Screen.CANVAS
@@ -3035,7 +3074,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             pluginPanelKey(io.github.artcraftandroid.procraft.core.KeyCombo(name, ctrl, shift, alt))
             return true
         }
-        when (val shortcut = plugins.keyShortcut(name, ctrl, shift, alt, transforming) ?: return false) {
+        // the arrows move what is transformed, or the strokes the selection takes
+        val nudges = transforming || takenBox.isNotEmpty()
+        when (val shortcut = plugins.keyShortcut(name, ctrl, shift, alt, nudges) ?: return false) {
             KeyShortcut.Undo -> undo()
             KeyShortcut.Redo -> redo()
             KeyShortcut.CopyLayer -> copyLayer()
@@ -3061,7 +3102,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             KeyShortcut.QuickMenu -> toggleQuickMenu(screenCentre)
             KeyShortcut.GreyView -> session?.let { it.setGreyView(!it.greyView()) }
             is KeyShortcut.BrushSize -> changeSize((size + shortcut.by).coerceIn(0f, 1f))
-            is KeyShortcut.Nudge -> session?.transformArrow(shortcut.dx, shortcut.dy)?.let { transformMoved(it) }
+            is KeyShortcut.Nudge -> if (transforming) {
+                session?.transformArrow(shortcut.dx, shortcut.dy)?.let { transformMoved(it) }
+            } else if (session?.nudgePluginItems(shortcut.dx, shortcut.dy) == true) {
+                refresh()
+            }
         }
         return true
     }
@@ -4430,7 +4475,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun rasterize(l: LayerInfo) {
         layerChange { it.rasterizeLayer(l.id) }
-        showNotice("Text rasterized", warning = true)
+        showNotice(if (l.text) "Text rasterized" else "Layer rasterized", warning = true)
+    }
+
+    /**
+     * A plugin's layer [l]: the strokes the selection takes (every one with nothing selected) given
+     * the paint colour ([colour]), or the paint brush with its size and opacity, as strokes.
+     */
+    fun restyleStrokes(l: LayerInfo, colour: Boolean) = layerChange {
+        it.selectLayer(l.id)
+        it.restylePluginItems(colour, !colour, !colour, !colour)
     }
 
     // editing the library
@@ -4448,6 +4502,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pickedBrushes.clear()
         previewRound++
         brushSets = s.brushLibrary()
+        readLibraries()
         currentBrush = s.currentBrush()
         readSetChoices()
         if (shownSet != RECENT_SET) shownSet = shownSet.coerceIn(0, (brushSets.size - 1).coerceAtLeast(0))
@@ -4456,18 +4511,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         previews.clear()
         shadedNames.clear()
         keepBrushLibrary(s)
-    }
-
-    /** The brushes the app comes with that were deleted, back where they ship; said how many. */
-    fun restoreShippedBrushes() {
-        val s = session ?: return
-        val back = s.restoreShippedBrushes().toInt()
-        if (back > 0) libraryChanged()
-        message = when (back) {
-            0 -> "Every brush ProCraft comes with is in the library."
-            1 -> "1 brush is back."
-            else -> "$back brushes are back."
-        }
     }
 
     fun duplicateBrush(b: BrushInfo) {
@@ -4536,6 +4579,93 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         studioNew = true
         openStudio()
     }
+
+    /** Every brush library, the one in use among them: for the libraries' cards and the title. */
+    var brushLibraries by mutableStateOf<List<io.github.artcraftandroid.procraft.core.BrushLibraryInfo>>(emptyList())
+        private set
+
+    /** The library popover shows every library's card rather than the one in use. */
+    var showingLibraries by mutableStateOf(false)
+
+    /** The library whose name is being edited (its place), if one is. */
+    var renamingLibrary by mutableStateOf<Int?>(null)
+
+    /** The library to delete (its place), once that is confirmed. */
+    var deletingLibrary by mutableStateOf<Int?>(null)
+
+    /** The library in use's name, and its place. */
+    val libraryName: String get() = brushLibraries.firstOrNull { it.current }?.name ?: "Brush library"
+    val libraryPlace: Int get() = brushLibraries.indexOfFirst { it.current }.coerceAtLeast(0)
+
+    private fun readLibraries() {
+        brushLibraries = session?.brushLibraries().orEmpty()
+        // the cards' strokes go by place, which may have changed
+        cardPreviews.clear()
+        cardPreviewsLoading.clear()
+    }
+
+    /** Library cards' brush strokes, drawn small, by "library-set-index". */
+    val cardPreviews = mutableStateMapOf<String, ImageBitmap>()
+    private val cardPreviewsLoading = HashSet<String>()
+
+    /** Renders brush [index] of set [set] of library [library] small for its card, once, off the main thread. */
+    fun loadCardPreview(library: Int, set: Int, index: Int) {
+        val key = "$library-$set-$index"
+        if (cardPreviews.containsKey(key) || !cardPreviewsLoading.add(key)) return
+        val s = session ?: return
+        viewModelScope.launch {
+            val image = withContext(Dispatchers.Default) {
+                val t = s.brushLibraryPreview(library.toUInt(), set.toUInt(), index.toUInt(), 212u, 65u) ?: return@withContext null
+                val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
+                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
+                bitmap.asImageBitmap()
+            }
+            if (image != null && cardPreviewsLoading.contains(key)) cardPreviews[key] = image
+        }
+    }
+
+    /**
+     * Runs [work] on the libraries off the main thread (it reads and writes their files), then
+     * reads them again; [changed]: the library in use may be another, so everything shown of it
+     * is read again. Tells [failure] if it didn't work.
+     */
+    private fun libraryWork(changed: Boolean, failure: String, work: (CanvasSession) -> Boolean) {
+        val s = session ?: return
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { brushLibraryWrites.withLock { runCatching { work(s) }.getOrDefault(false) } }
+            if (!ok) message = failure
+            if (ok && changed) {
+                libraryChanged()
+                shownSet = currentBrush?.set?.toInt()?.coerceIn(0, (brushSets.size - 1).coerceAtLeast(0)) ?: 0
+            }
+            readLibraries()
+        }
+    }
+
+    /** Brings library [i] into use and shows it. */
+    fun openLibrary(i: Int) {
+        showingLibraries = false
+        if (brushLibraries.getOrNull(i)?.current == true) return
+        libraryWork(true, "This library can't be opened.") { it.openBrushLibrary(i.toUInt()) }
+    }
+
+    fun renameLibrary(i: Int, name: String) {
+        renamingLibrary = null
+        if (name.isBlank() || brushLibraries.getOrNull(i)?.name == name.trim()) return
+        libraryWork(false, "The library couldn't be renamed.") { it.renameBrushLibrary(i.toUInt(), name) }
+    }
+
+    fun newLibrary() = libraryWork(false, "A new library couldn't be made.") { it.newBrushLibrary() != null }
+
+    fun duplicateLibrary(i: Int) = libraryWork(false, "The library couldn't be copied.") { it.duplicateBrushLibrary(i.toUInt()) != null }
+
+    fun deleteLibrary(i: Int) {
+        deletingLibrary = null
+        libraryWork(brushLibraries.getOrNull(i)?.current == true, "The library couldn't be deleted.") { it.deleteBrushLibrary(i.toUInt()) }
+    }
+
+    /** The library as it ships, back beside the others. */
+    fun restoreLibraries() = libraryWork(false, "The library couldn't be put back.") { it.restoreStockBrushLibrary() != null }
 
     /** A new set at the top of the library, shown, with its name ready to edit. */
     fun newBrushSet() {
@@ -4609,9 +4739,29 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return file
     }
 
+    /** The library in use written to a library file to share; none (and told) if it has no brushes. */
+    suspend fun libraryFileToShare(): File? {
+        val s = session ?: return null
+        val name = libraryName
+        val file = withContext(Dispatchers.IO) {
+            // put together in memory: running out of it, or a write that fails, is told
+            runCatching {
+                val bytes = s.brushLibraryAsFile() ?: return@runCatching null
+                // in a folder of its own, so another of the same name can't write over it while
+                // it is being shared
+                val dir = File(getApplication<Application>().cacheDir, "exports/${System.nanoTime()}").apply { mkdirs() }
+                val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "_").ifBlank { "Brushes" }
+                File(dir, "$safe.$BRUSH_LIBRARY_EXTENSION").apply { writeBytes(bytes) }
+            }.getOrNull()
+        }
+        if (file == null) showNotice("This library couldn't be shared.", warning = true)
+        return file
+    }
+
     /**
-     * A brush or set file from elsewhere, with the import card: it joins the library and its set
-     * is shown (not if the card's Cancel was tapped meanwhile).
+     * A brush, set or library file from elsewhere, with the import card: it joins the library and
+     * its set is shown, or comes in as a library of its own, in use (not if the card's Cancel was
+     * tapped meanwhile).
      */
     fun importBrushes(uri: android.net.Uri) {
         viewModelScope.launch {
@@ -4671,6 +4821,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (studioOpen || brushQuestionOpen || brushesRead.isEmpty()) return
         if (shownSet == RECENT_SET) shownSet = currentBrush?.set?.toInt() ?: 0
         for (read in brushesRead.toList()) {
+            // a library of its own is brought into use off the main thread (its files written)
+            if (read.isLibrary()) {
+                libraryWork(true, "This library couldn't be added.") { it.addBrushesRead(read, 0u) != null }
+                continue
+            }
             s.addBrushesRead(read, shownSet.toUInt())?.let { shownSet = it.toInt() }
         }
         brushesRead.clear()
@@ -4712,6 +4867,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val setName = name.substringBeforeLast('.').trim()
         val s = session
         if (s == null) {
+            // read once now (and let go: it is read again when a canvas opens), so a file with
+            // none in it is told so here rather than promised and then dropped without a word
+            val any = withContext(Dispatchers.Default) {
+                runCatching { io.github.artcraftandroid.procraft.core.readBrushes(bytes, name)?.also { it.destroy() } != null }.getOrDefault(false)
+            }
+            if (!any) return false
             withContext(Dispatchers.IO) {
                 pendingBrushDir.mkdirs()
                 File(pendingBrushDir, "${System.nanoTime()}-${setName.replace(Regex("[^A-Za-z0-9 _-]"), "_")}.other").writeBytes(bytes)
@@ -4763,6 +4924,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (pendingBrushesReading?.isActive == true) return
         pendingBrushesReading = viewModelScope.launch {
             var any = false
+            var unread = false
             while (session != null) {
                 val f = withContext(Dispatchers.IO) { pendingBrushDir.listFiles()?.minByOrNull { it.name } } ?: break
                 val read = withContext(Dispatchers.Default) {
@@ -4770,14 +4932,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     runCatching { io.github.artcraftandroid.procraft.core.readBrushes(f.readBytes(), f.name.substringAfter('-')) }.getOrNull()
                 }
                 if (session == null) break
-                read?.let {
-                    brushesRead += it
+                if (read != null) {
+                    brushesRead += read
                     addBrushesRead()
                     any = true
+                } else {
+                    unread = true
                 }
                 withContext(Dispatchers.IO) { f.delete() }
             }
-            if (any) message = "Brushes added to the library."
+            if (unread) {
+                message = "A brush file couldn't be read."
+            } else if (any) {
+                message = "Brushes added to the library."
+            }
         }
     }
 
@@ -5549,6 +5717,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     suspend fun export(kind: Export, pdfQuality: Int = 100): List<File> =
         withExportCard("The artwork couldn't be exported.") { s -> exportFiles(s, kind, pdfQuality).takeIf { it.isNotEmpty() } }.orEmpty()
+
+    /** The file a plugin makes of the artwork's layers of a kind it adds ([e]), written into the cache to share. */
+    suspend fun exportPlugin(e: io.github.artcraftandroid.procraft.core.PluginExport): File? =
+        withExportCard("The artwork couldn't be exported.") { s ->
+            withContext(Dispatchers.IO) {
+                val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+                val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
+                val file = File(dir, "$base.${e.extension}")
+                try {
+                    s.exportPlugin(e.key, file.path)
+                    file
+                } catch (x: MobileException) {
+                    Log.e(TAG, "exporting", x)
+                    null
+                }
+            }
+        }
 
     /**
      * Runs [work], an export by the core, with the export card showing how far it has come (as the
@@ -6650,6 +6835,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var dropButton: Offset? = null
     var sideBarBounds: androidx.compose.ui.geometry.Rect? = null
 
+    /** Whether window point [p] is over the top bar or the side bar while they show. */
+    fun overBars(p: Offset): Boolean =
+        io.github.artcraftandroid.procraft.ui.overBars(p, io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density, sideBarBounds, barsHidden)
+
     /** The threshold the colour fills with (0..1), kept from one drop to the next. */
     var dropThreshold by mutableFloatStateOf(transformPrefs.getFloat(DROP_THRESHOLD, 0.5f))
         private set
@@ -7044,6 +7233,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun showSelectionLook() {
         val tint = selecting && selectionKind == SelectionKind.AUTOMATIC
         session?.setSelectionDisplay(if (tint) SelectionDisplay.TINT else SelectionDisplay.STRIPES)
+        refreshTakenBox()
+    }
+
+    /** The box round the strokes the selection takes, read again while the selection tool is open. */
+    private fun refreshTakenBox() {
+        takenBox = if (selecting && hasSelection) session?.takenPluginItemsBox().orEmpty() else emptyList()
     }
 
     /** Window pixels to canvas pixels through the view, or none when it cannot be inverted. */
@@ -7463,6 +7658,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addLayer() = layerChange { if (it.addLayer() == 0uL) message = noRoom() }
 
+    /** The kinds of layer the plugins on add: the Layers panel's + offers them beside a plain layer. */
+    fun layerKinds(): List<io.github.artcraftandroid.procraft.core.PluginKind> = plugins.layerKinds()
+
+    /** A new layer of a plugin's [kind] above the current one. */
+    fun addPluginLayer(kind: String) = layerChange { if (it.addPluginLayer(kind) == 0uL) message = noRoom() }
+
     // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
     fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
 
@@ -7690,6 +7891,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         canUndo = info.canUndo
         canRedo = info.canRedo
         hasSelection = session?.hasSelection() ?: false
+        refreshTakenBox()
     }
 
     /** Reads again the thumbnails of the layers whose pixels changed since theirs was read (or have none). */
@@ -7806,6 +8008,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val PICK_WINDOW_DP = 54f
         const val RIGHT_HANDED = "right_handed"
         const val COLOR_MODE = "color_mode"
+        const val COLOUR_MODEL = "colour_model"
 
         /** How often a hovering brush cursor reads its size again, ms. */
         const val CURSOR_REREAD_MS = 100L
@@ -7850,6 +8053,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** Brush and brush set files, as other painting apps share them. */
         const val BRUSH_EXTENSION = "brush"
         const val BRUSH_SET_EXTENSION = "brushset"
+        const val BRUSH_LIBRARY_EXTENSION = "brushlibrary"
         /** Other apps' brush files: Photoshop's, GIMP's brushes, pipes and generated brushes, Krita's presets and bundles, Clip Studio's sub tools and their groups. */
         val OTHER_BRUSH_EXTENSIONS = listOf("abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut", "sutg")
         val PACKAGE_LABEL = PACKAGE_EXTENSION.replaceFirstChar(Char::titlecase)

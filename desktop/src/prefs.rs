@@ -44,7 +44,7 @@ pub struct Prefs {
     pub cursor_shows: CursorShows,
     pub cursor_style: CursorStyle,
     /// The colour model the Colors panel's disc and Value sliders work in.
-    pub colour_model: crate::colour_models::ColourModel,
+    pub colour_model: procraft_core::ColourModel,
     /// How long two fingers are held before undo repeats, seconds.
     pub rapid_undo_delay: f32,
     /// How strongly what isn't selected is banded, 0..1.
@@ -100,7 +100,7 @@ impl Default for Prefs {
             brush_cursor: true,
             cursor_shows: CursorShows::Hovering,
             cursor_style: CursorStyle::Brush,
-            colour_model: crate::colour_models::ColourModel::Hsb,
+            colour_model: procraft_core::ColourModel::Hsb,
             rapid_undo_delay: 0.65,
             selection_visibility: 0.25,
             stabilization: 0.0,
@@ -158,7 +158,7 @@ impl Prefs {
                 "cursor_shows" => p.cursor_shows = pick(&SHOWS, value).unwrap_or(p.cursor_shows),
                 "cursor_style" => p.cursor_style = pick(&STYLES, value).unwrap_or(p.cursor_style),
                 "colour_model" => {
-                    p.colour_model = crate::colour_models::ColourModel::of_key(value).unwrap_or(p.colour_model);
+                    p.colour_model = procraft_core::ColourModel::of_key(value).unwrap_or(p.colour_model);
                 }
                 "rapid_undo_delay" => {
                     if let Some(v) = number {

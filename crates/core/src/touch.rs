@@ -33,6 +33,8 @@ const LIQUIFY_HELD_WAIT_MS: f64 = 110.0;
 const LIQUIFY_HELD_STEP_MS: f64 = 16.0;
 const LIQUIFY_HELD_SLOP: f32 = 3.0;
 const TAP_SLOP: f32 = 24.0;
+/// How far from an item (points) a tap of the selection tool on a plugin's layer still takes it.
+const TAP_REACH: f32 = 6.0;
 /// Each of the fingers tapped together stays short of this (points) from where it landed: this
 /// far, they are moving the canvas.
 const FINGERS_TAP_SLOP: f32 = 15.0;
@@ -414,6 +416,8 @@ pub(crate) struct Touches {
     tool_before: Option<ToolKind>,
     /// The tool the pen's button left for the eraser, to go back to.
     tool_before_eraser: Option<ToolKind>,
+    /// The pen's button held down to erase (Erase's Pen button): see [`pen::HeldEraser`].
+    held_eraser: Option<pen::HeldEraser>,
     assisted: bool,
     down_at: (f32, f32),
     /// When the last finger of a tap landed (the only one, until another does), when the first
@@ -547,6 +551,7 @@ impl Default for Touches {
             stroke_pointer: 0,
             tool_before: None,
             tool_before_eraser: None,
+            held_eraser: None,
             assisted: false,
             down_at: (0.0, 0.0),
             tap_start: 0.0,
@@ -1675,8 +1680,12 @@ impl CanvasSession {
             return;
         }
         let pen = is_pen(kind);
-        // what this kind of touch is set to do
-        let does = if pen { t.settings.pen } else { t.settings.touch };
+        // what this kind of touch is set to do; the pen's button held to erase, the pen erases
+        // with the eraser it borrowed whatever its strokes would borrow otherwise
+        let mut does = if pen { t.settings.pen } else { t.settings.touch };
+        if pen && t.held_eraser.is_some() && matches!(does, Some(GestureAction::Smudge | GestureAction::Erase)) {
+            does = None;
+        }
         if !pen {
             match does {
                 Some(GestureAction::Eyedropper) => {
@@ -2133,6 +2142,25 @@ impl CanvasSession {
             t.select_moved = true;
         }
         let moved = t.select_moved;
+        // on a plugin's layer a tap takes the item under it, or on nothing lets the selection go
+        // (but for a freehand path, tapped out point by point: on nothing that goes on)
+        let freehand = how.kind == SelectKind::Freehand;
+        if done && !moved && !(freehand && !t.freehand.is_empty()) {
+            let reach = TAP_REACH * t.scale;
+            drop(t);
+            let tapped = {
+                let mut st = self.shared.lock();
+                let current = st.doc.current();
+                let zoom = st.view.map_or(1.0, |v| v.zoom()).max(1e-6);
+                st.window_to_canvas(at.0, at.1)
+                    .is_some_and(|p| st.tap_items(current, p, reach / zoom, how.join, !freehand))
+            };
+            if tapped {
+                out.push(TouchCommand::SelectionChanged);
+                return;
+            }
+            t = self.touches();
+        }
         match how.kind {
             SelectKind::Rectangle | SelectKind::Ellipse => {
                 drop(t);
@@ -3008,7 +3036,11 @@ mod tests {
         s.set_tool(ToolKind::Smudge);
         assert!(s.touch_pen_button(false, 10.0, 10.0).is_empty());
         assert_eq!(s.info().tool, ToolKind::Erase);
+        // letting go leaves it: the next press goes back
+        assert!(!s.touch_pen_button_up(false));
+        assert_eq!(s.info().tool, ToolKind::Erase);
         s.touch_pen_button(false, 10.0, 10.0);
+        assert!(!s.touch_pen_button_up(false));
         assert_eq!(s.info().tool, ToolKind::Smudge);
         // the second button, set to nothing, does nothing
         assert!(s.touch_pen_button(true, 10.0, 10.0).is_empty());

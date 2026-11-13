@@ -61,10 +61,11 @@ pub fn size_share(brush: &Brush) -> f32 {
     share(brush, units, small)
 }
 
-/// The size the studio's drawing pad draws at, as [`size_share`] but without the boost for small
-/// brushes.
+/// The size the studio's drawing pad draws at, from the brush's least (0) to its most (1): its
+/// preview size, as its sliders start, so that a bigger most size draws bigger there too.
 pub fn pad_size_share(brush: &Brush) -> f32 {
-    share(brush, size_units(brush), 0.0)
+    let share = brush.setting("preview_size");
+    if share.is_finite() { share.clamp(0.0, 1.0) } else { 0.0 }
 }
 
 /// The brush's most size in the units brush files keep it in.
@@ -177,6 +178,18 @@ mod tests {
         // from 2 units the preview size is shared out over the size
         b.max_size = 8.0 * unit;
         assert!((size_share(&b) - 0.075).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_drawing_pad_draws_at_its_preview_size_of_the_brush_s_range_however_big_its_most() {
+        let mut b = Brush::round_pen();
+        b.set_setting("preview_size", 0.3);
+        let unit = b.size_unit();
+        // the same share of a bigger most size: a bigger stroke on the pad
+        for most in [0.5, 4.0, 10.0] {
+            b.max_size = most * unit;
+            assert!((pad_size_share(&b) - 0.3).abs() < 1e-6, "{most}");
+        }
     }
 
     #[test]

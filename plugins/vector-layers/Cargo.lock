@@ -7,8 +7,8 @@ name = "procraft-plugin-kit"
 version = "0.1.0"
 
 [[package]]
-name = "vector-canvas"
-version = "1.0.0"
+name = "vector-layers"
+version = "1.1.0"
 dependencies = [
  "procraft-plugin-kit",
 ]

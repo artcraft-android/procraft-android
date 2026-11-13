@@ -731,6 +731,30 @@ def new_set():
     return folder().difference(capsule((8.6, 14.8), (15.4, 14.8), 1.1)).difference(capsule((12.0, 11.4), (12.0, 18.2), 1.1))
 
 
+def new_layer():
+    """New layer: a single sheet with a plus cut out of it."""
+    sheet = soft(Polygon([(12, 5.8), (22, 12), (12, 18.2), (2, 12)]), 1.0)
+    return sheet.difference(capsule((9.1, 12), (14.9, 12), 1.1)).difference(capsule((12, 9.1), (12, 14.9), 1.1))
+
+
+def volumes():
+    """Libraries: three volumes standing on a shelf, the last leaning away from the others."""
+    shelf = soft(box(2.5, 19.0, 21.5, 20.8), 0.6)
+    first = soft(box(3.6, 6.0, 7.8, 18.0), 0.6).difference(box(3.6, 8.0, 7.8, 9.0))
+    second = soft(box(9.0, 4.0, 13.0, 18.0), 0.6).difference(box(9.0, 6.0, 13.0, 7.0))
+    leaning = rotate(soft(box(14.4, 7.0, 18.4, 18.4), 0.6), 12, origin=(18.4, 18.4))
+    return unary_union([shelf, first, second, leaning])
+
+
+def new_library():
+    """New library: two volumes on a shelf with a plus beside them."""
+    shelf = soft(box(2.5, 19.0, 13.6, 20.8), 0.6)
+    first = soft(box(3.6, 6.0, 7.8, 18.0), 0.6).difference(box(3.6, 8.0, 7.8, 9.0))
+    second = soft(box(9.0, 4.0, 13.0, 18.0), 0.6).difference(box(9.0, 6.0, 13.0, 7.0))
+    cross = unary_union([capsule((15.2, 12.0), (21.6, 12.0), 1.2), capsule((18.4, 8.8), (18.4, 15.2), 1.2)])
+    return unary_union([shelf, first, second, cross])
+
+
 def chevron(angle=0):
     """A chevron pointing right (turned by `angle`)."""
     return rotate(LineString([(9.0, 4.5), (16.0, 12.0), (9.0, 19.5)]).buffer(1.3, join_style='round'), angle, origin=(12, 12))
@@ -1604,7 +1628,8 @@ DRAWINGS = {
     'studiodynamics': chevrons, 'studiostylus': stylus, 'studioproperties': gear, 'studiomaterials': material_ball,
     'studiopreview': eye, 'studioabout': name_tag,
     'infoabout': name_tag, 'infodimensions': ruler, 'infolayers': layers, 'infoprofile': gamut, 'infovideo': video_tab,
-    'infostatistics': pie, 'menunewbrush': new_brush, 'menunewset': new_set, 'menushare': share_tab,
+    'infostatistics': pie, 'menunewbrush': new_brush, 'menunewset': new_set, 'menunewlayer': new_layer, 'menushare': share_tab,
+    'menulibraries': volumes, 'menunewlibrary': new_library,
     'menuchevron': chevron, 'disclose': lambda: chevron(90), 'donetick': tick, 'add': plus, 'fullscreen': full_screen,
     'cardcompact': rows, 'cardstack': stacked_cards, 'folder-fill': folder, 'sweep': bin_, 'keyboard': keyboard,
     'gesturegeneral': prefs_tab, 'gesturecopypaste': copy_paste, 'gestureassisted': guided_line,

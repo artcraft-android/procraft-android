@@ -32,6 +32,13 @@ pub struct LayerInfo {
     pub collapsed: bool,
     /// A text layer, its text still editable.
     pub text: bool,
+    /// The kind of layer a plugin adds (`<id>.<key>`), if it is one: its strokes are kept as items
+    /// too. Shown locked while its plugin is off.
+    pub plugin_kind: Option<String>,
+    /// What a plugin's layer is known by on its thumbnail: its kind's badge, or a plug when its kind
+    /// draws none or its plugin is off or gone.
+    #[uniffi(default = None)]
+    pub plugin_badge: Option<crate::PluginBadge>,
     /// How many groups it is inside.
     pub depth: u32,
     /// Left out of the picture while another layer is shown alone (solo visibility): its box
@@ -98,6 +105,11 @@ pub enum LayerOption {
     Reference,
     EditText,
     Rasterize,
+    /// A plugin's layer: the strokes the selection takes (every one with nothing selected) given
+    /// the paint colour.
+    Recolour,
+    /// The same given the paint brush, with its size and opacity.
+    ApplyBrush,
     MergeDown,
     CombineDown,
     MergeMask,
@@ -157,8 +169,10 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
         LayerType::Paint => {
             row(O::Select, "Select", None);
             row(O::Copy, "Copy", None);
-            // a text layer's pixels come from its text: nothing to fill, clear, lock or invert
-            if !l.text && unlocked {
+            // a text layer's pixels come from its text, a plugin's layer's from its items: nothing to
+            // fill, clear, lock or invert
+            let drawn_from_data = l.text || l.plugin_kind.is_some();
+            if !drawn_from_data && unlocked {
                 row(O::Fill, "Fill Layer", None);
                 row(O::Clear, "Clear", None);
                 row(O::AlphaLock, "Alpha Lock", Some(l.alpha_lock));
@@ -173,6 +187,17 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
             if l.text {
                 if unlocked {
                     row(O::EditText, "Edit Text", None);
+                    row(O::Rasterize, "Rasterize", None);
+                }
+            } else if l.plugin_kind.is_some() {
+                if guided || l.assisted {
+                    row(O::DrawingAssist, "Drawing Assist", Some(l.assisted));
+                }
+                // its strokes cleared, recoloured or restyled as strokes
+                if unlocked {
+                    row(O::Clear, "Clear", None);
+                    row(O::Recolour, "Recolour", None);
+                    row(O::ApplyBrush, "Apply Brush", None);
                     row(O::Rasterize, "Rasterize", None);
                 }
             } else {
@@ -359,7 +384,8 @@ impl CanvasSession {
                 blend: l.blend.id(),
                 alpha_lock: l.alpha_lock,
                 clipped: l.clipped,
-                locked: st.doc.is_locked(l.id),
+                // a plugin's layer its plugin can't take strokes on (off, say) shows locked
+                locked: st.doc.is_locked(l.id) || st.plugin_layer_off(l.id),
                 current: l.id == current,
                 picked: st.doc.is_picked(l.id),
                 reference: l.reference,
@@ -376,6 +402,11 @@ impl CanvasSession {
                 },
                 collapsed: l.collapsed,
                 text: l.text.is_some(),
+                plugin_kind: l.plugin.as_ref().map(|p| p.kind.clone()),
+                plugin_badge: l.plugin.as_ref().map(|p| {
+                    let badge = st.hooks.as_ref().and_then(|hooks| hooks.layer_kind_badge(&p.kind));
+                    badge.unwrap_or_else(crate::PluginBadge::plug)
+                }),
                 depth: u32::try_from(st.doc.depth(l.id)).unwrap_or(u32::MAX),
                 soloed_out: st.doc.soloed_out(l.id),
                 // as measured, not onto a locked layer: both left out of its menu then

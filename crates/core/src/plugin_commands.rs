@@ -156,7 +156,11 @@ fn rect_on(size: (u32, u32), x: i32, y: i32, w: i32, h: i32) -> Option<(IRect, u
 
 /// A layer that can be painted on: a pixel layer, not locked.
 fn paintable(session: &CanvasSession, id: u64) -> bool {
-    session.layers().iter().any(|l| l.id == id && !l.locked && l.kind == crate::layers::LayerType::Paint)
+    // (a plugin's layer is its own plugin's: its pixels are drawn from its items)
+    session
+        .layers()
+        .iter()
+        .any(|l| l.id == id && !l.locked && l.kind == crate::layers::LayerType::Paint && l.plugin_kind.is_none())
 }
 
 /// A plugin's change of the artwork in progress (see [`CanvasSession::plugin_step`]): what it

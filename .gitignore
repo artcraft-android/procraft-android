@@ -10,3 +10,5 @@ replay_pid*.log
 # (XcodeGen)
 /ios/Generated/
 /ios/ProCraft.xcodeproj/
+# Python bytecode from the tools
+__pycache__/

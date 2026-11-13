@@ -65,11 +65,11 @@ impl GrainStore {
     }
 
     /// Takes the files of grains nothing can want any more out of the folder, as a brush that was
-    /// deleted leaves its own behind. A file stays if its grain is in `used`, if the text of the
-    /// library kept at `library` names it anywhere (a brush in there may not have come back whole),
-    /// or if it was kept lately. Files that aren't grains' stay, and all do if the library can't be
-    /// read.
-    pub(crate) fn forget_all_but(&self, used: &HashSet<u64>, library: &Path) {
+    /// deleted leaves its own behind. A file stays if its grain is in `used`, if the text of any of
+    /// the libraries kept at `libraries` names it anywhere (a brush in there may not have come back
+    /// whole, or be in a library not in use), or if it was kept lately. Files that aren't grains'
+    /// stay, and all do if one of the libraries can't be read.
+    pub(crate) fn forget_all_but(&self, used: &HashSet<u64>, libraries: &[PathBuf]) {
         let Some(entries) = self.folder.as_deref().and_then(|folder| fs::read_dir(folder).ok()) else { return };
         let unused: Vec<(u64, PathBuf)> = entries
             .flatten()
@@ -84,9 +84,10 @@ impl GrainStore {
         if unused.is_empty() {
             return;
         }
-        let Ok(kept) = fs::read_to_string(library) else { return };
+        let Ok(kept) = libraries.iter().map(fs::read_to_string).collect::<Result<Vec<String>, _>>() else { return };
         for (id, path) in unused {
-            if !kept.contains(&id.to_string())
+            let id_text = id.to_string();
+            if !kept.iter().any(|text| text.contains(&id_text))
                 && let Err(e) = fs::remove_file(&path)
             {
                 log::warn!("a brush's grain file stays: {e}");
@@ -685,12 +686,12 @@ mod tests {
         let library = dir.join("library.json");
 
         // no library to go by: nothing goes
-        store.forget_all_but(&HashSet::from([used.id]), &library);
+        store.forget_all_but(&HashSet::from([used.id]), std::slice::from_ref(&library));
         assert!(at(&gone).exists());
 
         // one that names a grain, as a brush that didn't come back would
         fs::write(&library, format!("[{{\"broken\":[{},512]}}]", named.id)).unwrap();
-        store.forget_all_but(&HashSet::from([used.id]), &library);
+        store.forget_all_but(&HashSet::from([used.id]), std::slice::from_ref(&library));
         assert!(at(&used).exists() && at(&named).exists() && at(&lately).exists() && other.exists());
         assert!(!at(&gone).exists());
         let _ = fs::remove_dir_all(&dir);
@@ -709,7 +710,7 @@ mod tests {
         store.take(&mut again);
         let library = dir.join("library.json");
         fs::write(&library, "[]").unwrap();
-        store.forget_all_but(&HashSet::new(), &library);
+        store.forget_all_but(&HashSet::new(), &[library]);
         assert!(path.exists());
         let _ = fs::remove_dir_all(&dir);
     }

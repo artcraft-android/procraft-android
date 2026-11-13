@@ -10,6 +10,9 @@
 //! platform's own pen settings ask ([`PenPreferred`]); a double-tap turned off there does nothing
 //! at all.
 //!
+//! A pen's button can be held down, as a double-tap can't: set to erase (Erase's Pen button), the
+//! eraser is borrowed while it is held and given back as it is let go.
+//!
 //! A squeeze is held. Set to the eyedropper, its loupe shows under the pen while the pen hovers
 //! near and follows it, and letting go takes the colour there; the pen touching meanwhile picks
 //! with that touch; a quick squeeze with the pen away opens the eyedropper for the next touch (or
@@ -124,6 +127,14 @@ impl PenState {
     }
 }
 
+/// The pen's button held down to erase: which (its `second`), and the tool it borrowed the eraser
+/// from, given back as it is let go. Borrowed, the eraser doesn't count as a tool chosen.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct HeldEraser {
+    second: bool,
+    before: ToolKind,
+}
+
 /// A squeeze held.
 #[derive(Clone, Copy, Debug)]
 struct Squeeze {
@@ -191,16 +202,39 @@ impl CanvasSession {
 
     /// The pen's button pressed (its `second`), hovering or touching at (`x`, `y`): what Gesture
     /// controls set it to do. Set to nothing, the first switches between the current tool and the
-    /// eraser, and back, as a pen's double-tap does by default; the second does nothing.
+    /// eraser, and back, as a pen's double-tap does by default; the second does nothing. Set to
+    /// erase, the eraser is borrowed until the button is let go
+    /// ([`CanvasSession::touch_pen_button_up`]).
     pub fn touch_pen_button(&self, second: bool, x: f32, y: f32) -> Vec<TouchCommand> {
         let action = {
             let t = self.touches();
             if second { t.settings.pen_second_button } else { t.settings.pen_button }
         };
-        let preferred = if second { PenPreferred::Ignore } else { PenPreferred::SwitchEraser };
         let mut out = Vec::new();
+        if action == Some(GestureAction::Erase) {
+            self.hold_eraser(second);
+            return out;
+        }
+        let preferred = if second { PenPreferred::Ignore } else { PenPreferred::SwitchEraser };
         self.pen_does(action, preferred, (x, y), &mut out);
         out
+    }
+
+    /// The pen's button let go (its `second`): held to erase, it gives the eraser back to the tool
+    /// it was borrowed from (a stroke going on erases to its end, as it began), and says so (the
+    /// tool may have changed). Anything else a button does was done as it was pressed. A tool
+    /// chosen meanwhile stays.
+    pub fn touch_pen_button_up(&self, second: bool) -> bool {
+        let mut t = self.touches();
+        let Some(held) = t.held_eraser.filter(|h| h.second == second) else { return false };
+        t.held_eraser = None;
+        // a stroke borrowing a tool of its own from the eraser gives back the one chosen
+        if t.tool_before == Some(ToolKind::Erase) {
+            t.tool_before = Some(held.before);
+        } else if self.shared.lock().tool == ToolKind::Erase {
+            self.put_tool(held.before);
+        }
+        true
     }
 
     /// The pen double-tapped where it is (`x`, `y`, window pixels), the platform's own setting for
@@ -211,7 +245,8 @@ impl CanvasSession {
         if preferred == PenPreferred::Ignore || !(x.is_finite() && y.is_finite()) {
             return out;
         }
-        let action = self.touches().settings.pen_button;
+        // a double-tap can't be held: set to erase while held, it does what the platform asks
+        let action = self.touches().settings.pen_button.filter(|&a| a != GestureAction::Erase);
         self.pen_does(action, preferred, (x, y), &mut out);
         out
     }
@@ -302,6 +337,19 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// The pen's button (its `second`) pressed to erase while it is held: the eraser is borrowed
+    /// from the tool chosen (from a stroke going on, the one it borrowed its own from), until the
+    /// button is let go.
+    fn hold_eraser(&self, second: bool) {
+        let mut t = self.touches();
+        if t.held_eraser.is_some() {
+            return;
+        }
+        let chosen = t.tool_before.take();
+        let tool = self.swap_tool(ToolKind::Erase);
+        t.held_eraser = Some(HeldEraser { second, before: chosen.unwrap_or(tool) });
+    }
+
     /// A double-tap, a pen's button or a squeeze set to `action` does it at `at`; set to nothing,
     /// it does what the platform asks (`preferred`).
     fn pen_does(
@@ -398,6 +446,91 @@ mod tests {
 
     fn squeeze_set(s: &CanvasSession, action: Option<GestureAction>) {
         s.set_touch_settings(TouchSettings { pen_second_button: action, ..TouchSettings::default() });
+    }
+
+    fn held_to_erase(s: &CanvasSession) {
+        s.set_touch_settings(TouchSettings { pen_button: Some(GestureAction::Erase), ..TouchSettings::default() });
+    }
+
+    #[test]
+    fn a_pen_button_set_to_erase_borrows_the_eraser_while_it_is_held() {
+        let s = session();
+        s.set_tool(ToolKind::Smudge);
+        held_to_erase(&s);
+        assert!(s.touch_pen_button(false, 10.0, 10.0).is_empty());
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        // a stroke while held erases, and the eraser stays after it while the button is held
+        s.touch_down(1, PointerKind::Stylus, sample(10.0, 10.0, 0.0));
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        s.touch_up(1, sample(40.0, 10.0, 100.0));
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        // pressed again while held (a driver saying it twice), or the other button let go: nothing
+        s.touch_pen_button(false, 10.0, 10.0);
+        assert!(!s.touch_pen_button_up(true));
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        // let go, the tool comes back; let go again, nothing
+        assert!(s.touch_pen_button_up(false));
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        assert!(!s.touch_pen_button_up(false));
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        // borrowed, the eraser was never a tool chosen: the one before the smudge tool is the brush
+        s.touch_pen_double_tap(PenPreferred::SwitchPrevious, 0.0, 0.0);
+        assert_eq!(s.info().tool, ToolKind::Paint);
+    }
+
+    #[test]
+    fn a_pen_button_held_to_erase_let_go_mid_stroke_gives_the_tool_back_for_the_next() {
+        let s = session();
+        held_to_erase(&s);
+        s.touch_pen_button(false, 10.0, 10.0);
+        s.touch_down(1, PointerKind::Stylus, sample(10.0, 10.0, 0.0));
+        // the stroke erases to its end, as it began; the tool is back for the next
+        s.touch_pen_button_up(false);
+        assert_eq!(s.info().tool, ToolKind::Paint);
+        s.touch_up(1, sample(40.0, 10.0, 100.0));
+        assert_eq!(s.info().tool, ToolKind::Paint);
+        // a tool chosen while the button was held stays when it is let go
+        s.touch_pen_button(false, 10.0, 10.0);
+        s.set_tool(ToolKind::Smudge);
+        s.touch_pen_button_up(false);
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+    }
+
+    #[test]
+    fn a_pen_button_held_to_erase_wins_over_what_the_pen_s_strokes_borrow() {
+        let s = session();
+        s.set_touch_settings(TouchSettings {
+            pen: Some(GestureAction::Smudge),
+            pen_button: Some(GestureAction::Erase),
+            ..TouchSettings::default()
+        });
+        // pressed mid-stroke: the smudge stroke goes on, and the eraser stays after it
+        s.touch_down(1, PointerKind::Stylus, sample(10.0, 10.0, 0.0));
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        s.touch_pen_button(false, 10.0, 10.0);
+        s.touch_up(1, sample(40.0, 10.0, 100.0));
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        // held, the next stroke erases rather than smudging
+        s.touch_down(2, PointerKind::Stylus, sample(10.0, 10.0, 200.0));
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        s.touch_up(2, sample(40.0, 10.0, 300.0));
+        // let go, the tool chosen comes back and the pen smudges again
+        s.touch_pen_button_up(false);
+        assert_eq!(s.info().tool, ToolKind::Paint);
+        s.touch_down(3, PointerKind::Stylus, sample(10.0, 10.0, 400.0));
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        s.touch_up(3, sample(40.0, 10.0, 500.0));
+        assert_eq!(s.info().tool, ToolKind::Paint);
+    }
+
+    #[test]
+    fn a_double_tap_set_to_erase_while_held_switches_as_the_platform_asks() {
+        let s = session();
+        held_to_erase(&s);
+        s.touch_pen_double_tap(PenPreferred::SwitchEraser, 0.0, 0.0);
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        s.touch_pen_double_tap(PenPreferred::SwitchEraser, 0.0, 0.0);
+        assert_eq!(s.info().tool, ToolKind::Paint);
     }
 
     #[test]
