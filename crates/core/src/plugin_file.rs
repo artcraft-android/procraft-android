@@ -768,10 +768,12 @@ pub(crate) fn keep(dir: &Path, package: &Package) -> Result<PathBuf, Refusal> {
         let _ = std::fs::remove_dir_all(&stage);
         return Err(Refusal::NotKept);
     }
-    // other versions go, now this one stands
+    // other versions go, now this one stands; the files picked for its controls stay
     if let Ok(versions) = std::fs::read_dir(&home) {
         for version in versions.flatten() {
-            if version.file_name().to_str() != Some(package.manifest.version.as_str()) {
+            let name = version.file_name();
+            let other = name.to_str().is_some_and(|v| v != package.manifest.version && v != CHOSEN);
+            if other {
                 let _ = std::fs::remove_dir_all(version.path());
             }
         }
