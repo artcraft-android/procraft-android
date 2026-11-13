@@ -12710,7 +12710,9 @@ fn an_edit_lays_again_only_where_it_changes_a_vector_layer_and_matches_it_laid_w
     assert_eq!(lays(&s)[0], w0, "never whole");
     let after = layer_rgba(&s, vector);
     assert_eq!(most_apart(&after, &whole_relay(&s).0), 0, "erased, as if laid whole");
-    // a smudge over strokes: an edit reaching it lays the layer whole, which still matches
+    // a smudge over strokes (kept as one, not nudging them): an edit reaching it lays the layer
+    // whole, which still matches
+    assert!(plugins.set_switch(format!("{VECTOR_ID}.nudge"), false));
     s.set_tool(ToolKind::Smudge);
     let (x, y) = corner(7, 8);
     stroke_line(&s, (x - 10.0, y + 10.0), (x + 70.0, y + 20.0));
@@ -12961,5 +12963,50 @@ fn share_offers_the_svg_the_vector_layers_plugin_makes_of_an_artwork_s_vector_la
     assert!(s.export_plugin("org.example.none.vector.svg".to_owned(), path.to_string_lossy().into_owned()).is_err());
     assert!(plugins.set_on(VECTOR_ID.to_owned(), false));
     assert!(s.plugin_exports().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn on_a_vector_layer_a_soft_mask_hides_half_and_the_smudge_tool_nudges_strokes() {
+    let Some((s, plugins, dir)) = vector_session(160, "soft") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.3);
+    stroke_across(&s, 50.0, 10.0, 150.0);
+    stroke_across(&s, 110.0, 10.0, 150.0);
+    let drawn = layer_rgba(&s, vector);
+    // a soft mask down across the first: part of it hidden there (as the eraser at half its
+    // opacity hides it), kept as a mask item
+    assert!(plugins.set_slider(format!("{VECTOR_ID}.eraser"), 3.0).is_some());
+    s.set_tool(ToolKind::Erase);
+    stroke_down(&s, 80.0, 30.0, 70.0);
+    s.set_tool(ToolKind::Paint);
+    let soft = layer_rgba(&s, vector);
+    let hidden = alpha_in(&soft, 160, 80, 50);
+    assert!(hidden > 60 && hidden < 230, "partly: {hidden}");
+    assert_eq!(alpha_in(&soft, 160, 30, 50), alpha_in(&drawn, 160, 30, 50), "only under it");
+    let items = vector_items(&s, vector);
+    assert_eq!((items.len(), items[2].tool, items[2].opacity), (3, ToolKind::Erase, 0.5));
+    // laid again, the same
+    assert!(s.draw_plugin_layer_again(vector));
+    assert_eq!(most_apart(&layer_rgba(&s, vector), &soft), 0);
+    s.undo();
+    s.undo();
+    assert_eq!(layer_rgba(&s, vector), drawn);
+    assert!(plugins.set_slider(format!("{VECTOR_ID}.eraser"), 0.0).is_some());
+    // the smudge tool down across the second stroke's middle: it bends down there, no smudge kept
+    s.set_tool(ToolKind::Smudge);
+    stroke_down(&s, 80.0, 100.0, 125.0);
+    s.set_tool(ToolKind::Paint);
+    let items = vector_items(&s, vector);
+    assert_eq!(items.len(), 2, "no smudge kept");
+    let middle =
+        items[1].samples.iter().min_by(|a, b| (a.pos.x - 80.0).abs().total_cmp(&(b.pos.x - 80.0).abs())).unwrap();
+    assert!(middle.pos.y > 115.0, "pushed down: {:?}", middle.pos);
+    assert_eq!(items[1].samples[0].pos, procraft_engine::geom::Vec2::new(10.0, 110.0), "its end kept");
+    assert_eq!(items[0].samples, vector_items(&s, vector)[0].samples, "the first untouched");
+    let nudged = layer_rgba(&s, vector);
+    assert!(alpha_in(&nudged, 160, 80, 120) > 0 && alpha_in(&nudged, 160, 80, 110) < alpha_in(&drawn, 160, 80, 110));
+    assert_eq!(s.undo().as_deref(), Some("Smudge stroke"));
+    assert_eq!(layer_rgba(&s, vector), drawn);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -951,7 +951,8 @@ The kit's `layer` module writes all of this. Implement `kit::layer::Layer` and a
 the eraser does, and what a selection takes:
 
 - Eraser: Mask (as it starts) keeps an erasing stroke as an item that hides what is under it, so
-  deleting it later brings the strokes back.
+  deleting it later brings the strokes back. Soft mask does the same, hiding only part of what is
+  under it, as the eraser does at half its opacity.
 - Eraser: Whole takes away every stroke the eraser's path comes within reach of, whole.
 - Eraser: Cut takes away the parts of strokes the eraser passes over. What is left of each becomes
   strokes of its own, its samples as they were, cut where the eraser's edge crosses it.
@@ -962,6 +963,8 @@ the eraser does, and what a selection takes:
   kept out of gaps in the lines up to "Fills close gaps" wide. The fill is an item of its own, behind
   the strokes: it moves, recolours and deletes as a stroke does, and a selection takes it by its
   outline. Dropped on a stroke or a fill, the colour recolours that.
+- With "Smudge nudges strokes" on (as it starts), the smudge tool pushes the strokes under it along
+  as it goes, bending them, and keeps no smudge.
 - Share Image offers "SVG (vector layers)": each vector layer a group, each stroke its outline (as
   wide as its brush where the pen pressed), each fill its region, and each mask hiding what is under
   it in its layer.

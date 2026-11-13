@@ -7,6 +7,12 @@
 //! The eraser, as the card's Eraser says:
 //! - Mask (as it starts) keeps each erasing stroke as a mask that hides what is under it, so taking
 //!   the mask away later brings the strokes back.
+//! - Soft mask does the same, hiding only part of what is under it: as the eraser does at half
+//!   the opacity it was drawn with.
+//!
+//! The smudge tool, with Smudge nudges strokes on, pushes the strokes under it along as it goes,
+//! bending them: each sample it passes over moves with it, those at its middle all the way, those
+//! towards its edge less.
 //! - Whole takes away every stroke the eraser touches, whole.
 //! - Cut takes away the parts of the strokes the eraser passes over: what is left of each becomes
 //!   strokes of its own, its samples kept as they were.
@@ -51,19 +57,23 @@ const MOST_ITEMS: usize = 200_000;
 /// How far a cut's ends are found along a stroke: halved this many times.
 const CUT_STEPS: usize = 12;
 
-/// Its controls: what the eraser does (0 Mask, 1 Whole, 2 Cut), whether a selection takes the
-/// strokes it touches as well as those inside it, whether it takes masks, and how wide a gap in
-/// the lines a fill keeps out of (canvas pixels).
-static CONTROLS: kit::Controls<4> = kit::Controls::new([0.0, 0.0, 1.0, 6.0]);
+/// Its controls: what the eraser does (0 Mask, 1 Whole, 2 Cut, 3 Soft mask), whether a selection
+/// takes the strokes it touches as well as those inside it, whether it takes masks, how wide a gap
+/// in the lines a fill keeps out of (canvas pixels), and whether the smudge tool nudges strokes.
+static CONTROLS: kit::Controls<5> = kit::Controls::new([0.0, 0.0, 1.0, 6.0, 1.0]);
 kit::controls!(CONTROLS);
 
 /// How far a fill's outline may stray from its pixels' edges as it is smoothed, pixels.
 const FILL_SMOOTHING: f32 = 0.75;
 
+/// What a soft mask's opacity is of the opacity its eraser was drawn with.
+const SOFT_MASK: f32 = 0.5;
+
 /// What the eraser does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Eraser {
     Mask,
+    SoftMask,
     Whole,
     Cut,
 }
@@ -72,6 +82,7 @@ fn eraser() -> Eraser {
     match CONTROLS.get(0).round() as i32 {
         1 => Eraser::Whole,
         2 => Eraser::Cut,
+        3 => Eraser::SoftMask,
         _ => Eraser::Mask,
     }
 }
@@ -282,6 +293,66 @@ impl Vectors {
         changed
     }
 
+    /// Pushes the strokes (masks too) along the smudge `item`'s path, each sample within its reach
+    /// moving with each step of it, as much less the further from its middle: whether any moved.
+    fn nudge(&mut self, item: &Item) -> bool {
+        let path = item.points();
+        let reach = (item.width() / 2.0).max(1.0);
+        let Some(swept) = reach_of(path.iter().copied(), reach) else { return false };
+        if path.len() < 2 {
+            return false;
+        }
+        let mut changed = false;
+        for at in 0..self.items.len() {
+            let Some(kept) = self.items.get(at) else { continue };
+            if !overlap(&kept.reach, &swept) {
+                continue;
+            }
+            let stroke = kept.item();
+            if stroke.is_fill() {
+                continue;
+            }
+            let t = stroke.transform();
+            // a move on the canvas, as a move of a sample before the stroke's transform
+            let det = t[0] * t[3] - t[1] * t[2];
+            if det.abs() < 1e-9 {
+                continue;
+            }
+            let back = |(dx, dy): (f32, f32)| ((t[3] * dx - t[2] * dy) / det, (-t[1] * dx + t[0] * dy) / det);
+            let mut samples = stroke.samples();
+            let mut moved = false;
+            for s in &mut samples {
+                let mut p = kit::layer::apply(&t, (s.x, s.y));
+                for step in path.windows(2) {
+                    let (a, b) = (step[0], step[1]);
+                    let d = (p.0 - a.0).hypot(p.1 - a.1) / reach;
+                    if d >= 1.0 {
+                        continue;
+                    }
+                    let k = (1.0 - d * d).powi(2);
+                    p = (p.0 + (b.0 - a.0) * k, p.1 + (b.1 - a.1) * k);
+                }
+                let here = kit::layer::apply(&t, (s.x, s.y));
+                let (dx, dy) = back((p.0 - here.0, p.1 - here.1));
+                if dx.abs() > 1e-3 || dy.abs() > 1e-3 {
+                    (s.x, s.y) = (s.x + dx, s.y + dy);
+                    moved = true;
+                }
+            }
+            if !moved {
+                continue;
+            }
+            let pushed = stroke.with_samples(&samples);
+            let Some(reach) = reach_of(pushed.paths().into_iter().flatten(), pushed.width() / 2.0) else { continue };
+            if let Some(kept) = self.items.get_mut(at) {
+                kept.record = pushed.record().to_vec();
+                kept.reach = reach;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// The topmost stroke or fill (no mask) at canvas point `p`, by place.
     fn under(&self, p: (f32, f32)) -> Option<usize> {
         self.items.iter().enumerate().rev().filter(|(_, k)| k.tool != Tool::Mask).find_map(|(at, kept)| {
@@ -415,9 +486,26 @@ impl Layer for Vectors {
     }
 
     fn add(&mut self, item: Item) -> Added {
+        // a smudge nudges the strokes under it, the layer drawn again with them where they went
+        if item.tool() == Tool::Smudge && CONTROLS.on(4) {
+            self.nudge(&item);
+            return Added::DrawAgain;
+        }
         if item.tool() == Tool::Mask {
             match eraser() {
                 Eraser::Mask => {}
+                // kept hiding less than it was drawn to, and the layer drawn again with it so
+                Eraser::SoftMask => {
+                    if self.items.len() >= MOST_ITEMS {
+                        return Added::DrawAgain;
+                    }
+                    let softer = item.opacity() * SOFT_MASK;
+                    let soft = item.with_field(field::OPACITY, Some(&softer.to_le_bytes()));
+                    if let Some(kept) = self.kept(&soft, None) {
+                        self.items.push(kept);
+                    }
+                    return Added::DrawAgain;
+                }
                 // what it touched goes, whole or the parts it passed over, and the layer is drawn
                 // again without them (or as it was)
                 Eraser::Whole => {
@@ -572,7 +660,7 @@ mod tests {
         let mut layer = Vectors::new(0);
         assert_eq!(layer.add(stroke(0, 10.0, b"pen", &line(20.0))), Added::Kept);
         assert_eq!(layer.add(stroke(0, 10.0, b"pen", &line(60.0))), Added::Kept);
-        assert_eq!(layer.add(stroke(2, 20.0, b"blender", &[(50.0, 0.0), (50.0, 80.0)])), Added::Kept, "a smudge");
+        assert_eq!(layer.add(stroke(0, 20.0, b"blender", &[(50.0, 0.0), (50.0, 80.0)])), Added::Kept, "another brush");
         assert_eq!(layer.brushes.len(), 2);
         assert_eq!(layer.items.iter().map(|k| k.id).collect::<Vec<_>>(), [0, 1, 2]);
         let data = layer.save();
@@ -640,6 +728,11 @@ mod tests {
         assert!((layer.items[0].item().points()[0].0 - 20.0).abs() < 0.1);
         assert_eq!(layer.add(stroke(1, 30.0, b"eraser", &[(200.0, 190.0), (200.0, 210.0)])), Added::DrawAgain);
         assert_eq!(layer.items.len(), 2);
+        // Soft mask: kept as a mask hiding half as much as it was drawn to, the layer drawn again
+        CONTROLS.told(0, 3.0);
+        assert_eq!(layer.add(stroke(1, 10.0, b"eraser", &[(30.0, 50.0), (30.0, 70.0)])), Added::DrawAgain);
+        assert_eq!((layer.items.len(), layer.items[2].tool), (3, Tool::Mask));
+        assert_eq!(layer.items[2].item().opacity(), 0.5);
         CONTROLS.told(0, 0.0);
     }
 
@@ -778,6 +871,34 @@ mod tests {
         assert!(text.contains(r#"<mask id="m1""#) && text.contains(r#"<g mask="url(#m1)">"#));
         // an export it doesn't make: none
         assert!(Vectors::export(&kit::layer::Export { export: 1, ..export }).is_none());
+    }
+
+    #[test]
+    fn a_smudge_nudges_the_strokes_under_it_along_bending_them() {
+        let mut layer = Vectors::new(0);
+        layer.add(stroke(0, 4.0, b"pen", &line(50.0)));
+        layer.add(stroke(0, 4.0, b"pen", &line(90.0)));
+        let before = layer.items[0].item().points();
+        // a smudge down across the first stroke's middle: pushed down there, its ends kept
+        assert_eq!(
+            layer.add(stroke(2, 30.0, b"blender", &[(60.0, 45.0), (60.0, 50.0), (60.0, 55.0), (60.0, 60.0)])),
+            Added::DrawAgain
+        );
+        assert_eq!(layer.items.len(), 2, "no smudge kept");
+        let after = layer.items[0].item().points();
+        let middle = before.iter().position(|p| p.0 == 60.0).unwrap();
+        assert!(after[middle].1 > 55.0, "{:?}", after[middle]);
+        assert_eq!((after[0], after[10]), (before[0], before[10]), "the ends where they were");
+        assert!(after[middle - 1].1 > 50.0 && after[middle - 1].1 < after[middle].1, "bent");
+        assert_eq!(layer.items[1].item().points(), line(90.0), "the other untouched");
+        assert!(layer.items[0].reach[3] > 57.0, "its box with it");
+        // a stroke moved as an item is nudged where it is drawn
+        let moved: Vec<u8> = [1.0f32, 0.0, 0.0, 1.0, 0.0, 30.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let id = layer.items[1].id;
+        layer.edit(&[Change { id, delete: false, fields: vec![(field::TRANSFORM, moved)] }]);
+        layer.add(stroke(2, 20.0, b"blender", &[(40.0, 115.0), (40.0, 125.0)]));
+        let nudged = layer.items[1].item().points();
+        assert!(nudged.iter().any(|p| p.1 > 124.0), "{nudged:?}");
     }
 
     #[test]
