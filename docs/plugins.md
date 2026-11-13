@@ -868,6 +868,12 @@ draw then says the plugin's id for it (field 21, u32).
   The plugin answers not 0 if anything changed. The app then asks for the data and the items to draw,
   and lays the layer again as one step.
 
+While the Selection tool is open on such a layer, a box like the transform box shows round the
+strokes the selection takes, and the arrow keys move them a pixel at a time, the selection with them.
+An edit lays the layer again only where what changed reaches. Zoomed in, once the view settles, the
+layer's items are laid again at the screen's resolution over the canvas, so they stay sharp; the
+layer's own pixels, which saving and exporting read, stay as they are.
+
 An item is a record: fields one after another, each a 16-bit id, a 32-bit length and that many bytes,
 all little-endian. A reader passes over ids it doesn't know, so a later app can add fields. Ids from
 `0x8000` up are the plugin's own: the app ignores them in what it is handed back. The app writes:

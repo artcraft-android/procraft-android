@@ -856,6 +856,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var hasSelection by mutableStateOf(false)
         private set
+    /** While the selection tool is open on a plugin's layer: the box round the strokes the selection takes (four corners, x then y, canvas pixels), else empty. */
+    var takenBox by mutableStateOf<List<Float>>(emptyList())
+        private set
     private var selectionPopupState by mutableStateOf(SelectionPopup.NONE)
     /** The popover over the selection toolbar; closing the feather popover keeps its feathering as one undo step. */
     var selectionPopup: SelectionPopup
@@ -3071,7 +3074,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             pluginPanelKey(io.github.artcraftandroid.procraft.core.KeyCombo(name, ctrl, shift, alt))
             return true
         }
-        when (val shortcut = plugins.keyShortcut(name, ctrl, shift, alt, transforming) ?: return false) {
+        // the arrows move what is transformed, or the strokes the selection takes
+        val nudges = transforming || takenBox.isNotEmpty()
+        when (val shortcut = plugins.keyShortcut(name, ctrl, shift, alt, nudges) ?: return false) {
             KeyShortcut.Undo -> undo()
             KeyShortcut.Redo -> redo()
             KeyShortcut.CopyLayer -> copyLayer()
@@ -3097,7 +3102,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             KeyShortcut.QuickMenu -> toggleQuickMenu(screenCentre)
             KeyShortcut.GreyView -> session?.let { it.setGreyView(!it.greyView()) }
             is KeyShortcut.BrushSize -> changeSize((size + shortcut.by).coerceIn(0f, 1f))
-            is KeyShortcut.Nudge -> session?.transformArrow(shortcut.dx, shortcut.dy)?.let { transformMoved(it) }
+            is KeyShortcut.Nudge -> if (transforming) {
+                session?.transformArrow(shortcut.dx, shortcut.dy)?.let { transformMoved(it) }
+            } else if (session?.nudgePluginItems(shortcut.dx, shortcut.dy) == true) {
+                refresh()
+            }
         }
         return true
     }
@@ -7207,6 +7216,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun showSelectionLook() {
         val tint = selecting && selectionKind == SelectionKind.AUTOMATIC
         session?.setSelectionDisplay(if (tint) SelectionDisplay.TINT else SelectionDisplay.STRIPES)
+        refreshTakenBox()
+    }
+
+    /** The box round the strokes the selection takes, read again while the selection tool is open. */
+    private fun refreshTakenBox() {
+        takenBox = if (selecting && hasSelection) session?.takenPluginItemsBox().orEmpty() else emptyList()
     }
 
     /** Window pixels to canvas pixels through the view, or none when it cannot be inverted. */
@@ -7859,6 +7874,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         canUndo = info.canUndo
         canRedo = info.canRedo
         hasSelection = session?.hasSelection() ?: false
+        refreshTakenBox()
     }
 
     /** Reads again the thumbnails of the layers whose pixels changed since theirs was read (or have none). */

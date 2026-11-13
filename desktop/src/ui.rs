@@ -2676,8 +2676,13 @@ impl Interface {
         info: &CanvasInfo,
         press: &KeyCombo,
     ) -> bool {
-        let shortcut =
-            procraft_core::key_shortcut(press.key.clone(), press.command, press.shift, press.alt, self.transform.on);
+        let shortcut = procraft_core::key_shortcut(
+            press.key.clone(),
+            press.command,
+            press.shift,
+            press.alt,
+            self.transform.on || self.selection.nudges(),
+        );
         let Some(shortcut) = shortcut else { return false };
         self.key_shortcut(ctx, session, info, shortcut);
         true
@@ -2712,7 +2717,11 @@ impl Interface {
             KeyShortcut::QuickMenu => self.quick_menu.toggle(middle),
             KeyShortcut::GreyView => session.set_grey_view(!session.grey_view()),
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
-            KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
+            KeyShortcut::Nudge { dx, dy } if self.transform.on => self.transform.moved(session.transform_arrow(dx, dy)),
+            // the strokes the selection takes, and the selection with them
+            KeyShortcut::Nudge { dx, dy } => {
+                session.nudge_plugin_items(dx, dy);
+            }
         }
     }
 

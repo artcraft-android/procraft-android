@@ -18,7 +18,7 @@ use crate::icons::{self, Icon, Part};
 use crate::look::{Look, Themed, Weight, argb, mix, pc, text};
 use crate::transform_numeric::Numeric;
 
-const NODE_BLUE: u32 = 0xFF0171EA;
+pub(crate) const NODE_BLUE: u32 = 0xFF0171EA;
 const ROTATE_GREEN: u32 = 0xFF00E607;
 const ROTATE_LINE: u32 = 0xFF00E400;
 const TURN_ORANGE: u32 = 0xFFFEB800;
@@ -723,7 +723,7 @@ fn toolbar_button(ui: &Ui, look: &mut Look, rect: Rect, b: &Button, label_size: 
 }
 
 /// A node: a coloured dot on a white disc with a faint shadow, `scale` times its size.
-fn node(painter: &egui::Painter, at: Pos2, colour: Color32, scale: f32) {
+pub(crate) fn node(painter: &egui::Painter, at: Pos2, colour: Color32, scale: f32) {
     painter.circle_filled(at, 5.5 * scale + 0.5, argb(NODE_SHADOW));
     painter.circle_filled(at, 5.5 * scale, Color32::WHITE);
     painter.circle_filled(at, 3.5 * scale, colour);

@@ -1651,6 +1651,58 @@ impl CanvasSession {
         st.taken_items(current).and_then(|items| items_reach(&items)).map(Vec::from).unwrap_or_default()
     }
 
+    /// The box round the items a selection takes on the current layer, as the selection tool shows
+    /// them taken: its corners (top left, top right, bottom right, bottom left), x then y, canvas
+    /// pixels. Empty with nothing selected, on a layer whose plugin doesn't change its items, or with
+    /// none taken.
+    pub fn taken_plugin_items_box(&self) -> Vec<f32> {
+        let mut st = self.shared.lock();
+        st.finish_stroke();
+        if st.selection.is_none() {
+            return Vec::new();
+        }
+        let current = st.doc.current();
+        let Some([l, t, r, b]) = st.taken_items(current).and_then(|items| items_reach(&items)) else {
+            return Vec::new();
+        };
+        vec![l, t, r, t, r, b, l, b]
+    }
+
+    /// Moves the items a selection takes on the current layer, and the selection with them, `dx`
+    /// across and `dy` down (canvas pixels), as one step: a small move, as an arrow key makes. False
+    /// with nothing selected, or none taken.
+    pub fn nudge_plugin_items(&self, dx: f32, dy: f32) -> bool {
+        if !dx.is_finite() || !dy.is_finite() || (dx == 0.0 && dy == 0.0) {
+            return false;
+        }
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let current = st.doc.current();
+        let Some(before) = st.selection.clone() else { return false };
+        let t = Affine::translate(Vec2::new(dx, dy));
+        let changes: Vec<Change> =
+            st.taken_items(current).unwrap_or_default().iter().filter_map(|i| moved_change(i, t)).collect();
+        if changes.is_empty() || st.doc.is_locked(current) {
+            return false;
+        }
+        // the selection moved first, the items last: the step they make together is the items'
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.mark_steps();
+        }
+        let shift = Vec2::new(dx, dy);
+        st.selection = Some(before.moved(|p| Some(p - shift)));
+        st.record_selection(Some(before), "Move strokes");
+        let done = st.change_items(current, &changes, "Move strokes");
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.collapse_steps();
+        }
+        st.flush();
+        self.shared.frame(st);
+        done
+    }
+
     /// Deletes those items, as one step: their masks gone, what they hid shows again. False if none
     /// went.
     pub fn delete_plugin_items(&self) -> bool {

@@ -12392,6 +12392,50 @@ fn vector_strokes_moved_as_strokes_are_laid_again_exactly_in_one_step() {
 }
 
 #[test]
+fn the_strokes_a_selection_takes_show_their_box_and_arrows_nudge_them_with_the_selection() {
+    let Some((s, _plugins, dir)) = vector_session(160, "nudge") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.2);
+    stroke_across(&s, 40.0, 20.0, 140.0);
+    stroke_across(&s, 110.0, 20.0, 140.0);
+    // nothing selected: no box, nothing to nudge
+    assert!(s.taken_plugin_items_box().is_empty());
+    assert!(!s.nudge_plugin_items(1.0, 0.0));
+    // the first stroke selected: the box round it, where its stamps reach
+    s.select_shape(false, 5.0, 20.0, 155.0, 70.0, crate::SelectionJoin::Add);
+    let corners = s.taken_plugin_items_box();
+    assert_eq!(corners.len(), 8);
+    let item = &vector_items(&s, vector)[0];
+    let half = item.width / 2.0;
+    assert_eq!((corners[0], corners[1]), (20.0 - half, 40.0 - half));
+    assert!(corners[5] > 40.0 && corners[5] < 60.0, "{corners:?}");
+    let drawn = layer_rgba(&s, vector);
+    let selection = s.shared.lock().selection.clone().unwrap();
+    // nudged right a pixel: the stroke moves as a stroke, the selection with it, as one step
+    assert!(s.nudge_plugin_items(1.0, 0.0));
+    assert_eq!(vector_items(&s, vector)[0].transform.map(|t| (t.e, t.f)), Some((1.0, 0.0)));
+    assert_eq!(vector_items(&s, vector)[1].transform, None, "the other stays");
+    let moved = s.shared.lock().selection.clone().unwrap();
+    let at = |m: &procraft_engine::selection::Mask, x: u32, y: u32| m.data[(y * 160 + x) as usize];
+    assert_eq!((at(&moved, 5, 30), at(&moved, 6, 30), at(&selection, 5, 30)), (0, 255, 255));
+    assert_eq!(s.taken_plugin_items_box()[0], corners[0] + 1.0);
+    // again, down: still taken
+    assert!(s.nudge_plugin_items(0.0, 1.0));
+    assert_eq!(vector_items(&s, vector)[0].transform.map(|t| (t.e, t.f)), Some((1.0, 1.0)));
+    // undone, one step each: the stroke and the selection back as they were
+    assert_eq!(s.undo().as_deref(), Some("Move strokes"));
+    assert_eq!(s.undo().as_deref(), Some("Move strokes"));
+    assert_eq!(layer_rgba(&s, vector), drawn);
+    assert_eq!(vector_items(&s, vector)[0].transform, None);
+    assert_eq!(s.shared.lock().selection.clone().unwrap(), selection);
+    // a selection that takes no stroke: no box
+    s.select_none();
+    s.select_shape(false, 0.0, 140.0, 20.0, 160.0, crate::SelectionJoin::Add);
+    assert!(s.taken_plugin_items_box().is_empty() && !s.nudge_plugin_items(1.0, 0.0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn vector_strokes_are_recoloured_restyled_and_smoothed_as_strokes() {
     let Some((s, _plugins, dir)) = vector_session(160, "restyle") else { return };
     let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
