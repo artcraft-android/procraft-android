@@ -27,6 +27,10 @@ import io.github.artcraftandroid.procraft.core.BrushInfo
 import io.github.artcraftandroid.procraft.core.BrushSetInfo
 import io.github.artcraftandroid.procraft.core.RecentBrush
 import io.github.artcraftandroid.procraft.core.CanvasSession
+import io.github.artcraftandroid.procraft.core.ColourModel
+import io.github.artcraftandroid.procraft.core.ColourPlace
+import io.github.artcraftandroid.procraft.core.colourModelKey
+import io.github.artcraftandroid.procraft.core.colourModelOfKey
 import io.github.artcraftandroid.procraft.core.ModelFile
 import io.github.artcraftandroid.procraft.core.SourceKind
 import io.github.artcraftandroid.procraft.core.ChromaticKind
@@ -283,6 +287,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             colorModeState = mode
             interfacePrefs.edit().putInt(COLOR_MODE, mode.ordinal).apply()
         }
+
+    /**
+     * The colour model the colour panel's disc, Classic and Value work in (HSB, the panel's own,
+     * unless another is chosen on its model button), kept from one session to the next.
+     */
+    var colourModel by mutableStateOf(interfacePrefs.getString(COLOUR_MODEL, null)?.let(::colourModelOfKey) ?: ColourModel.HSB)
+        private set
+
+    fun changeColourModel(model: ColourModel) {
+        colourModel = model
+        interfacePrefs.edit().putString(COLOUR_MODEL, colourModelKey(model)).apply()
+    }
+
+    /** Where the colour painted with stands in [colourModel], kept while it is still the colour. */
+    val colourPlace = ColourPlace()
 
     /** The side bar on the right edge instead of the left. */
     var rightHanded by mutableStateOf(interfacePrefs.getBoolean(RIGHT_HANDED, false))
@@ -7816,6 +7835,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val PICK_WINDOW_DP = 54f
         const val RIGHT_HANDED = "right_handed"
         const val COLOR_MODE = "color_mode"
+        const val COLOUR_MODEL = "colour_model"
 
         /** How often a hovering brush cursor reads its size again, ms. */
         const val CURSOR_REREAD_MS = 100L

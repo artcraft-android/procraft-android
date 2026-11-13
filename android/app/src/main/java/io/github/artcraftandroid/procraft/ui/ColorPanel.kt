@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.unit.DpOffset
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -91,10 +92,33 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
+import io.github.artcraftandroid.procraft.core.ColourModel
+import io.github.artcraftandroid.procraft.core.ColourPlace
+import io.github.artcraftandroid.procraft.core.ColourTrack
 import io.github.artcraftandroid.procraft.core.HueControl
+import io.github.artcraftandroid.procraft.core.colourModelAlong
+import io.github.artcraftandroid.procraft.core.colourModelDiscKey
+import io.github.artcraftandroid.procraft.core.colourModelDiscPick
+import io.github.artcraftandroid.procraft.core.colourModelDiscPicture
+import io.github.artcraftandroid.procraft.core.colourModelDiscPoint
+import io.github.artcraftandroid.procraft.core.colourModelHsv
+import io.github.artcraftandroid.procraft.core.colourModelLabel
+import io.github.artcraftandroid.procraft.core.colourModelLetters
+import io.github.artcraftandroid.procraft.core.colourModelPure
+import io.github.artcraftandroid.procraft.core.colourModelRing
+import io.github.artcraftandroid.procraft.core.colourModelRingHue
+import io.github.artcraftandroid.procraft.core.colourModelRingTurn
+import io.github.artcraftandroid.procraft.core.colourModelSlid
+import io.github.artcraftandroid.procraft.core.colourModelSquarePicture
+import io.github.artcraftandroid.procraft.core.colourModelSquareSide
+import io.github.artcraftandroid.procraft.core.colourModelTracks
+import io.github.artcraftandroid.procraft.core.colourModels
 import io.github.artcraftandroid.procraft.core.hueAt
 import io.github.artcraftandroid.procraft.core.huePosition
 import io.github.artcraftandroid.procraft.core.hueStops
+import io.github.artcraftandroid.procraft.core.oklabOfHsv
+import io.github.artcraftandroid.procraft.core.oklabValueSlid
+import io.github.artcraftandroid.procraft.core.oklabValueTracks
 
 private val PanelWidth = 376.dp
 
@@ -196,6 +220,26 @@ class HeldColor(rgb: Int, greyHue: Float = 0.5f, private val onChange: (Int) -> 
 }
 
 /**
+ * [c] in the colour model [model] (chosen on the panel's model button; HSB is the panel's own):
+ * where it stands there, which [place] keeps while it is still the colour, so a grey or black keeps
+ * its hue and saturation. The maths are the shared core's.
+ */
+internal class ModelColor(val c: ColorPick, val model: ColourModel, private val place: ColourPlace) {
+    /** The colour's hue, saturation and third channel in the model (0..1 each). */
+    fun coords(): FloatArray = place.coords(model, c.hue, c.saturation, c.brightness, c.rgb().toUInt()).toFloatArray()
+
+    /** The colour set to [coords] in the model. */
+    fun set(coords: FloatArray) {
+        val hsv = colourModelHsv(model, coords[0], coords[1], coords[2], c.hue)
+        c.setHsv(hsv[0], hsv[1], hsv[2])
+        place.keep(model, coords[0], coords[1], coords[2], c.rgb().toUInt())
+    }
+}
+
+/** A slider track's colours, as the core gives them (0xRRGGBB), to paint with. */
+private fun ColourTrack.paints(): List<Color> = colours.map { rgbColor(it.toInt()) }
+
+/**
  * The colour panel: the current and second colours, a picker per mode, the history and the mode
  * tabs. With [background] it sets the canvas's background colour instead, titled so, with a tick
  * that closes it. On a screen less than [ShortScreen] tall it leaves the history out and tightens
@@ -211,6 +255,9 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
     } else {
         remember(vm) { BrushColor(vm) }
     }
+    // the disc, Classic and Value work in the colour model chosen (the background's colour with a place of its own)
+    val place = if (background) remember { ColourPlace() } else vm.colourPlace
+    val m = remember(c, vm.colourModel, place) { ModelColor(c, vm.colourModel, place) }
     // a swatch dragged out and let go over the panel itself fills nothing
     if (!background) androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.dropAvoid = null } }
     // dragged out by its grabber, it is not seen (nor its blur) until let go, the window floating
@@ -231,10 +278,17 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
             } else if (vm.colorMode == ColorMode.PALETTES) {
                 PanelHeader("Palettes", start = 20.dp, end = 17.dp, chevron = false) { NewPaletteButton(vm) }
             } else PanelHeader("Colors", start = 20.dp, end = 20.dp, height = headerHeight, chevron = false) {
-                Row(Modifier.padding(top = 21.5.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    val swatch = Modifier.size(43.dp, 25.dp).clip(RoundedCornerShape(6.dp))
-                    Box(swatch.background(rgbColor(vm.colorRgb())).border(1.dp, Pc.SwatchEdge, RoundedCornerShape(6.dp)))
-                    Box(swatch.background(rgbColor(vm.secondaryRgb)).clickable { vm.swapColors() })
+                Row(Modifier.padding(top = 21.5.dp)) {
+                    // the colour model, 8 left of the swatches, for the pages that work in one
+                    if (showsModelButton(vm.colorMode)) {
+                        ColourModelButton(vm)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        val swatch = Modifier.size(43.dp, 25.dp).clip(RoundedCornerShape(6.dp))
+                        Box(swatch.background(rgbColor(vm.colorRgb())).border(1.dp, Pc.SwatchEdge, RoundedCornerShape(6.dp)))
+                        Box(swatch.background(rgbColor(vm.secondaryRgb)).clickable { vm.swapColors() })
+                    }
                 }
             }
             Box(Modifier.align(Alignment.TopCenter).padding(top = 4.dp).size(40.dp, 4.dp).clip(CircleShape).background(Pc.Grabber))
@@ -246,10 +300,10 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
         } else Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
             // on a screen too short for it all the picker scrolls, the tabs staying
             when (vm.colorMode) {
-                ColorMode.DISC -> Disc(c, short = short)
-                ColorMode.VALUE -> Value(c, short = short, inks = vm.inks)
+                ColorMode.DISC -> Disc(c, short = short, m = m)
+                ColorMode.VALUE -> Value(c, short = short, inks = vm.inks, m = m)
                 ColorMode.HARMONY -> Harmony(vm, c, short = short)
-                else -> Classic(c, square = if (short) (screenHeight - ShortClassicRest).coerceIn(150.dp, 344.dp) else 344.dp)
+                else -> Classic(c, square = if (short) (screenHeight - ShortClassicRest).coerceIn(150.dp, 344.dp) else 344.dp, m = m)
             }
             if (short) {
                 ShortBottom(vm, c)
@@ -316,6 +370,8 @@ private fun UndockHandle(vm: CanvasViewModel, modifier: Modifier) {
 fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
     val at = vm.floatingColorsAt ?: return
     val c: ColorPick = remember(vm) { BrushColor(vm) }
+    // the disc and Classic in the panel's colour model (Value stays HSB or RGB, as its switch picks)
+    val m = remember(c, vm.colourModel) { ModelColor(c, vm.colourModel, vm.colourPlace) }
     val density = LocalDensity.current
     val height = if (vm.colorMode == ColorMode.DISC) 351.dp else 390.dp
     // kept on the screen
@@ -350,11 +406,11 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
                 when (vm.colorMode) {
                     ColorMode.DISC -> {
                         Spacer(Modifier.height(5.dp))
-                        Disc(c, compact = true)
+                        Disc(c, compact = true, m = m)
                     }
                     ColorMode.CLASSIC -> {
                         Spacer(Modifier.height(6.dp))
-                        Classic(c, compact = true)
+                        Classic(c, compact = true, m = m)
                     }
                     ColorMode.HARMONY -> Box {
                         HarmonyKindButton(vm, start = 18.dp, top = 0.dp, menuX = 0.dp)
@@ -518,7 +574,11 @@ private fun CompactPalettes(vm: CanvasViewModel, c: ColorPick) {
 }
 
 @Composable
-private fun Classic(c: ColorPick, compact: Boolean = false, square: Dp = 344.dp) {
+private fun Classic(c: ColorPick, compact: Boolean = false, square: Dp = 344.dp, m: ModelColor? = null) {
+    if (m != null && m.model != ColourModel.HSB) {
+        ModelClassic(m, compact, square)
+        return
+    }
     SaturationBrightness(c, compact, square)
     if (compact) {
         // the hue only, 240 wide under the 248 square
@@ -532,6 +592,67 @@ private fun Classic(c: ColorPick, compact: Boolean = false, square: Dp = 344.dp)
         SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
         SliderRow(c.saturation, listOf(Pc.SaturationGrey, pure)) { c.setHsv(c.hue, it, c.brightness) }
         SliderRow(c.brightness, BrightnessTrack) { c.setHsv(c.hue, c.saturation, it) }
+    }
+}
+
+/**
+ * Classic in another colour model: its square (saturation across, the model's third channel up),
+ * then sliders for its hue, saturation and third; compact, the hue only.
+ */
+@Composable
+private fun ModelClassic(m: ModelColor, compact: Boolean, square: Dp) {
+    val coords = m.coords()
+    ModelSquare(m, coords, compact, square)
+    val tracks = colourModelTracks(m.model, coords[0], coords[1], coords[2])
+    if (compact) {
+        Box(Modifier.padding(start = 10.dp, end = 10.dp).height(40.dp)) { TrackSlider(m, coords, tracks, 0) }
+        return
+    }
+    Column(Modifier.padding(horizontal = 20.dp)) {
+        for (channel in 0..2) TrackSlider(m, coords, tracks, channel)
+    }
+}
+
+/** The slider of channel [channel] (0 the hue) of the colour at [coords] in [m]'s model, its colours [tracks]' (the core's). */
+@Composable
+private fun TrackSlider(m: ModelColor, coords: FloatArray, tracks: List<ColourTrack>, channel: Int) {
+    val track = tracks.getOrNull(channel) ?: return
+    SliderRow(track.place, track.paints()) {
+        m.set(colourModelSlid(m.model, coords[0], coords[1], coords[2], channel.toUInt(), it).toFloatArray())
+    }
+}
+
+/**
+ * Classic's square in another colour model, as the core draws it: saturation across and the
+ * third up, its picture at most the core's few pixels across and drawn up (a soft gradient, and a
+ * hue drag draws it every frame).
+ */
+@Composable
+private fun ModelSquare(m: ModelColor, coords: FloatArray, compact: Boolean, height: Dp) {
+    val model = m.model
+    val now by rememberUpdatedState(coords)
+    val pick by rememberUpdatedState(m)
+    val width = if (compact) 248.dp else 344.dp
+    val side = colourModelSquareSide(with(LocalDensity.current) { width.roundToPx() }.coerceAtLeast(1).toUInt()).toInt()
+    val hue = coords[0]
+    val picture = rememberPickerPicture(model to hue, side, CanvasSpace.p3) { n -> colourModelSquarePicture(model, hue, n.toUInt()) }
+    val current = rgbColor(m.c.rgb())
+    Box(
+        Modifier.padding(horizontal = if (compact) 6.dp else 16.dp).size(width, if (compact) 248.dp else height).drawWithContent {
+            drawContent()
+            // the knob may hang over the square's edge
+            knob(Offset(coords[1] * size.width, (1f - coords[2]) * size.height), 10.75.dp.toPx(), current)
+        },
+    ) {
+        Box(
+            Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp))
+                .pointerInput(model) { track { x, y -> pick.set(floatArrayOf(now[0], x, 1f - y)) } }
+                .drawBehind {
+                    // read, so a new picture draws
+                    picture.version
+                    drawImage(picture.image, dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()))
+                },
+        )
     }
 }
 
@@ -592,7 +713,11 @@ private fun rememberPickerPicture(key: Any, side: Int, p3: Boolean, make: (Int) 
  * from the right) around the saturation/brightness disc (radius 105).
  */
 @Composable
-private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false) {
+private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false, m: ModelColor? = null) {
+    if (m != null && m.model != ColourModel.HSB) {
+        ModelDisc(m, compact, short)
+        return
+    }
     val hue by rememberUpdatedState(c.hue)
     val sat by rememberUpdatedState(c.saturation)
     val bri by rememberUpdatedState(c.brightness)
@@ -664,6 +789,114 @@ private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false)
                 knob(o + Offset(p.x * r, p.y * r), 10.75.dp.toPx(), rgbColor(c.rgb()))
             },
     )
+}
+
+/**
+ * The disc picker in another colour model, as the core works it out: the ring's hues as the model
+ * shows them at their purest (evenly spaced in OKLab, else as HSB's ring), round its disc
+ * (saturation across and the third up, or HSY′'s wheel at the colour's linear luma). In the panel,
+ * HSY′'s saturation and luma follow on sliders under it.
+ */
+@Composable
+private fun ModelDisc(m: ModelColor, compact: Boolean, short: Boolean) {
+    val model = m.model
+    val coords = m.coords()
+    val now by rememberUpdatedState(coords)
+    val pick by rememberUpdatedState(m)
+    val density = LocalDensity.current
+    // compact, the whole picker is 240 across instead of 364
+    val k = if (compact) 240f / 364f else 1f
+    val discRadius = DiscRadius * k
+    val ringInner = RingInner * k
+    val ringOuter = RingOuter * k
+    val (h, s, t) = Triple(coords[0], coords[1], coords[2])
+    val disc = rememberPickerPicture(model to colourModelDiscKey(model, h, s, t), with(density) { (discRadius * 2).roundToPx() }, CanvasSpace.p3) { n ->
+        colourModelDiscPicture(model, h, s, t, n.toUInt())
+    }
+    val ring = remember(model) {
+        val colours = colourModelRing(model, RingHues.size.toUInt())
+        val stops = Array(colours.size) { i -> (1f - i / (colours.size - 1f)) to rgbColor(colours[i].toInt()) }
+        Brush.sweepGradient(*stops.reversedArray())
+    }
+    val turn = colourModelRingTurn(model, h) * 2f * PI.toFloat()
+    val pure = rgbColor(colourModelPure(model, h).toInt())
+    val at = colourModelDiscPoint(model, h, s, t)
+    val current = rgbColor(m.c.rgb())
+    val luma = model == ColourModel.HSY && !compact
+    Box(
+        Modifier.then(
+            when {
+                compact -> Modifier.padding(start = 10.dp, top = 4.dp, bottom = 6.dp)
+                // HSY′'s sliders start 4 under the picker
+                short -> Modifier.padding(start = 6.dp, bottom = if (luma) 4.dp else 3.dp)
+                else -> Modifier.padding(start = 6.dp, top = 8.dp, bottom = if (luma) 4.dp else 17.dp)
+            },
+        ).size(364.dp * k)
+            .pointerInput(model) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    val centre = Offset(size.width / 2f, size.height / 2f)
+                    val onRing = (down.position - centre).getDistance() > ((discRadius + ringInner) / 2).toPx()
+                    fun send(p: Offset) {
+                        val d = p - centre
+                        val was = now
+                        if (onRing) {
+                            val turnAt = (atan2(-d.y, d.x) / (2f * PI.toFloat()) + 1f) % 1f
+                            pick.set(floatArrayOf(colourModelRingHue(model, turnAt), was[1], was[2]))
+                        } else {
+                            val r = discRadius.toPx()
+                            pick.set(colourModelDiscPick(model, was[0], was[1], was[2], d.x / r, d.y / r).toFloatArray())
+                        }
+                    }
+                    send(down.position)
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val ch = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!ch.pressed) break
+                        send(ch.position)
+                        ch.consume()
+                    }
+                }
+            }
+            .drawBehind {
+                val o = center
+                val inner = ringInner.toPx()
+                val outer = ringOuter.toPx()
+                drawCircle(ring, (inner + outer) / 2f, o, style = Stroke(outer - inner))
+                val r = discRadius.toPx()
+                disc.version
+                drawImage(disc.image, topLeft = Offset(o.x - r, o.y - r))
+                // the ring knob sits on the middle of the ring, where the hue is
+                val mid = (inner + outer) / 2f
+                knob(o + Offset(cos(turn) * mid, -sin(turn) * mid), 26.2.dp.toPx() * k, pure)
+                knob(o + Offset(at[0] * r, at[1] * r), 10.75.dp.toPx(), current)
+            },
+    )
+    if (luma) {
+        LumaSliders(m, coords)
+        Spacer(Modifier.height(if (short) 3.dp else 17.dp))
+    }
+}
+
+/**
+ * HSY′'s saturation and luma on sliders under its wheel, each row 36 tall: its letter 13 in, the
+ * track from 40 to 56 short of the right, the percentage 10 short of it.
+ */
+@Composable
+private fun LumaSliders(m: ModelColor, coords: FloatArray) {
+    val letters = colourModelLetters(m.model)
+    for (channel in 1..2) {
+        val v = coords[channel]
+        val colours = colourModelAlong(m.model, coords[0], coords[1], coords[2], channel.toUInt(), 12u).map { rgbColor(it.toInt()) }
+        Box(Modifier.padding(horizontal = 8.dp).fillMaxWidth().height(36.dp)) {
+            Text(letters.getOrElse(channel) { "" }, color = Pc.PanelTitle, fontSize = 15.sp, modifier = Modifier.align(Alignment.CenterStart).padding(start = 13.dp))
+            Box(Modifier.align(Alignment.CenterStart).padding(start = 40.dp, end = 56.dp)) {
+                SliderRow(v, colours) { to -> m.set(coords.copyOf().also { it[channel] = to }) }
+            }
+            Text(percentShown(v), color = Pc.PanelTitle, fontSize = 15.sp, maxLines = 1, modifier = Modifier.align(Alignment.CenterEnd).padding(end = 10.dp))
+        }
+    }
 }
 
 /** A colour knob: [fill] inside a thin white ring, over a soft shadow. */
@@ -779,6 +1012,53 @@ private fun p3HsvToRgb(h: Float, s: Float, v: Float): Int =
 /** A canvas colour (0xRRGGBB) as P3 hue (0..1), saturation and value. */
 private fun rgbToP3Hsv(rgb: Int): FloatArray =
     io.github.artcraftandroid.procraft.core.rgbToP3Hsv(rgb.toUInt(), CanvasSpace.p3).toFloatArray()
+
+/** The colour model's button, and its menu's width. */
+private val ModelButtonSize = DpSize(70.dp, 25.dp)
+private val ModelMenuWidth = 160.dp
+
+/**
+ * The colour model's button left of the swatches: the model's name in a small box with a chevron;
+ * a tap lists the models (HSB, HLS, HSY′, OKLab) under it, its right edge level with the button's,
+ * the one in use ticked.
+ */
+@Composable
+private fun ColourModelButton(vm: CanvasViewModel) {
+    var open by remember { mutableStateOf(false) }
+    Box(
+        Modifier.size(ModelButtonSize).clip(RoundedCornerShape(6.dp)).background(Pc.ModelButton).clickable { open = true }.drawBehind {
+            // a small downward chevron, 9 in from the right
+            val c = Offset(size.width - 9.dp.toPx(), size.height / 2f)
+            val (w, h) = 3.5.dp.toPx() to 1.8.dp.toPx()
+            val stroke = 1.4.dp.toPx()
+            drawLine(Pc.PanelTitle, c + Offset(-w, -h), c + Offset(0f, h), stroke)
+            drawLine(Pc.PanelTitle, c + Offset(0f, h), c + Offset(w, -h), stroke)
+        },
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(colourModelLabel(vm.colourModel), color = Pc.PanelTitle, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(start = 8.dp))
+        // it grows from under the button's middle
+        MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(1f - ModelButtonSize.width / 2 / ModelMenuWidth, 0f)) { look ->
+            val offset = with(LocalDensity.current) { IntOffset((ModelButtonSize.width - ModelMenuWidth).roundToPx(), (ModelButtonSize.height + 6.dp).roundToPx()) }
+            PcPopup(textScale = MATCHED_POPUP_TEXT, offset = offset, properties = PopupProperties(focusable = true), onDismissRequest = { open = false }) {
+                Column(look.width(ModelMenuWidth).clip(RoundedCornerShape(18.dp)).background(Pc.MenuFill).padding(vertical = 9.dp)) {
+                    for (model in colourModels()) {
+                        Row(
+                            Modifier.fillMaxWidth().height(38.dp).clickable {
+                                vm.changeColourModel(model)
+                                open = false
+                            }.padding(start = 18.dp, end = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(colourModelLabel(model), color = Pc.MenuInk, fontSize = 16.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                            if (model == vm.colourModel) Icon(PcIcons.Tick, contentDescription = null, tint = Pc.MenuInk, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 /** The harmony kind under the title; tapping it lists the kinds. */
 @Composable
@@ -1076,11 +1356,12 @@ internal fun colourName(rgb: Int): String = io.github.artcraftandroid.procraft.c
 class Inks(val of: (Int) -> FloatArray, val rgb: (FloatArray) -> Int)
 
 /**
- * Number sliders: hue, saturation and brightness, then red, green and blue (on a CMYK canvas:
- * cyan, magenta, yellow and black, the groups closer together), then the hex code.
+ * Number sliders: hue, saturation and brightness (or the colour model's three), then red, green
+ * and blue (on a CMYK canvas: cyan, magenta, yellow and black, the groups closer together), then
+ * the hex code.
  */
 @Composable
-private fun Value(c: ColorPick, compact: Boolean = false, short: Boolean = false, inks: Inks? = null) {
+private fun Value(c: ColorPick, compact: Boolean = false, short: Boolean = false, inks: Inks? = null, m: ModelColor? = null) {
     val rgb = c.rgb()
     val r = (rgb shr 16) and 0xFF
     val g = (rgb shr 8) and 0xFF
@@ -1090,21 +1371,11 @@ private fun Value(c: ColorPick, compact: Boolean = false, short: Boolean = false
         return
     }
     if (inks != null) {
-        InkValue(c, inks)
+        InkValue(c, inks, m)
         return
     }
     Column(Modifier.padding(horizontal = 8.dp)) {
-        ValueGroup(short = short) {
-            ValueRow("H", huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
-                c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness)
-            }
-            ValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
-                c.setHsv(c.hue, it, c.brightness)
-            }
-            ValueRow("B", c.brightness, BrightnessTrack, "${(c.brightness * 100f).roundToInt()}%") {
-                c.setHsv(c.hue, c.saturation, it)
-            }
-        }
+        ValueGroup(short = short) { ModelRows(c, m) }
         ValueGroup(Modifier.padding(top = 6.dp), short) {
             ValueRow("R", r / 255f, listOf(Color(0, g, b), Color(255, g, b)), "$r") { c.setRgb(((it * 255f).roundToInt() shl 16) or (g shl 8) or b) }
             ValueRow("G", g / 255f, listOf(Color(r, 0, b), Color(r, 255, b)), "$g") { c.setRgb((r shl 16) or ((it * 255f).roundToInt() shl 8) or b) }
@@ -1115,9 +1386,52 @@ private fun Value(c: ColorPick, compact: Boolean = false, short: Boolean = false
     }
 }
 
-/** Value on a CMYK canvas: the hue, saturation and brightness, the four inks, then the hex code. */
+/**
+ * Value's first three sliders: hue, saturation and brightness, or the colour model's (OKLab's: its
+ * own lightness, a and b, as the core works them out).
+ */
 @Composable
-private fun InkValue(c: ColorPick, inks: Inks) {
+private fun ModelRows(c: ColorPick, m: ModelColor?) {
+    if (m == null || m.model == ColourModel.HSB) {
+        ValueRow("H", huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
+            c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness)
+        }
+        ValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
+            c.setHsv(c.hue, it, c.brightness)
+        }
+        ValueRow("B", c.brightness, BrightnessTrack, "${(c.brightness * 100f).roundToInt()}%") {
+            c.setHsv(c.hue, c.saturation, it)
+        }
+        return
+    }
+    if (m.model == ColourModel.OKLAB) {
+        // a and b run ±0.4 across their sliders
+        val lab = oklabOfHsv(c.hue, c.saturation, c.brightness)
+        val tracks = oklabValueTracks(lab[0], lab[1], lab[2])
+        for ((i, letter) in listOf("L", "a", "b").withIndex()) {
+            val track = tracks.getOrNull(i) ?: continue
+            val shown = if (i == 0) "${(lab[0] * 100f).roundToInt()}" else signedShown(lab[i])
+            ValueRow(letter, track.place, track.paints(), shown) {
+                val hsv = oklabValueSlid(lab[0], lab[1], lab[2], i.toUInt(), it, c.hue)
+                c.setHsv(hsv[0], hsv[1], hsv[2])
+            }
+        }
+        return
+    }
+    val coords = m.coords()
+    val tracks = colourModelTracks(m.model, coords[0], coords[1], coords[2])
+    val letters = colourModelLetters(m.model)
+    for (i in 0..2) {
+        val track = tracks.getOrNull(i) ?: continue
+        ValueRow(letters.getOrElse(i) { "" }, track.place, track.paints(), if (i == 0) degreesShown(coords[0]) else percentShown(coords[i])) {
+            m.set(colourModelSlid(m.model, coords[0], coords[1], coords[2], i.toUInt(), it).toFloatArray())
+        }
+    }
+}
+
+/** Value on a CMYK canvas: the hue, saturation and brightness (or the colour model's three), the four inks, then the hex code. */
+@Composable
+private fun InkValue(c: ColorPick, inks: Inks, m: ModelColor?) {
     val rgb = c.rgb()
     // the inks dragged to, kept while the colour they make is the colour (not worked out again
     // from it, which could move the other inks)
@@ -1126,17 +1440,7 @@ private fun InkValue(c: ColorPick, inks: Inks) {
     val now = held?.takeIf { it.first == rgb }?.second ?: worked
     fun inksWith(k: Int, v: Float) = now.copyOf().also { it[k] = v.coerceIn(0f, 1f) }
     Column(Modifier.padding(horizontal = 8.dp)) {
-        ValueGroup(height = 142.dp, gap = 4.dp, top = 1.dp) {
-            ValueRow("H", huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
-                c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness)
-            }
-            ValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
-                c.setHsv(c.hue, it, c.brightness)
-            }
-            ValueRow("B", c.brightness, BrightnessTrack, "${(c.brightness * 100f).roundToInt()}%") {
-                c.setHsv(c.hue, c.saturation, it)
-            }
-        }
+        ValueGroup(height = 142.dp, gap = 4.dp, top = 1.dp) { ModelRows(c, m) }
         ValueGroup(Modifier.padding(top = 8.dp), height = 187.dp, gap = 3.dp, top = 1.dp) {
             for ((k, letter) in listOf("C", "M", "Y", "K").withIndex()) {
                 val v = now.getOrElse(k) { 0f }
