@@ -171,7 +171,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var opening by mutableStateOf(false)
         private set
-    var message by mutableStateOf<String?>(null)
+    private var messageText by mutableStateOf<String?>(null)
+
+    /**
+     * How many messages have been given: work that tells why it couldn't be done shows here even
+     * once its message has been shown and cleared, or when it repeats the one still showing.
+     */
+    private var messagesGiven = 0
+
+    /** A passing message to show; each one given is counted (see [messagesGiven]). */
+    var message: String?
+        get() = messageText
+        set(text) {
+            if (text != null) messagesGiven++
+            messageText = text
+        }
     private var artworkDir: File? = null
 
     /** A save failed and was told of: the next failure isn't, until one succeeds again. */
@@ -1905,7 +1919,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         importMade.clear()
         importStep = 0f
         importShown = ImportShown(name, 0f)
-        val told = message
+        // counted, not compared: the canvas shows a message and clears it at once, which can come
+        // before the work's end is looked at here
+        val told = messagesGiven
         val following = viewModelScope.launch {
             var creep = 0f
             while (true) {
@@ -1924,7 +1940,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 return null
             }
             // full, then the check drawn in it before the card goes
-            if (message == told) {
+            if (messagesGiven == told) {
                 importShown = ImportShown(name, 1f, done = true)
                 kotlinx.coroutines.delay(EXPORT_DONE_MS)
             }
