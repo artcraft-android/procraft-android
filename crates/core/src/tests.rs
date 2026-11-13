@@ -12841,3 +12841,55 @@ fn zoomed_in_a_vector_layer_shows_sharp_once_the_view_settles_and_as_it_was_else
     assert!(s.shared.lock().sharp.held_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_colour_dropped_on_a_vector_layer_fills_inside_its_strokes_as_an_item_closing_a_gap() {
+    let Some((s, _plugins, dir)) = vector_session(160, "fill") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.15);
+    s.set_color(0.0, 0.0, 0.0);
+    // a square of strokes, a gap of a few pixels in its top
+    stroke_line(&s, (30.0, 30.0), (77.0, 30.0));
+    stroke_line(&s, (83.0, 30.0), (130.0, 30.0));
+    stroke_line(&s, (130.0, 30.0), (130.0, 130.0));
+    stroke_line(&s, (130.0, 130.0), (30.0, 130.0));
+    stroke_line(&s, (30.0, 130.0), (30.0, 30.0));
+    let lines = layer_rgba(&s, vector);
+    let colour_at =
+        |p: &[u8], x: u32, y: u32| p[((y * 160 + x) * 4) as usize..((y * 160 + x) * 4 + 4) as usize].to_vec();
+    // red dropped inside: filled there, kept in, behind the lines
+    assert!(s.pour_drop(80.0, 80.0, 1.0, 0.0, 0.0, 0.1));
+    s.pour_end(true, None);
+    let filled = layer_rgba(&s, vector);
+    assert_eq!(colour_at(&filled, 80, 80), [255, 0, 0, 255]);
+    assert_eq!(colour_at(&filled, 34, 100), [255, 0, 0, 255], "up to the lines");
+    assert_eq!(colour_at(&filled, 80, 10)[3], 0, "not out through the gap");
+    assert_eq!(colour_at(&filled, 10, 80)[3], 0);
+    assert_eq!(colour_at(&filled, 30, 80), colour_at(&lines, 30, 80), "the line over it as it was");
+    let items = vector_items(&s, vector);
+    assert_eq!(items.len(), 6);
+    assert!(items[0].region.is_some() && items[0].samples.is_empty(), "an item of its own, first");
+    assert_eq!(items[0].colour, [1.0, 0.0, 0.0]);
+    // one step
+    assert_eq!(s.undo().as_deref(), Some("ColorDrop"));
+    assert_eq!(layer_rgba(&s, vector), lines);
+    assert_eq!(vector_items(&s, vector).len(), 5);
+    s.redo();
+    assert_eq!(layer_rgba(&s, vector), filled);
+    // blue dropped on the fill: recoloured, as an item
+    assert!(s.pour_drop(80.0, 80.0, 0.0, 0.0, 1.0, 0.1));
+    s.pour_end(true, None);
+    assert_eq!(colour_at(&layer_rgba(&s, vector), 80, 80), [0, 0, 255, 255]);
+    assert_eq!(vector_items(&s, vector)[0].colour, [0.0, 0.0, 1.0]);
+    assert_eq!(vector_items(&s, vector).len(), 6);
+    // taken by a selection and moved, with the strokes round it: laid again where they went
+    s.select_shape(false, 20.0, 20.0, 140.0, 140.0, crate::SelectionJoin::Add);
+    assert!(s.transform_plugin_items(vec![1.0, 0.0, 0.0, 1.0, 10.0, 0.0]));
+    assert_eq!(colour_at(&layer_rgba(&s, vector), 135, 80), [0, 0, 255, 255]);
+    s.select_none();
+    // the restyled colour reaches fills as well
+    s.set_color(0.0, 1.0, 0.0);
+    assert!(s.restyle_plugin_items(true, false, false, false));
+    assert_eq!(colour_at(&layer_rgba(&s, vector), 90, 80), [0, 255, 0, 255]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1515,6 +1515,15 @@ enum Op {
     },
     /// A layer's pixels are replaced with no undo step (during an edit held with `Hold`).
     Put(LayerId, Vec<u8>),
+    /// Pixels laid over part of a layer (premultiplied RGBA8, `rect`'s rows), source over, as one
+    /// undo step keeping what was there.
+    Over {
+        layer: LayerId,
+        rect: IRect,
+        /// What of it is laid (within `rect`).
+        within: IRect,
+        pixels: Vec<u8>,
+    },
     /// A layer redrawn with no undo step from another canvas's layer (`source`, `size` pixels),
     /// each pixel from where `to_source` (3 × 3, rows) takes it there, filtered so.
     RedrawFrom {
@@ -2970,6 +2979,27 @@ impl Canvas {
         self.last_ended
     }
 
+    /// Lays `pixels` (premultiplied RGBA8, the rows of `rect`) over `layer` there, source over, as a
+    /// stroke is laid: one undo step keeping what was there. Only within the rectangle
+    /// [`Canvas::lay_within`] says, if it says one; nothing while measuring (see
+    /// [`Canvas::measure`]). Pixels of the wrong size are left out.
+    pub fn lay_over(&mut self, layer: LayerId, rect: IRect, pixels: Vec<u8>) {
+        if self.measuring || rect.is_empty() || pixels.len() != rect.width() as usize * rect.height() as usize * 4 {
+            return;
+        }
+        self.end_stroke();
+        let within = self.lay_within.map_or(rect, |w| rect.intersect(w));
+        if within.is_empty() {
+            return;
+        }
+        self.ops.push(Op::Over { layer, rect, within, pixels });
+    }
+
+    /// Whether strokes are only being measured (see [`Canvas::measure`]).
+    pub fn measuring(&self) -> bool {
+        self.measuring
+    }
+
     /// Strokes given from now on are in another canvas's pixels, `scale` of this one's each, the
     /// point `origin` of those at this one's top left: drawn here as much bigger (their stamps,
     /// their moving grain and the grain fixed to the canvas with them), for part of that canvas
@@ -3632,6 +3662,7 @@ impl Canvas {
                 | Op::Put(id, _)
                 | Op::PutRegion { layer: id, .. }
                 | Op::RedrawFrom { layer: id, .. }
+                | Op::Over { layer: id, .. }
                 | Op::Hold(id) => written.push(*id),
                 Op::Write { layers, .. } => written.extend(layers.iter().map(|(id, ..)| *id)),
                 Op::Flip { layers, .. } => written.extend(layers.iter().copied()),
@@ -4078,7 +4109,11 @@ impl Canvas {
                 }
                 Op::Write { layers, .. } => ids.extend(layers.iter().map(|(id, ..)| *id)),
                 Op::Flip { layers, .. } => ids.extend(layers.iter().copied()),
-                Op::Put(id, _) | Op::PutRegion { layer: id, .. } | Op::Hold(id) | Op::RedrawFrom { layer: id, .. } => {
+                Op::Put(id, _)
+                | Op::PutRegion { layer: id, .. }
+                | Op::Hold(id)
+                | Op::RedrawFrom { layer: id, .. }
+                | Op::Over { layer: id, .. } => {
                     ids.push(*id);
                 }
                 Op::Release { before: Some(d), .. } => ids.extend(d.pixel_layer_ids()),
@@ -4551,6 +4586,80 @@ impl Canvas {
                     }
                     self.dirty = full;
                     history_changed = true;
+                }
+                Op::Over { layer: id, rect, within, pixels } => {
+                    let full = self.full();
+                    let kept = within.intersect(rect).intersect(full);
+                    if !kept.is_empty()
+                        && self.layers.contains_key(&id)
+                        && let Some(snapshot) = self.snapshot(device, &mut encoder, id, kept)
+                    {
+                        self.push_step(Step {
+                            made: 0,
+                            name: None,
+                            doc: None,
+                            pixels: vec![snapshot],
+                            selection: None,
+                            flip: None,
+                        });
+                        let (w, h) = (rect.width(), rect.height());
+                        let source = device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("laid over"),
+                            size: extent(w, h),
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: LAYER_FORMAT,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        gpu.queue.write_texture(
+                            source.as_image_copy(),
+                            &pixels,
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(w * 4),
+                                rows_per_image: Some(h),
+                            },
+                            extent(w, h),
+                        );
+                        let view = source.create_view(&wgpu::TextureViewDescriptor::default());
+                        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("laid over"),
+                            layout: &self.pipelines.transform_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(&self.everything),
+                                },
+                            ],
+                        });
+                        // each pixel from the same one of the picture, nearest
+                        let (x, y) = (rect.x0 as f32, rect.y0 as f32);
+                        let offset = uniforms.push(&TransformUniform {
+                            r0: [1.0, 0.0, -x, 0.0],
+                            r1: [0.0, 1.0, -y, 0.0],
+                            r2: [0.0, 0.0, 1.0, 0.0],
+                            p: [0.0, w as f32, h as f32, 0.0],
+                        });
+                        if let Some(layer) = self.layers.get(&id) {
+                            let mut pass = render_pass(&mut encoder, "laid over", &layer.view, wgpu::LoadOp::Load);
+                            pass.set_pipeline(&self.pipelines.transform);
+                            scissor(&mut pass, kept);
+                            pass.set_bind_group(0, &bind, &[]);
+                            pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+                            pass.draw(0..3, 0..1);
+                        }
+                        self.dirty = self.dirty.union(kept);
+                    }
                 }
                 Op::RedrawFrom { layer: id, source, size, to_source: m, resample } => {
                     if let Some(layer) = self.layers.get(&id) {

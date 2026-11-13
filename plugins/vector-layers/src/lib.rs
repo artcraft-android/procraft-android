@@ -14,12 +14,19 @@
 //! A selection takes the strokes wholly inside it, or with Touching strokes on, those it touches
 //! too; masks with them while Masks is on. The app moves, restyles or deletes what it takes.
 //!
+//! A colour dropped on the layer fills the region round the point, bounded by what is drawn and
+//! kept out of gaps in its lines up to the card's width: the fill is an item of its own, behind the
+//! strokes, its outline kept, so it moves, recolours and deletes as a stroke does. Dropped on a
+//! stroke or a fill, it recolours that.
+//!
 //! Its data: `PCVL`, then a record (see [`kit::layer`]): the version, each brush once (an item names
 //! its brush by its place among them), the next id to give, and each item: its brush, the box it
 //! reaches, its id, and its record as the app wrote it, its brush left out. Fields it doesn't know are
 //! kept as they came.
 
-use kit::layer::{Added, Area, Change, Drawn, Item, Layer, Record, Sample, Tool, fields};
+mod fill;
+
+use kit::layer::{Added, Area, Change, Drawn, Dropped, Item, Layer, Record, Sample, Tool, field, fields};
 
 /// What its data starts with, and the version of what follows (1 had no ids).
 const MAGIC: &[u8; 4] = b"PCVL";
@@ -42,9 +49,13 @@ const MOST_ITEMS: usize = 200_000;
 const CUT_STEPS: usize = 12;
 
 /// Its controls: what the eraser does (0 Mask, 1 Whole, 2 Cut), whether a selection takes the
-/// strokes it touches as well as those inside it, and whether it takes masks.
-static CONTROLS: kit::Controls<3> = kit::Controls::new([0.0, 0.0, 1.0]);
+/// strokes it touches as well as those inside it, whether it takes masks, and how wide a gap in
+/// the lines a fill keeps out of (canvas pixels).
+static CONTROLS: kit::Controls<4> = kit::Controls::new([0.0, 0.0, 1.0, 6.0]);
 kit::controls!(CONTROLS);
+
+/// How far a fill's outline may stray from its pixels' edges as it is smoothed, pixels.
+const FILL_SMOOTHING: f32 = 0.75;
 
 /// What the eraser does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,6 +279,41 @@ impl Vectors {
         changed
     }
 
+    /// The topmost stroke or fill (no mask) at canvas point `p`, by place.
+    fn under(&self, p: (f32, f32)) -> Option<usize> {
+        self.items.iter().enumerate().rev().filter(|(_, k)| k.tool != Tool::Mask).find_map(|(at, kept)| {
+            let item = kept.item();
+            let hit = if item.is_fill() {
+                let t = item.transform();
+                let outlines: Vec<Vec<(f32, f32)>> = item
+                    .outlines()
+                    .into_iter()
+                    .map(|o| o.into_iter().map(|q| kit::layer::apply(&t, q)).collect())
+                    .collect();
+                fill::inside(&outlines, p)
+            } else {
+                let reach = item.width() / 2.0 + 1.0;
+                item.paths().iter().any(|path| distance(p, path) <= reach)
+            };
+            hit.then_some(at)
+        })
+    }
+
+    /// Item `at` in `colour`: whether that changed it.
+    fn recolour(&mut self, at: usize, colour: [f32; 3]) -> bool {
+        let Some(kept) = self.items.get(at) else { return false };
+        let bytes: Vec<u8> = colour.iter().flat_map(|c| c.to_le_bytes()).collect();
+        let item = kept.item();
+        if item.field(field::COLOUR) == Some(&bytes[..]) {
+            return false;
+        }
+        let record = item.with_field(field::COLOUR, Some(&bytes)).record().to_vec();
+        if let Some(kept) = self.items.get_mut(at) {
+            kept.record = record;
+        }
+        true
+    }
+
     /// Its brushes still named by an item, each item naming its place among them.
     fn compacted(&self) -> (Vec<&[u8]>, Vec<u32>) {
         let mut kept: Vec<u32> = Vec::new();
@@ -419,6 +465,42 @@ impl Layer for Vectors {
             .collect()
     }
 
+    fn fill(&mut self, dropped: &Dropped) -> bool {
+        let area = &dropped.drawn;
+        let scale = dropped.scale.max(1.0);
+        let (w, h) = (area.width as usize, area.height as usize);
+        let drawn = fill::Drawn { width: w, height: h, coverage: &area.coverage };
+        // where it lands on the picture
+        let (px, py) = (dropped.x / scale - area.x as f32, dropped.y / scale - area.y as f32);
+        if px < 0.0 || py < 0.0 || px >= w as f32 || py >= h as f32 {
+            return false;
+        }
+        let limit = (dropped.threshold * 255.0).round() as u8;
+        let gap = CONTROLS.get(3).max(0.0) / scale;
+        match drawn.fill((px as usize, py as usize), limit, gap) {
+            // on something drawn: that recoloured, if it is one of these
+            None => self.under((dropped.x, dropped.y)).is_some_and(|at| self.recolour(at, dropped.colour)),
+            Some(inside) => {
+                if self.items.len() >= MOST_ITEMS {
+                    return false;
+                }
+                let to_canvas = |(x, y): (f32, f32)| ((area.x as f32 + x) * scale, (area.y as f32 + y) * scale);
+                let outlines: Vec<Vec<(f32, f32)>> = fill::outlines(w, h, &inside, FILL_SMOOTHING)
+                    .into_iter()
+                    .map(|o| o.into_iter().map(to_canvas).collect())
+                    .collect();
+                if outlines.is_empty() {
+                    return false;
+                }
+                // behind the strokes
+                let item = Item::fill(&outlines, dropped.colour, 1.0);
+                let Some(kept) = self.kept(&item, None) else { return false };
+                self.items.insert(0, kept);
+                true
+            }
+        }
+    }
+
     fn edit(&mut self, changes: &[Change]) -> bool {
         let mut changed = false;
         for change in changes {
@@ -551,6 +633,110 @@ mod tests {
         assert_eq!(layer.add(stroke(1, 30.0, b"eraser", &[(200.0, 190.0), (200.0, 210.0)])), Added::DrawAgain);
         assert_eq!(layer.items.len(), 2);
         CONTROLS.told(0, 0.0);
+    }
+
+    /// A colour dropped at (`x`, `y`) on a picture `side` square of what `items` draw (each
+    /// sample's square of `reach` drawn).
+    fn dropped_on(layer: &Vectors, side: u32, x: f32, y: f32, colour: [f32; 3]) -> Dropped {
+        let mut coverage = vec![0u8; (side * side) as usize];
+        for kept in &layer.items {
+            let item = kept.item();
+            if item.is_fill() {
+                let t = item.transform();
+                let outlines: Vec<Vec<(f32, f32)>> = item
+                    .outlines()
+                    .into_iter()
+                    .map(|o| o.into_iter().map(|q| kit::layer::apply(&t, q)).collect())
+                    .collect();
+                for (i, c) in coverage.iter_mut().enumerate() {
+                    let p = ((i as u32 % side) as f32 + 0.5, (i as u32 / side) as f32 + 0.5);
+                    if fill::inside(&outlines, p) {
+                        *c = 255;
+                    }
+                }
+                continue;
+            }
+            let reach = (item.width() / 2.0) as i32;
+            for (sx, sy) in item.points() {
+                for dy in -reach..=reach {
+                    for dx in -reach..=reach {
+                        let (px, py) = (sx as i32 + dx, sy as i32 + dy);
+                        if px >= 0 && py >= 0 && px < side as i32 && py < side as i32 {
+                            coverage[(py as u32 * side + px as u32) as usize] = 255;
+                        }
+                    }
+                }
+            }
+        }
+        let drawn = Area { x: 0, y: 0, width: side, height: side, coverage };
+        Dropped { x, y, colour, threshold: 0.0, scale: 1.0, drawn }
+    }
+
+    /// A closed square of strokes from `a` to `b`, a gap `gap` wide in its top side's middle.
+    fn square_of_strokes(layer: &mut Vectors, a: f32, b: f32, gap: f32) {
+        let side = |from: (f32, f32), to: (f32, f32)| {
+            let n = 40;
+            (0..=n)
+                .map(|i| {
+                    (from.0 + (to.0 - from.0) * i as f32 / n as f32, from.1 + (to.1 - from.1) * i as f32 / n as f32)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mid = (a + b) / 2.0;
+        layer.add(stroke(0, 3.0, b"pen", &side((a, a), (mid - gap / 2.0, a))));
+        layer.add(stroke(0, 3.0, b"pen", &side((mid + gap / 2.0, a), (b, a))));
+        layer.add(stroke(0, 3.0, b"pen", &side((b, a), (b, b))));
+        layer.add(stroke(0, 3.0, b"pen", &side((b, b), (a, b))));
+        layer.add(stroke(0, 3.0, b"pen", &side((a, b), (a, a))));
+    }
+
+    /// (The one test that sets the gap: tests run side by side.)
+    #[test]
+    fn a_dropped_colour_fills_inside_strokes_behind_them_closing_a_gap_and_recolours_what_it_lands_on() {
+        let mut layer = Vectors::new(0);
+        square_of_strokes(&mut layer, 20.0, 80.0, 4.0);
+        assert_eq!(layer.items.len(), 5);
+        // gaps up to 8 closed: the inside filled, behind the strokes, outside left
+        CONTROLS.told(3, 8.0);
+        assert!(layer.fill(&dropped_on(&layer, 100, 50.0, 50.0, [1.0, 0.0, 0.0])));
+        assert_eq!(layer.items.len(), 6);
+        let filled = layer.items[0].item();
+        assert!(filled.is_fill() && filled.samples().is_empty());
+        let t = filled.transform();
+        let outlines: Vec<Vec<(f32, f32)>> =
+            filled.outlines().into_iter().map(|o| o.into_iter().map(|q| kit::layer::apply(&t, q)).collect()).collect();
+        assert!(fill::inside(&outlines, (50.0, 50.0)) && fill::inside(&outlines, (23.0, 50.0)));
+        assert!(!fill::inside(&outlines, (5.0, 5.0)) && !fill::inside(&outlines, (50.0, 10.0)), "kept in");
+        // it is saved and drawn as an item, needing no brush of its own
+        let back = Vectors::load(0, &layer.save()).unwrap();
+        assert!(back.items[0].item().is_fill());
+        let mut list = Drawn::default();
+        back.draw(&mut list);
+        let list = list.bytes();
+        let first = fields(&list).find(|(id, _)| *id == 2).unwrap().1.to_vec();
+        assert!(fields(&first).any(|(id, _)| id == field::OUTLINE));
+        // the gap wider than what is closed: the fill runs out over the whole picture
+        let mut open = Vectors::new(0);
+        square_of_strokes(&mut open, 20.0, 80.0, 20.0);
+        assert!(open.fill(&dropped_on(&open, 100, 50.0, 50.0, [1.0, 0.0, 0.0])));
+        let wide = open.items[0].item();
+        assert!(fill::inside(&wide.outlines(), (5.0, 5.0)));
+        // dropped on the fill: recoloured; on a stroke: that recoloured; the same colour again: nothing
+        assert!(layer.fill(&dropped_on(&layer, 100, 50.0, 50.0, [0.0, 0.0, 1.0])));
+        assert_eq!(layer.items.len(), 6);
+        let blue: Vec<u8> = [0.0f32, 0.0, 1.0].iter().flat_map(|c| c.to_le_bytes()).collect();
+        assert_eq!(layer.items[0].item().field(field::COLOUR), Some(&blue[..]));
+        assert!(layer.fill(&dropped_on(&layer, 100, 80.0, 50.0, [0.0, 1.0, 0.0])));
+        let green: Vec<u8> = [0.0f32, 1.0, 0.0].iter().flat_map(|c| c.to_le_bytes()).collect();
+        assert_eq!(layer.items[3].item().field(field::COLOUR), Some(&green[..]), "the right side's stroke");
+        assert!(!layer.fill(&dropped_on(&layer, 100, 80.0, 50.0, [0.0, 1.0, 0.0])));
+        // a selection takes the fill by its outline; an edit moves it
+        assert!(layer.select(&area(0, 0, 100, 100)).contains(&layer.items[0].id));
+        let id = layer.items[0].id;
+        let moved: Vec<u8> = [1.0f32, 0.0, 0.0, 1.0, 5.0, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert!(layer.edit(&[Change { id, delete: false, fields: vec![(field::TRANSFORM, moved)] }]));
+        assert!(layer.items[0].item().points().iter().all(|p| p.0 >= 5.0));
+        CONTROLS.told(3, 6.0);
     }
 
     #[test]

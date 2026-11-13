@@ -821,7 +821,8 @@ Without a badge, or while the plugin is off or gone, the layer shows a plug.
   strokes a selection takes (all of them with nothing selected), the layer's options offer Recolour
   and Apply Brush for them, Transform moves them as strokes, and flipping or cropping the canvas
   moves every stroke with the pixels.
-- Fill, Invert and adjustments wait until it is rasterized, as with a text layer. Rasterize makes it
+- ColorDrop on it goes to the plugin, if it exports `procraft_layer_fill` (below). Otherwise ColorDrop,
+  and always Invert and adjustments, wait until it is rasterized, as with a text layer. Rasterize makes it
   a plain layer, and so does merging another layer into it. Flipping or cropping the canvas does too
   when its plugin can't move its items.
 - A stroke drawn inside a selection is kept with that selection and is always laid again inside it.
@@ -838,6 +839,7 @@ procraft_layer_save() -> i32                     // the layer's data now: its le
 procraft_layer_draw() -> i32                     // the layer's items to draw: its length
 procraft_layer_select(len: i32) -> i32           // if it exports it: the ids a selection takes
 procraft_layer_edit(len: i32) -> i32             // if it exports it: changes to items, not 0 if made
+procraft_layer_fill(len: i32) -> i32             // if it exports it: a colour dropped, not 0 if items changed
 ```
 
 For each change, the app first hands over the layer's data with `procraft_layer_load`. `kind` is the
@@ -874,6 +876,20 @@ An edit lays the layer again only where what changed reaches. Zoomed in, once th
 layer's items are laid again at the screen's resolution over the canvas, so they stay sharp; the
 layer's own pixels, which saving and exporting read, stay as they are.
 
+`procraft_layer_fill` is handed a colour dropped on the layer with ColorDrop, as a record:
+
+- fields 1 and 2, where it landed, x and y in canvas pixels (32-bit floats);
+- field 3, the colour, three 32-bit floats, sRGB 0 to 1;
+- field 4, the threshold ColorDrop is at, 0 to 1 (32-bit float);
+- field 5, how many canvas pixels across each pixel of the picture in field 6 is (32-bit float);
+- field 6, what bounds a fill there, as a selection is handed over (box and a byte a pixel), in that
+  picture's pixels: how much of each is drawn. It is the layer's own pixels, every layer seen while a
+  plugin says to fill from all of them, or the reference layer when another layer is it. A canvas
+  over 2048 pixels a side comes shrunk by whole steps, each pixel the most of those it stands for.
+
+The plugin answers not 0 if it changed its items. The app then asks for the data and the items to
+draw, and lays the layer again as one step called ColorDrop.
+
 An item is a record: fields one after another, each a 16-bit id, a 32-bit length and that many bytes,
 all little-endian. A reader passes over ids it doesn't know, so a later app can add fields. Ids from
 `0x8000` up are the plugin's own: the app ignores them in what it is handed back. The app writes:
@@ -891,6 +907,7 @@ all little-endian. A reader passes over ids it doesn't know, so a later app can 
 | 22 | Where it is laid, six 32-bit floats `a b c d e f`: each sample's (x, y) goes to (a·x + c·y + e, b·x + d·y + f), its brush scaled and its pen's lean turned with it. None: where it was drawn |
 | 23 | The smoothing it is laid with in place of its brush's own, 32-bit float, 0 to 1 |
 | 24 | The selection it was drawn inside, if any: its box (x, y, width, height, u32), then its coverage in runs, each a u32 count and the byte |
+| 25 | A region it fills, in place of samples: u32 how many outlines, then each a u32 count of points and them, x and y as 32-bit floats (canvas pixels). The app fills them even-odd in the item's colour (field 3) at its opacity (field 6), smoothed, over what is under it, moved by its transform (field 22). Such an item needs no brush |
 
 The brush is kept as the brush library keeps one: the brush it came from among those the app comes
 with, and every setting changed from there. An item draws the same however the brush is changed
@@ -918,6 +935,10 @@ the eraser does, and what a selection takes:
 - Erasing reaches a stroke's symmetry copies as well as the stroke itself.
 - A selection takes the strokes wholly inside it. It takes those it touches too while "Selections
   take touching strokes" is on, and masks too while "Selections take masks" is on.
+- A colour dropped on the layer fills the region round where it lands, bounded by what is drawn, and
+  kept out of gaps in the lines up to "Fills close gaps" wide. The fill is an item of its own, behind
+  the strokes: it moves, recolours and deletes as a stroke does, and a selection takes it by its
+  outline. Dropped on a stroke or a fill, the colour recolours that.
 
 ## Filters
 

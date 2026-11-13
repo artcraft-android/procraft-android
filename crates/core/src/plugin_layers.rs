@@ -63,6 +63,9 @@ const MOST_SAMPLES: usize = 1 << 20;
 const MOST_CLIP: usize = 1 << 28;
 /// The most items a selection may take.
 const MOST_TAKEN: usize = 1 << 20;
+/// The most of a layer's pixels handed to its plugin for a colour dropped on it, a side: a larger
+/// canvas goes shrunk by whole steps.
+const MOST_DROP_SIDE: u32 = 2048;
 /// What an item's dual brush's randomness is seeded with, beside its own (as a stroke's is).
 const SECOND_SEED: u32 = 0x5eed_0002;
 /// The bit of a batch's count saying the pen lifted after it.
@@ -131,6 +134,10 @@ pub(crate) mod field {
     /// The selection it was drawn within, if any: its box (x, y, width, height as u32), then its
     /// coverage in runs (a u32 count, then the byte), row by row.
     pub(crate) const CLIP: u16 = 24;
+    /// A region it fills, in place of samples: u32 how many outlines, then each a u32 count of its
+    /// points and them, x and y as 32-bit floats (canvas pixels, before its transform), filled
+    /// even-odd in its colour at its opacity.
+    pub(crate) const OUTLINE: u16 = 25;
     /// The first id of a plugin's own fields.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const OWN: u16 = 0x8000;
@@ -309,6 +316,103 @@ pub(crate) struct Item {
     pub(crate) smoothing: Option<f32>,
     /// The selection it was drawn within.
     pub(crate) clip: Option<Arc<Clip>>,
+    /// The region it fills, if it is a fill (it then has no samples, and needs no brush).
+    pub(crate) region: Option<Arc<Region>>,
+}
+
+/// A region an item fills: its outlines (canvas pixels, before the item's transform), filled
+/// even-odd.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Region {
+    pub(crate) outlines: Vec<Vec<Vec2>>,
+}
+
+impl Region {
+    fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&u32::try_from(self.outlines.len()).unwrap_or(0).to_le_bytes());
+        for outline in &self.outlines {
+            out.extend_from_slice(&u32::try_from(outline.len()).unwrap_or(0).to_le_bytes());
+            for p in outline {
+                out.extend_from_slice(&p.x.to_le_bytes());
+                out.extend_from_slice(&p.y.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// The region its field holds, if it holds up: whole outlines of points on the canvas, not
+    /// too many of them.
+    fn read(bytes: &[u8]) -> Option<Region> {
+        let count = u32_of(bytes)? as usize;
+        let mut at = 4;
+        let mut outlines = Vec::new();
+        let mut points = 0;
+        for _ in 0..count {
+            let n = u32_of(bytes.get(at..)?)? as usize;
+            at += 4;
+            points += n;
+            if points > MOST_SAMPLES {
+                return None;
+            }
+            let outline: Vec<Vec2> = floats_of(bytes.get(at..at + n * 8)?)
+                .collect::<Vec<_>>()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[x, y]| Vec2::new(x, y))
+                .collect();
+            if outline.len() != n || !outline.iter().all(|p| p.is_finite()) {
+                return None;
+            }
+            at += n * 8;
+            if n >= 3 {
+                outlines.push(outline);
+            }
+        }
+        (!outlines.is_empty()).then_some(Region { outlines })
+    }
+
+    /// The pixels it covers through `to` on a `width` × `height` canvas: the box (one pixel to
+    /// spare for its smoothed edge) and how much of each pixel there, rows top to bottom; none if
+    /// it covers none.
+    fn coverage(&self, to: Affine, width: u32, height: u32) -> Option<(IRect, Vec<u8>)> {
+        let moved: Vec<Vec<Vec2>> = self.outlines.iter().map(|o| o.iter().map(|p| to.apply(*p)).collect()).collect();
+        let all = moved.iter().flatten();
+        let (mut l, mut t, mut r, mut b) = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for p in all {
+            (l, t, r, b) = (l.min(p.x), t.min(p.y), r.max(p.x), b.max(p.y));
+        }
+        let rect = IRect::new(
+            (l - 1.0).floor() as i32,
+            (t - 1.0).floor() as i32,
+            (r + 1.0).ceil() as i32,
+            (b + 1.0).ceil() as i32,
+        )
+        .intersect(IRect::from_size(width, height));
+        if rect.is_empty() {
+            return None;
+        }
+        let mut pixmap = tiny_skia::Pixmap::new(rect.width(), rect.height())?;
+        let mut path = tiny_skia::PathBuilder::new();
+        let (ox, oy) = (rect.x0 as f32, rect.y0 as f32);
+        for outline in &moved {
+            let mut points = outline.iter();
+            let Some(first) = points.next() else { continue };
+            path.move_to(first.x - ox, first.y - oy);
+            for p in points {
+                path.line_to(p.x - ox, p.y - oy);
+            }
+            path.close();
+        }
+        let path = path.finish()?;
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color_rgba8(255, 255, 255, 255);
+        paint.anti_alias = true;
+        pixmap.fill_path(&path, &paint, tiny_skia::FillRule::EvenOdd, tiny_skia::Transform::identity(), None);
+        let coverage: Vec<u8> = pixmap.data().as_chunks::<4>().0.iter().map(|px| px[3]).collect();
+        Some((rect, coverage))
+    }
 }
 
 fn tool_number(tool: ToolKind) -> u8 {
@@ -384,6 +488,9 @@ impl Item {
         if let Some(clip) = &self.clip {
             r.field(field::CLIP, &clip.bytes());
         }
+        if let Some(region) = &self.region {
+            r.field(field::OUTLINE, &region.bytes());
+        }
         let batches: Vec<u8> = self.batches.iter().flat_map(|b| b.to_le_bytes()).collect();
         r.field(field::BATCHES, &batches);
         r.field(field::STARTED, &self.started.to_le_bytes());
@@ -418,6 +525,7 @@ impl Item {
             transform: None,
             smoothing: None,
             clip: None,
+            region: None,
         };
         let mut brush = None;
         for (id, bytes) in fields(record) {
@@ -451,6 +559,7 @@ impl Item {
                 }
                 field::SMOOTHING => item.smoothing = floats::<1>(bytes).map(|[v]| v.clamp(0.0, 1.0)),
                 field::CLIP => item.clip = Clip::read(bytes).map(Arc::new),
+                field::OUTLINE => item.region = Region::read(bytes).map(Arc::new),
                 field::SIZES => item.sizes = floats_of(bytes).take(4).filter(|v| v.is_finite() && *v >= 0.0).collect(),
                 field::BRUSH_NAME => item.brush_name = String::from_utf8_lossy(bytes).chars().take(256).collect(),
                 field::SEED => item.seed = u32_of(bytes).unwrap_or(0),
@@ -484,13 +593,18 @@ impl Item {
                 _ => {}
             }
         }
-        item.brush = brush?;
+        // a fill needs no brush
+        item.brush = match brush {
+            Some(brush) => brush,
+            None if item.region.is_some() => Arc::new(Vec::new()),
+            None => return None,
+        };
         // batches that don't add up to the samples are no use: laid as if they came at once
         let counted: u64 = item.batches.iter().map(|b| u64::from(b & !LIFTED)).sum();
         if counted != item.samples.len() as u64 {
             item.batches.clear();
         }
-        (!item.samples.is_empty()).then_some(item)
+        (!item.samples.is_empty() || item.region.is_some()).then_some(item)
     }
 
     /// Its tool's step name, as undo calls a stroke of it.
@@ -894,6 +1008,7 @@ impl State {
             smoothing: None,
             // drawn within the selection: laid within it again
             clip: self.selection.as_ref().and_then(Clip::of).map(Arc::new),
+            region: None,
         };
         let laid = self.laid_current(layer);
         let mut recording = Recording { layer, kind, item, started: None, laid };
@@ -1198,6 +1313,9 @@ impl State {
     /// from `brushes`, made already): where it reached, and whether it changed the layer as it went
     /// (smudging, painting wet).
     fn lay_item(&mut self, layer: LayerId, item: &Item, brushes: &mut Vec<(Arc<Vec<u8>>, Brush)>) -> (IRect, bool) {
+        if let Some(region) = &item.region {
+            return self.lay_region(layer, item, region);
+        }
         let raw = match brushes.iter().find(|(kept, _)| **kept == *item.brush) {
             Some((_, brush)) => brush.clone(),
             None => {
@@ -1267,6 +1385,28 @@ impl State {
         }
         crate::lay_stroke(canvas, builder, second_builder, &guide);
         canvas.last_stroke().unwrap_or((IRect::EMPTY, false))
+    }
+
+    /// Lays fill `item` (filling `region`) on `layer`: its colour at its opacity over what is there,
+    /// where it is laid (on the sharp picture's canvas, there). Where it reaches; never in place.
+    fn lay_region(&mut self, layer: LayerId, item: &Item, region: &Region) -> (IRect, bool) {
+        let t = item.transform.unwrap_or(Affine::IDENTITY);
+        let to = self.lay_to.map_or(t, |to| t.then(to));
+        let (width, height) = (self.doc.width(), self.doc.height());
+        let measuring = self.canvas.as_ref().is_some_and(procraft_gpu::Canvas::measuring);
+        let Some((rect, coverage)) = region.coverage(to, width, height) else { return (IRect::EMPTY, false) };
+        if !measuring && let Some(canvas) = self.canvas.as_mut() {
+            let [r, g, b] = item.colour.map(|c| c.clamp(0.0, 1.0));
+            let opacity = item.opacity.clamp(0.0, 1.0);
+            let mut pixels = Vec::with_capacity(coverage.len() * 4);
+            for &c in &coverage {
+                let a = f32::from(c) / 255.0 * opacity;
+                let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                pixels.extend_from_slice(&[byte(r * a), byte(g * a), byte(b * a), byte(a)]);
+            }
+            canvas.lay_over(layer, rect, pixels);
+        }
+        (rect, false)
     }
 
     /// Asks `layer`'s plugin for its items and lays them again (see [`State::lay_items_again`]):
@@ -1473,13 +1613,27 @@ impl State {
     /// `changes` made to `layer`'s items by its plugin, and the layer laid again, as one step called
     /// `name`: false if nothing changed or it couldn't.
     pub(crate) fn change_items(&mut self, layer: LayerId, changes: &[Change], name: &str) -> bool {
-        if changes.is_empty() || self.doc.is_locked(layer) {
+        if changes.is_empty() {
+            return false;
+        }
+        let record = changes_record(changes);
+        self.items_changed_by(layer, name, |running| running.layer_edit(&record))
+    }
+
+    /// `layer`'s items changed by its plugin doing `work` (true if it changed any), and the layer
+    /// laid again, as one step called `name`: false if nothing changed or it couldn't.
+    fn items_changed_by(
+        &mut self,
+        layer: LayerId,
+        name: &str,
+        work: impl FnOnce(&mut crate::plugin_run::Running) -> Result<bool, crate::plugin_run::Stop>,
+    ) -> bool {
+        if self.doc.is_locked(layer) {
             return false;
         }
         let before = self.doc.layer(layer).and_then(|l| l.plugin.as_ref()).and_then(|p| p.data.clone());
-        let record = changes_record(changes);
         let answer = self.on_layer_data(layer, |running| {
-            if !running.layer_edit(&record)? {
+            if !work(running)? {
                 return Ok(None);
             }
             Ok(Some((running.layer_save(MOST_DATA)?, running.layer_draw(MOST_DRAWN)?)))
@@ -1498,6 +1652,54 @@ impl State {
         }
         self.revision += 1;
         true
+    }
+
+    /// Whether `layer` is a plugin's layer whose plugin takes a colour dropped on it (on, its data
+    /// read).
+    pub(crate) fn plugin_layer_fills(&self, layer: LayerId) -> bool {
+        self.editable_layer(layer).is_some_and(|(kind, _)| {
+            self.hooks.as_ref().and_then(|hooks| hooks.on_layer(&kind, |running, _| Ok(running.layer_fills())))
+                == Some(true)
+        })
+    }
+
+    /// Colour `colour` (sRGB 0..1) dropped on `layer` at canvas point `at` with `threshold` (0..1):
+    /// handed to its plugin with the pixels that bound a fill there (as ColorDrop measures them:
+    /// every layer seen while a plugin says so, the reference layer when another layer is it, else
+    /// the layer's own), and the layer laid again with what it made of it, as one step. False if
+    /// nothing changed.
+    pub(crate) fn fill_plugin_layer(&mut self, layer: LayerId, at: Vec2, colour: [f32; 3], threshold: f32) -> bool {
+        let (width, height) = (self.doc.width(), self.doc.height());
+        let pixels = if self.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
+            self.composite_pixels()
+        } else {
+            match self.doc.reference().filter(|&r| r != layer) {
+                Some(reference) => self.layer_pixels(reference),
+                None => self.layer_pixels(layer),
+            }
+        };
+        let Some(pixels) = pixels else { return false };
+        // shrunk by whole steps to a size a plugin takes, each pixel the most of those it stands for
+        let step = width.max(height).div_ceil(MOST_DROP_SIDE).max(1);
+        let (w, h) = (width.div_ceil(step), height.div_ceil(step));
+        let mut coverage = vec![0_u8; w as usize * h as usize];
+        for (y, row) in pixels.as_chunks::<4>().0.chunks(width as usize).enumerate() {
+            let out = (y as u32 / step) as usize * w as usize;
+            for (x, px) in row.iter().enumerate() {
+                if let Some(c) = coverage.get_mut(out + (x as u32 / step) as usize) {
+                    *c = (*c).max(px[3]);
+                }
+            }
+        }
+        let mut r = Record::default();
+        r.floats(1, &[at.x]).floats(2, &[at.y]).floats(3, &colour.map(|c| c.clamp(0.0, 1.0)));
+        r.floats(4, &[threshold.clamp(0.0, 1.0)]).floats(5, &[step as f32]);
+        let mut area = Record::default();
+        area.field(1, &0u32.to_le_bytes()).field(2, &0u32.to_le_bytes());
+        area.field(3, &w.to_le_bytes()).field(4, &h.to_le_bytes()).field(5, &coverage);
+        r.field(6, &area.bytes());
+        let record = r.bytes();
+        self.items_changed_by(layer, "ColorDrop", |running| running.layer_fill(&record))
     }
 
     /// Deletes the items of `layer` the selection takes (every one with nothing selected), as one
@@ -1593,8 +1795,9 @@ pub(crate) fn items_reach(items: &[Item]) -> Option<[f32; 4]> {
     for item in items {
         let t = item.transform.unwrap_or(Affine::IDENTITY);
         let half = item.width * t.scale_factor() / 2.0;
-        for s in &item.samples {
-            let p = t.apply(s.pos);
+        let outline = item.region.iter().flat_map(|r| r.outlines.iter().flatten().map(|p| (*p, 0.0)));
+        for (at, half) in item.samples.iter().map(|s| (s.pos, half)).chain(outline) {
+            let p = t.apply(at);
             let [l, top, r, b] = reach.unwrap_or([p.x, p.y, p.x, p.y]);
             reach = Some([l.min(p.x - half), top.min(p.y - half), r.max(p.x + half), b.max(p.y + half)]);
         }
@@ -1826,6 +2029,7 @@ mod tests {
             transform: Some(Affine { a: 0.0, b: 2.0, c: -2.0, d: 0.0, e: 5.0, f: 6.0 }),
             smoothing: Some(0.25),
             clip: Some(Arc::new(Clip { x: 3, y: 4, width: 3, height: 2, coverage: vec![0, 0, 255, 255, 255, 9] })),
+            region: None,
         }
     }
 

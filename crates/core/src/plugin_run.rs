@@ -102,7 +102,8 @@
 //!   `procraft_layer_draw() -> i32` its items to draw, each its length at `procraft_layer_out()`.
 //!   If it has them, `procraft_layer_select(len: i32) -> i32` gives the ids of the items a selection
 //!   (`len` bytes) takes, and `procraft_layer_edit(len: i32) -> i32` makes the changes `len` bytes
-//!   ask of its items (not 0: something changed).
+//!   ask of its items (not 0: something changed); `procraft_layer_fill(len: i32) -> i32` takes a
+//!   colour dropped on the layer (not 0: its items changed).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
@@ -225,6 +226,7 @@ const LAYER_SAVE: &str = "procraft_layer_save";
 const LAYER_DRAW: &str = "procraft_layer_draw";
 const LAYER_SELECT: &str = "procraft_layer_select";
 const LAYER_EDIT: &str = "procraft_layer_edit";
+const LAYER_FILL: &str = "procraft_layer_fill";
 /// What a call on a plugin's own artwork may spend (its drawing, its saving), and how long; a touch,
 /// which comes with each sample while the canvas waits, far less.
 const CANVAS_FUEL: u64 = 800_000_000;
@@ -591,6 +593,8 @@ struct LayerCalls {
     /// Which items a selection takes, and changes to items, if it has them.
     select: Option<TypedFunc<i32, i32>>,
     edit: Option<TypedFunc<i32, i32>>,
+    /// A colour dropped on the layer, if it takes one.
+    fill: Option<TypedFunc<i32, i32>>,
 }
 
 /// What a plugin says of an item recorded on its layer.
@@ -866,6 +870,7 @@ impl Running {
                     draw: instance.get_typed_func(&store, LAYER_DRAW).ok()?,
                     select: instance.get_typed_func(&store, LAYER_SELECT).ok(),
                     edit: instance.get_typed_func(&store, LAYER_EDIT).ok(),
+                    fill: instance.get_typed_func(&store, LAYER_FILL).ok(),
                 })
             })();
             let key_buffer = instance.get_typed_func(&store, KEY_BUFFER).ok();
@@ -1281,6 +1286,20 @@ impl Running {
         let Running { store, layers, .. } = self;
         let Some(edit) = layers.as_ref().and_then(|calls| calls.edit.as_ref()) else { return Ok(false) };
         Ok(guarded(|| long_call(store, edit, len, &mut left, until))? != 0)
+    }
+
+    /// Whether it takes a colour dropped on its layer.
+    pub(crate) fn layer_fills(&self) -> bool {
+        self.layers.as_ref().is_some_and(|calls| calls.fill.is_some())
+    }
+
+    /// A colour dropped on the layer it works on (`drop`, a record): whether its items changed.
+    pub(crate) fn layer_fill(&mut self, drop: &[u8]) -> Result<bool, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(drop, &mut left, until)?;
+        let Running { store, layers, .. } = self;
+        let Some(fill) = layers.as_ref().and_then(|calls| calls.fill.as_ref()) else { return Ok(false) };
+        Ok(guarded(|| long_call(store, fill, len, &mut left, until))? != 0)
     }
 
     /// The panel it asked to show since last asked (none if it didn't), and whether it asked to

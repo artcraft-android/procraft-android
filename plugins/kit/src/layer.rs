@@ -4,7 +4,8 @@
 //! which keeps the layer's items in data of its own: the app holds that data, saves it beside the
 //! layer's pixels, and undoes and redoes it with them. When the plugin changes items already drawn
 //! (taking some away, say), it asks the app to draw the layer again from its items. The app can also
-//! ask which items a selection takes ([`Layer::select`]) and change or delete them ([`Layer::edit`]).
+//! ask which items a selection takes ([`Layer::select`]) and change or delete them ([`Layer::edit`]),
+//! and hand it a colour dropped on the layer ([`Layer::fill`]).
 //! See `docs/plugins.md`. [`layers!`](crate::layers!) exports the calls.
 //!
 //! ```ignore
@@ -76,6 +77,10 @@ pub mod field {
     /// The selection it was drawn within, if any: its box (x, y, width, height as u32), then its
     /// coverage in runs (a u32 count, then the byte), row by row.
     pub const CLIP: u16 = 24;
+    /// A region it fills, in place of samples: u32 how many outlines, then each a u32 count of its
+    /// points and them, x and y as 32-bit floats (canvas pixels, before its transform), filled
+    /// even-odd in its colour at its opacity. Such an item needs no brush.
+    pub const OUTLINE: u16 = 25;
     /// The first id of a plugin's own fields.
     pub const OWN: u16 = 0x8000;
 }
@@ -269,16 +274,71 @@ impl Item {
             .collect()
     }
 
-    /// Where its samples are drawn, canvas pixels, in order.
+    /// Where its samples are drawn, canvas pixels, in order (a fill's: its outlines' points).
     pub fn points(&self) -> Vec<(f32, f32)> {
         let t = self.transform();
+        if self.is_fill() {
+            return self.outlines().into_iter().flatten().map(|p| apply(&t, p)).collect();
+        }
         self.samples().iter().map(|s| apply(&t, (s.x, s.y))).collect()
     }
 
+    /// Whether it fills a region ([`field::OUTLINE`]) rather than being a stroke.
+    pub fn is_fill(&self) -> bool {
+        self.field(field::OUTLINE).is_some()
+    }
+
+    /// The outlines of the region it fills, before its transform (none for a stroke).
+    pub fn outlines(&self) -> Vec<Vec<(f32, f32)>> {
+        let Some(bytes) = self.field(field::OUTLINE) else { return Vec::new() };
+        let count = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        let mut out = Vec::new();
+        let mut at = 4;
+        for _ in 0..count(0).unwrap_or(0) {
+            let Some(n) = count(at) else { break };
+            at += 4;
+            let mut outline = Vec::with_capacity(n.min(1 << 20));
+            for i in 0..n {
+                match (f32_at(bytes, at + i * 8), f32_at(bytes, at + i * 8 + 4)) {
+                    (Some(x), Some(y)) => outline.push((x, y)),
+                    _ => return out,
+                }
+            }
+            at += n * 8;
+            out.push(outline);
+        }
+        out
+    }
+
+    /// A fill of the region `outlines` make (even-odd, canvas pixels) in `colour` (sRGB 0..1) at
+    /// `opacity`.
+    pub fn fill(outlines: &[Vec<(f32, f32)>], colour: [f32; 3], opacity: f32) -> Item {
+        let mut region = (outlines.len() as u32).to_le_bytes().to_vec();
+        for outline in outlines {
+            region.extend((outline.len() as u32).to_le_bytes());
+            for &(x, y) in outline {
+                region.extend(x.to_le_bytes());
+                region.extend(y.to_le_bytes());
+            }
+        }
+        let colour: Vec<u8> = colour.iter().flat_map(|c| c.to_le_bytes()).collect();
+        let mut r = Record::default();
+        r.field(field::TOOL, &[0]).field(field::OUTLINE, &region).field(field::COLOUR, &colour);
+        r.field(field::OPACITY, &opacity.to_le_bytes()).field(field::WIDTH, &0f32.to_le_bytes());
+        Item { record: r.bytes() }
+    }
+
     /// Where its samples are drawn, and where the symmetry it was drawn with draws them again:
-    /// each path, its own first.
+    /// each path, its own first (a fill's: its outlines, each closed).
     pub fn paths(&self) -> Vec<Vec<(f32, f32)>> {
         let t = self.transform();
+        if self.is_fill() {
+            let closed = |mut o: Vec<(f32, f32)>| {
+                o.extend(o.first().copied());
+                o.into_iter().map(|p| apply(&t, p)).collect()
+            };
+            return self.outlines().into_iter().map(closed).collect();
+        }
         let own: Vec<(f32, f32)> = self.samples().iter().map(|s| (s.x, s.y)).collect();
         let mut out = vec![own.clone()];
         if let Some(symmetry) = self.field(field::SYMMETRY).and_then(Symmetry::read) {
@@ -416,6 +476,40 @@ impl Area {
     }
 }
 
+/// A colour dropped on a layer ([`Layer::fill`]): where (canvas pixels), the colour (sRGB 0..1),
+/// how far a fill may reach into what is drawn (0..1: the coverage it passes over is at most this),
+/// and what bounds a fill there: how much of each pixel is drawn, in a picture each of whose pixels
+/// is `scale` canvas pixels across (its box in its own pixels).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Dropped {
+    pub x: f32,
+    pub y: f32,
+    pub colour: [f32; 3],
+    pub threshold: f32,
+    pub scale: f32,
+    pub drawn: Area,
+}
+
+impl Dropped {
+    /// What `bytes` (the app's record of it) holds.
+    pub fn read(bytes: &[u8]) -> Dropped {
+        let mut out = Dropped { scale: 1.0, ..Dropped::default() };
+        for (id, value) in fields(bytes) {
+            let f = |i: usize| f32_at(value, i * 4).filter(|v| v.is_finite());
+            match id {
+                1 => out.x = f(0).unwrap_or(0.0),
+                2 => out.y = f(0).unwrap_or(0.0),
+                3 => out.colour = [f(0), f(1), f(2)].map(|c| c.unwrap_or(0.0).clamp(0.0, 1.0)),
+                4 => out.threshold = f(0).unwrap_or(0.0).clamp(0.0, 1.0),
+                5 => out.scale = f(0).filter(|s| *s >= 1.0).unwrap_or(1.0),
+                6 => out.drawn = Area::read(value),
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
 /// A change the app asks of one item ([`Layer::edit`]): which, by its id, and whether it goes, or
 /// the fields it takes in place of its own.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -509,6 +603,10 @@ pub trait Layer: Sized + Send {
     fn edit(&mut self, _changes: &[Change]) -> bool {
         false
     }
+    /// A colour dropped on it: whether its items changed (nothing, unless it says).
+    fn fill(&mut self, _dropped: &Dropped) -> bool {
+        false
+    }
 }
 
 /// The layer being worked on (the app hands one over for each change), and what the app reads from
@@ -593,6 +691,11 @@ impl<L: Layer> Held<L> {
         let changes = Change::read_all(&std::mem::take(&mut *lock(&self.input)));
         i32::from(lock(&self.layer).as_mut().is_some_and(|layer| layer.edit(&changes)))
     }
+
+    pub fn fill(&self, _len: i32) -> i32 {
+        let dropped = Dropped::read(&std::mem::take(&mut *lock(&self.input)));
+        i32::from(lock(&self.layer).as_mut().is_some_and(|layer| layer.fill(&dropped)))
+    }
 }
 
 /// Exports the calls a plugin's own kinds of layer are reached through, for `$layer` (a type that
@@ -640,6 +743,11 @@ macro_rules! layers {
         #[unsafe(no_mangle)]
         pub extern "C" fn procraft_layer_edit(len: i32) -> i32 {
             LAYER.edit(len)
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn procraft_layer_fill(len: i32) -> i32 {
+            LAYER.fill(len)
         }
     };
 }
@@ -810,7 +918,32 @@ mod tests {
         *held.input.lock().unwrap() = saved;
         assert_eq!(held.load(0, len), 0);
         assert_eq!(held.layer.lock().unwrap().as_ref().unwrap().0, [item]);
-        // one that selects and edits nothing says so
-        assert_eq!((held.select(0), held.edit(0)), (0, 0));
+        // one that selects, edits and fills nothing says so
+        assert_eq!((held.select(0), held.edit(0), held.fill(0)), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_fill_keeps_its_outlines_and_is_hit_by_them() {
+        let square = vec![(1.0, 1.0), (5.0, 1.0), (5.0, 5.0), (1.0, 5.0)];
+        let fill = Item::fill(&[square.clone()], [1.0, 0.0, 0.0], 1.0);
+        assert!(fill.is_fill() && fill.samples().is_empty());
+        assert_eq!(fill.outlines(), [square.clone()]);
+        assert_eq!(fill.points(), square);
+        let moved = fill.with_field(field::TRANSFORM, Some(&floats(&[1.0, 0.0, 0.0, 1.0, 10.0, 0.0])));
+        assert_eq!(moved.paths()[0].first(), Some(&(11.0, 1.0)));
+        assert_eq!(moved.paths()[0].len(), 5, "closed");
+        // a colour dropped, as the app hands it over
+        let mut area = Record::default();
+        area.field(1, &0u32.to_le_bytes()).field(2, &0u32.to_le_bytes());
+        area.field(3, &2u32.to_le_bytes()).field(4, &1u32.to_le_bytes()).field(5, &[0, 200]);
+        let mut r = Record::default();
+        r.field(1, &3.5f32.to_le_bytes()).field(2, &4.0f32.to_le_bytes()).field(3, &floats(&[0.0, 1.0, 2.0]));
+        r.field(4, &0.25f32.to_le_bytes()).field(5, &2.0f32.to_le_bytes()).field(6, &area.bytes());
+        let dropped = Dropped::read(&r.bytes());
+        assert_eq!(
+            (dropped.x, dropped.y, dropped.colour, dropped.threshold, dropped.scale),
+            (3.5, 4.0, [0.0, 1.0, 1.0], 0.25, 2.0)
+        );
+        assert_eq!(dropped.drawn.at((1.5, 0.5)), 200);
     }
 }
