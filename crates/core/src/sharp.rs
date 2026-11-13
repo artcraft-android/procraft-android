@@ -47,6 +47,8 @@ pub(crate) struct Sharp {
     shown: Option<Shown>,
     /// What showed last, and since when: made once it has shown so a while.
     pending: Option<(Shown, Instant)>,
+    /// What it couldn't be made for (too big, say): not tried again until something changes.
+    failed: Option<Shown>,
     /// How many sharp pictures were made.
     pub(crate) made: u64,
 }
@@ -98,9 +100,14 @@ impl State {
         };
         if !wanted || !quiet {
             self.drop_sharp(!wanted);
+            // what is under way ends, and it settles again: a frame then to look
+            if wanted {
+                self.sharp.pending = None;
+                self.ask_frame_at(Instant::now() + SETTLE);
+            }
             return;
         }
-        if self.sharp.shown == Some(key) {
+        if self.sharp.shown == Some(key) || self.sharp.failed == Some(key) {
             return;
         }
         self.drop_sharp(false);
@@ -111,6 +118,8 @@ impl State {
                     let composites = self.canvas.as_ref().map_or(0, Canvas::composites);
                     self.sharp.shown = Some(Shown { composites, ..key });
                     self.sharp.made += 1;
+                } else {
+                    self.sharp.failed = Some(key);
                 }
             }
             Some((pending, since)) if pending == key => {

@@ -12822,10 +12822,14 @@ fn zoomed_in_a_vector_layer_shows_sharp_once_the_view_settles_and_as_it_was_else
         ink(&rows(&sharp, 140, 340))
     );
     assert!(a.abs_diff(b) * 20 < a, "the same stroke, as much of it: {a} and {b}");
-    // a stroke takes it away at once; settled again, it is made again with it
+    // a stroke takes it away at once, asking for a frame once things have settled; settled
+    // again, it is made again with it
     stroke_line(&s, (60.0, 300.0), (200.0, 250.0));
-    framed(&s, &texture, &gpu, side);
+    let view = texture.create_view(&Default::default());
+    let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+    let after = s.draw(&view, format, (side, side), procraft_engine::profile::Profile::Srgb, std::time::Instant::now());
     assert!(!shows_sharp(&s));
+    assert!(after.is_some_and(|due| due <= std::time::Duration::from_millis(200)), "{after:?}");
     settle();
     framed(&s, &texture, &gpu, side);
     assert!(shows_sharp(&s));
