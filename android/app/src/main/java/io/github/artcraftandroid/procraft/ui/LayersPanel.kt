@@ -273,7 +273,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                             alpha = if (blendAt in 0 until index) belowShown else 1f
                         }
                         .twoFingers(
-                            l.kind == LayerType.PAINT,
+                            l.kind == LayerType.PAINT || l.kind == LayerType.GROUP,
                             onTap = {
                                 // two fingers tapped on a layer (not a group or mask): its opacity, dragged across the canvas
                                 vm.selectLayer(l.id)
@@ -346,7 +346,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                     }
                     SwipeRow(vm, l, open = swiped == l.id, enabled = dragId == null, onOpen = { swiped = if (it) l.id else null }, onPick = { vm.pickLayer(l) }) {
                         if (l.kind == LayerType.GROUP) {
-                            GroupRow(vm, l, shape, name, onTap, indent) { vm.toggleCollapsed(l) }
+                            GroupRow(vm, l, shape, name, onTap, { changeBlend(if (blendFor == l.id) null else l.id) }, indent) { vm.toggleCollapsed(l) }
                         } else LayerRow(
                             vm,
                             l,
@@ -692,6 +692,7 @@ private fun GroupRow(
     shape: Shape,
     name: @Composable (Color, Modifier) -> Unit,
     onTap: () -> Unit,
+    onBlend: () -> Unit,
     indent: Dp,
     onToggle: () -> Unit,
 ) {
@@ -705,6 +706,11 @@ private fun GroupRow(
         val ink = if (l.current || l.picked) Color.White else Pc.PanelTitle
         Box(Modifier.padding(start = 4.dp).size(93.dp, 4.dp).clip(RoundedCornerShape(2.dp)).background(GroupLine))
         LockedName(l, ink, name, Modifier.weight(1f))
+        // a group's blend, as a layer's: the letter opens its modes and opacity, as Procreate's does
+        Box(Modifier.offset(x = 8.dp).size(44.dp, GroupHeight).clickable(onClick = onBlend), contentAlignment = Alignment.Center) {
+            val letter = if (l.locked && !l.current && !l.picked) LockedLetter else ink
+            Text(blendCode(vm, l.blend), color = letter, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        }
         Box(Modifier.offset(x = 8.dp).size(44.dp, GroupHeight).clickable(onClick = onToggle), contentAlignment = Alignment.Center) {
             Icon(if (l.collapsed) PcIcons.ChevronRight else PcIcons.ChevronDown, contentDescription = if (l.collapsed) "Open" else "Close", tint = ink, modifier = Modifier.size(16.dp))
         }
