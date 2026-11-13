@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, pos2, vec2};
-use procraft_core::{CanvasSession, Pick, QuickShapeInfo, QuickShapeKind};
+use procraft_core::{CanvasSession, Pick, QuickShapeAnchor, QuickShapeInfo, QuickShapeKind};
 
 use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, pc, text};
@@ -241,11 +241,9 @@ impl Overlays {
                 {
                     // the snapped shape's handles: blue dots ringed in white
                     let ppp = ctx.pixels_per_point();
-                    for &[x, y] in info.handles.as_chunks::<2>().0 {
-                        let at = pos2(x, y) / ppp;
-                        ui.painter().circle_filled(at, 6.5, Color32::WHITE);
-                        ui.painter().circle_filled(at, 5.0, argb(pc::ACCENT));
-                    }
+                    let points: Vec<Pos2> =
+                        info.handles.as_chunks::<2>().0.iter().map(|&[x, y]| pos2(x, y) / ppp).collect();
+                    shape_handles(ui, &points, info);
                 }
             });
         if let (Some(info), true, true) = (self.shape.clone(), bar_shown, self.picking.is_none()) {
@@ -473,11 +471,60 @@ pub fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// A snapped shape's handles at `points`: blue dots ringed in white; a curve's (a plugin's) also
+/// show each control on a line to its anchor, and each anchor as it sits (round smooth, a triangle
+/// free, a square a corner, whose controls are worked out and so not shown).
+fn shape_handles(ui: &Ui, points: &[Pos2], info: &QuickShapeInfo) {
+    let curve = info.kind == QuickShapeKind::Curve;
+    let control = Color32::from_rgb(96, 224, 120);
+    // the anchor a control belongs to
+    let owner = |i: usize| match i % 3 {
+        1 => i.checked_sub(1),
+        2 => i.checked_add(1),
+        _ => None,
+    };
+    let folded =
+        |i: usize| curve && owner(i).is_some_and(|a| matches!(info.anchors.get(a / 3), Some(QuickShapeAnchor::Corner)));
+    if curve {
+        for (i, &at) in points.iter().enumerate() {
+            if let Some(anchor) = owner(i).filter(|_| !folded(i)).and_then(|a| points.get(a)) {
+                ui.painter().line_segment([*anchor, at], egui::Stroke::new(1.5, control));
+            }
+        }
+    }
+    for (i, &at) in points.iter().enumerate() {
+        if folded(i) {
+            continue;
+        }
+        let ink = if curve && !i.is_multiple_of(3) { control } else { argb(pc::ACCENT) };
+        match if curve && i.is_multiple_of(3) { info.anchors.get(i / 3).copied() } else { None } {
+            Some(QuickShapeAnchor::Broken) => {
+                let r = 7.5;
+                let corners = vec![
+                    pos2(at.x, at.y - r),
+                    pos2(at.x - r * 0.87, at.y + r * 0.5),
+                    pos2(at.x + r * 0.87, at.y + r * 0.5),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(corners, ink, egui::Stroke::new(1.5, Color32::WHITE)));
+            }
+            Some(QuickShapeAnchor::Corner) => {
+                ui.painter().rect_filled(Rect::from_center_size(at, vec2(13.0, 13.0)), 1.0, Color32::WHITE);
+                ui.painter().rect_filled(Rect::from_center_size(at, vec2(10.0, 10.0)), 1.0, ink);
+            }
+            _ => {
+                ui.painter().circle_filled(at, 6.5, Color32::WHITE);
+                ui.painter().circle_filled(at, 5.0, ink);
+            }
+        }
+    }
+}
+
 pub fn label(kind: QuickShapeKind) -> &'static str {
     match kind {
         QuickShapeKind::Line => "Line",
         QuickShapeKind::Polyline => "Polyline",
         QuickShapeKind::Arc => "Arc",
+        QuickShapeKind::Curve => "Curve",
         QuickShapeKind::Ellipse => "Ellipse",
         QuickShapeKind::Circle => "Circle",
         QuickShapeKind::Triangle => "Triangle",
@@ -494,6 +541,7 @@ pub fn snapped_to(kind: QuickShapeKind) -> String {
         QuickShapeKind::Line => "a line",
         QuickShapeKind::Polyline => "a polyline",
         QuickShapeKind::Arc => "an arc",
+        QuickShapeKind::Curve => "a curve",
         QuickShapeKind::Ellipse => "an ellipse",
         QuickShapeKind::Circle => "a circle",
         QuickShapeKind::Triangle => "a triangle",
@@ -509,7 +557,7 @@ fn icon(kind: QuickShapeKind) -> &'static icons::Icon {
     match kind {
         QuickShapeKind::Line => &icons::SHAPE_LINE,
         QuickShapeKind::Polyline => &icons::SHAPE_POLYLINE,
-        QuickShapeKind::Arc => &icons::SHAPE_ARC,
+        QuickShapeKind::Arc | QuickShapeKind::Curve => &icons::SHAPE_ARC,
         QuickShapeKind::Ellipse => &icons::SHAPE_ELLIPSE,
         QuickShapeKind::Circle => &icons::SHAPE_CIRCLE,
         QuickShapeKind::Triangle => &icons::SHAPE_TRIANGLE,
@@ -566,6 +614,7 @@ mod tests {
                     kind: QuickShapeKind::Ellipse,
                     choices: vec![QuickShapeKind::Ellipse, QuickShapeKind::Circle],
                     handles: Vec::new(),
+                    anchors: Vec::new(),
                 }),
                 ..Overlays::default()
             };

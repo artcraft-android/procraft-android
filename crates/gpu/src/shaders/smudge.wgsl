@@ -130,6 +130,13 @@ struct WetPass {
 @group(1) @binding(1) var grains: texture_2d_array<f32>;
 @group(1) @binding(2) var shape_smp: sampler;
 @group(1) @binding(3) var grain_smp: sampler;
+// how much of each canvas pixel is selected (all of it without a selection): paint is moved only
+// as far as that, as a brush lays it
+@group(1) @binding(4) var selected: texture_2d<f32>;
+
+fn selected_at(p: vec2<i32>) -> f32 {
+    return textureSampleLevel(selected, shape_smp, (vec2<f32>(p) + 0.5) / vec2<f32>(st.size), 0.0).r;
+}
 
 fn pixel(x: i32, y: i32) -> vec4<f32> {
     let cx = clamp(x, 0, i32(st.size.x) - 1);
@@ -402,6 +409,8 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.preserve_alpha == 1u) {
         out = out * (w.a / max(out.a, 1e-6));
     }
+    // outside the selection the layer stays as it is
+    out = mix(w, out, selected_at(p));
     // rounded to 8 bits up or down at random, in proportion to the remainder, so that faint stamps
     // add up as they should instead of rounding away
     let h = dither(u32(p.x), u32(p.y), bitcast<u32>(st.center.x) ^ (bitcast<u32>(st.center.y) * 2654435761u));
@@ -428,11 +437,21 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let k = u32(p.y) * st.stride + u32(p.x);
     let laid = amount[st.stride * st.size.y + k];
+    let was = textureLoad(before_tex, p, 0);
     var a = laid;
     if (st.wet_edges > 0.0 && laid > 0.0) {
-        // the paint pools, settling back to about 0.78 where it is full
-        let x = 4.5 * laid;
-        a = mix(laid, 1.0 - abs(sin(x) / x), st.wet_edges);
+        // the paint pools, settling back to about 0.78 where it is full and rising to full where
+        // it shows about 0.7 (a rim where it thins out). By how much of it shows: wet paint
+        // thinned by its water shows less than it touched (what it took of the room the layer
+        // had; over a full layer, as far as it touched)
+        var shown = laid;
+        if (st.laid_apart == 2u && was.a < 0.999) {
+            let now = unpack4x8unorm(grained[k]).a;
+            shown = clamp((now - was.a) / (1.0 - was.a), 0.0, 1.0);
+        }
+        let x = 4.5 * max(shown, 1e-4);
+        let pooled = 1.0 - abs(sin(x) / x);
+        a = laid * mix(1.0, pooled / max(shown, 1e-4), st.wet_edges);
     }
     if (st.grain_once > 0.5) {
         a = grain_combine(a, grain_plain(vec2<f32>(p) + 0.5), st.grain_depth, st.grain_blend);
@@ -444,7 +463,6 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         a = dual_rise(dual_combine(a, b, st.dual - 1u), laid, st.dual - 1u);
     }
-    let was = textureLoad(before_tex, p, 0);
     var out = mix(was, vec4<f32>(st.paint.rgb, 1.0), a);
     if (st.laid_apart == 2u && laid > 0.0) {
         // what a second adds past that is laid as plain paint, as it is where none was laid at all
@@ -464,6 +482,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.preserve_alpha == 1u) {
         out = out * (was.a / max(out.a, 1e-6));
     }
+    out = mix(was, out, selected_at(p));
     // dithered the same each time it is put together again
     let h = dither(u32(p.x), u32(p.y), 0u);
     work[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));

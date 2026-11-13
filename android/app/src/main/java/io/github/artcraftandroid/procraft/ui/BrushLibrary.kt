@@ -247,6 +247,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     val density = LocalDensity.current
     val focus = androidx.compose.ui.platform.LocalFocusManager.current
     var adding by remember { mutableStateOf(false) }
+    // the title's menu: the brushes the app comes with, back
+    var titleMenu by remember { mutableStateOf(false) }
     var setMenu by remember { mutableStateOf<Int?>(null) }
     var recentMenu by remember { mutableStateOf(false) }
     // the set menu's icon grid is open; where its Customize icon row and the set are on screen
@@ -326,6 +328,22 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             start = 20.dp,
             end = 12.dp,
             height = 52.dp,
+            chevronOn = titleMenu,
+            onTitle = { titleMenu = !titleMenu },
+            menu = {
+                LibraryMenu(
+                    titleMenu,
+                    androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f),
+                    MenuPlace { a, size -> IntOffset(a.center.x - size.width / 2, a.bottom) },
+                    onDismiss = { titleMenu = false },
+                    overPanel = true,
+                ) {
+                    MenuItem(PcIcons.MenuRestore, "Restore default brushes") {
+                        titleMenu = false
+                        vm.restoreShippedBrushes()
+                    }
+                }
+            },
         ) {
             // brushes picked: Delete in the plus's place, and Combine for one with the current brush
             if (vm.pickedBrushes.isNotEmpty()) Row(Modifier.padding(top = 16.dp)) {

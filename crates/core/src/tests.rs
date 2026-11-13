@@ -887,6 +887,163 @@ fn dump_brush_previews() {
     std::fs::write(format!("{dir}/names.txt"), names).unwrap();
 }
 
+/// A brush set's own previews beside the engine's, to see where a set's brushes differ: for each
+/// brush, `thumbnail.png` (the file's), `engine.png` (drawn here at the same size) and a line of
+/// their alpha's mean and root-mean-square difference in `summary.txt`, worst first.
+/// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p procraft-core dump_brush_comparisons -- --ignored`
+#[test]
+#[ignore]
+fn dump_brush_comparisons() {
+    use procraft_engine::brushfile;
+    let Ok(path) = std::env::var("BRUSH_SET") else { return };
+    let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
+    let Some(s) = session(100, 100) else { return };
+    let set = s.import_brushes(std::fs::read(path).unwrap()).unwrap();
+    let brushes: Vec<(u32, String)> =
+        s.brush_library()[set as usize].brushes.iter().map(|b| (b.index, b.name.clone())).collect();
+    let mut rows = Vec::new();
+    for (index, name) in brushes {
+        // a set's folder entries aren't brushes
+        if name.starts_with('\u{1F4C2}') {
+            continue;
+        }
+        let file = brushfile::read(&s.brush_as_file(set, index).unwrap()).unwrap();
+        let Some((w, h, own)) = file.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) else {
+            continue;
+        };
+        assert!(s.select_brush(set, index));
+        // a setting written back as it was makes the engine draw the preview, not keep the file's
+        s.studio_begin();
+        let spacing = s.studio_settings(vec!["spacing".to_owned()])[0];
+        s.set_studio_setting("spacing".to_owned(), spacing);
+        let engine = s.brush_preview(set, index, w, h).unwrap();
+        s.studio_end(false);
+        let folder = format!("{root}/{}", name.replace(['/', '\\'], "-"));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(format!("{folder}/thumbnail.png"), crate::project::rgba_png(w, h, &own)).unwrap();
+        std::fs::write(format!("{folder}/engine.png"), crate::project::rgba_png(w, h, &engine.rgba)).unwrap();
+        let (mut sum, mut squares) = (0_u64, 0_u64);
+        for (a, b) in own.as_chunks::<4>().0.iter().zip(engine.rgba.as_chunks::<4>().0) {
+            let d = i64::from(a[3]) - i64::from(b[3]);
+            sum += d.unsigned_abs();
+            squares += d.unsigned_abs().pow(2);
+        }
+        let n = f64::from(w * h);
+        rows.push((name, sum as f64 / n / 255.0, (squares as f64 / n).sqrt() / 255.0));
+    }
+    rows.sort_by(|a, b| b.2.total_cmp(&a.2));
+    let mut summary = String::from("brush\tmean\trms\n");
+    for (name, mean, rms) in rows {
+        summary += &format!("{name}\t{mean:.4}\t{rms:.4}\n");
+    }
+    std::fs::write(format!("{root}/summary.txt"), summary).unwrap();
+}
+
+/// Each brush of a file as it paints on a canvas, not in its preview: a stroke in white across a
+/// clear layer, at three sizes (the size its preview draws at, as its thumbnail was drawn, then 0.3
+/// and 1.0; or those `DUMP_SIZES` lists, `start` for the first), with the pen's pressure rising
+/// and falling, as `<brush>.png` in
+/// `PROCRAFT_DUMP` (beside the file's own thumbnail, `<brush>-thumbnail.png`, when it has one).
+/// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p procraft-core dump_brush_strokes -- --ignored`
+/// (`BRUSH_SET` can be another app's brush file too: .abr, .sut, .kpp and the rest; or
+/// `bundled:Name,Other Name` for those of the brushes the app comes with.)
+#[test]
+#[ignore]
+fn dump_brush_strokes() {
+    use procraft_engine::brushfile;
+    let Ok(path) = std::env::var("BRUSH_SET") else { return };
+    let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
+    let Some(s) = session(1024, 1024) else { return };
+    // the app's own brushes by name, a set of ours, or another app's brushes
+    let brushes: Vec<(u32, u32, String)> = match path.strip_prefix("bundled:") {
+        Some(names) => {
+            let wanted: Vec<&str> = names.split(',').collect();
+            let library = s.brush_library();
+            let all = library.iter().flat_map(|set| set.brushes.iter());
+            all.filter(|b| wanted.contains(&b.name.as_str())).map(|b| (b.set, b.index, b.name.clone())).collect()
+        }
+        None => {
+            let bytes = std::fs::read(path).unwrap();
+            let imported = s.import_brushes(bytes.clone()).or_else(|| s.import_other_brushes(bytes, "Dump".to_owned()));
+            let set = imported.unwrap();
+            let library = s.brush_library();
+            library[set as usize].brushes.iter().map(|b| (set, b.index, b.name.clone())).collect()
+        }
+    };
+    for (set, index, name) in brushes {
+        // a set's folder entries aren't brushes
+        if name.starts_with('\u{1F4C2}') {
+            continue;
+        }
+        // (no character a file name can't hold on any system)
+        let file_name = name.replace(['/', '\\', '<', '>', ':', '"', '|', '?', '*'], "-");
+        let file = brushfile::read(&s.brush_as_file(set, index).unwrap()).unwrap();
+        if let Some((w, h, own)) = file.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
+            std::fs::write(format!("{root}/{file_name}-thumbnail.png"), crate::project::rgba_png(w, h, &own)).unwrap();
+        }
+        // with DUMP_PREVIEW, our own sample stroke as the thumbnail was drawn (the same stroke,
+        // pressure and canvas; the file's own preview left out), to set beside it
+        if std::env::var_os("DUMP_PREVIEW").is_some() {
+            let brush = s.shared.lock().library[set as usize].brushes[index as usize].clone();
+            let (w, h) = (procraft_engine::preview::CANVAS.0 as u32, procraft_engine::preview::CANVAS.1 as u32);
+            if let Some(p) = s.drawn_preview(procraft_engine::brush::Brush { thumbnail: None, ..brush }, w, h) {
+                let png = crate::project::rgba_png(p.width, p.height, &p.rgba);
+                std::fs::write(format!("{root}/{file_name}-preview.png"), png).unwrap();
+            }
+        }
+        let layer = s.add_layer();
+        assert!(s.select_brush(set, index));
+        // settings changed first, to see what each does (`BRUSH_SETTINGS=burnt_edges=0,wet_edges=0`)
+        if let Ok(changes) = std::env::var("BRUSH_SETTINGS") {
+            s.studio_begin();
+            for change in changes.split(',').filter(|c| !c.is_empty()) {
+                let (key, value) = change.split_once('=').unwrap();
+                s.set_studio_setting(key.to_owned(), value.parse().unwrap());
+            }
+            s.studio_end(true);
+        }
+        s.set_color(1.0, 1.0, 1.0);
+        // the slider at the size the brush's preview draws, the pen turned and pressed as there
+        let (start, lean, least, gain) = {
+            let brush = s.shared.lock().brush(ToolKind::Paint).clone();
+            let share = procraft_engine::preview::size_share(&brush).powf(1.0 / procraft_engine::brush::SIZE_CURVE);
+            let lean = (brush.setting("preview_tilt_offset") - 1.0) * std::f32::consts::FRAC_PI_2;
+            (share, lean, brush.setting("preview_pressure_min"), 2.0 * brush.setting("preview_pressure_scale"))
+        };
+        let sizes: Vec<f32> = match std::env::var("DUMP_SIZES") {
+            Ok(listed) => listed.split(',').map(|v| if v == "start" { start } else { v.parse().unwrap() }).collect(),
+            Err(_) => vec![start, 0.3, 1.0],
+        };
+        let rows = sizes.len() as f32;
+        // at full opacity, as a thumbnail is drawn (the opacity a brush file keeps is where its
+        // slider was left)
+        s.set_brush_opacity(1.0);
+        for (row, size) in sizes.into_iter().enumerate() {
+            s.set_brush_size(size);
+            let y = 1024.0 * (row as f32 + 0.5) / rows;
+            let at = |i: usize| {
+                let t = i as f32 / 120.0;
+                let mut p = sample(100.0 + t * 820.0, y + (t * 6.0).sin() * 25.0, i as f64 * 8.0);
+                p.pressure = if size == start {
+                    // the preview's swell: light at the ends, full in the middle
+                    (least + gain * 1.005 * (-9.0 * (t - 0.5) * (t - 0.5)).exp()).clamp(0.0, 1.0)
+                } else {
+                    (std::f32::consts::PI * t).sin().max(0.05)
+                };
+                // leaning as the brush's own preview leans the pen, as its thumbnail was drawn (a
+                // shape that follows the azimuth turns as there)
+                p.orientation = lean;
+                p
+            };
+            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            s.stroke_add((1..120).map(at).collect());
+            s.stroke_end(vec![at(120)]);
+        }
+        let rgba = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        std::fs::write(format!("{root}/{file_name}.png"), crate::project::rgba_png(1024, 1024, &rgba)).unwrap();
+    }
+}
+
 #[test]
 fn smudge_tool_moves_paint_and_is_one_undo_step() {
     let Some(s) = session(100, 100) else { return };
@@ -2316,6 +2473,35 @@ fn the_brush_studio_edits_keeps_and_puts_back() {
 }
 
 #[test]
+fn a_held_stroke_snaps_to_its_line_as_stabilisation_smoothed_it_but_not_streamline() {
+    use crate::quickshape::QuickShapeKind;
+    // a line across with a 12 px wobble, 6 times along it: too wavy for a line as it came
+    let pts: Vec<PenSample> = (0..=75)
+        .map(|i| {
+            let x = 25.0 + i as f32 * 2.0;
+            sample(x, 100.0 + 12.0 * (i as f32 / 75.0 * 6.0 * std::f32::consts::TAU).sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    let held = |setting: &str, amount: f32| {
+        let s = session(200, 200)?;
+        s.set_brush_size(0.05);
+        s.studio_begin();
+        s.set_studio_setting("streamline".to_owned(), 0.0);
+        s.set_studio_setting(setting.to_owned(), amount);
+        s.studio_end(true);
+        s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+        s.stroke_add(pts[1..].to_vec());
+        s.quickshape_hold().map(|info| info.kind)
+    };
+    let Some(raw) = held("stabilization", 0.0) else { return };
+    assert_ne!(raw, QuickShapeKind::Line);
+    // a heavy streamline is left out of the line a shape is fitted to
+    assert_eq!(held("streamline", 1.0), Some(raw));
+    // stabilisation evens the wobble out of it
+    assert_eq!(held("stabilization", 1.0), Some(QuickShapeKind::Line));
+}
+
+#[test]
 fn a_held_stroke_snaps_to_a_shape_and_is_edited() {
     use crate::quickshape::QuickShapeKind;
     let Some(s) = session(200, 200) else { return };
@@ -2630,6 +2816,83 @@ fn copy_cut_paste_and_flip() {
 }
 
 #[test]
+fn an_adjustment_leaves_an_alpha_locked_layer_s_alpha_as_it_is() {
+    use crate::adjust::SwipeAdjustment;
+    let Some(s) = session(100, 100) else { return };
+    // red beside blue, with clear all round
+    let mut rgba = vec![0u8; 100 * 100 * 4];
+    for y in 20..80 {
+        for x in 20..80 {
+            rgba[(y * 100 + x) * 4..][..4].copy_from_slice(if x < 50 { &[255, 0, 0, 255] } else { &[0, 0, 255, 255] });
+        }
+    }
+    let id = s.paste(crate::layers::ThumbnailImage { width: 100, height: 100, rgba }).unwrap();
+    let alpha = |s: &CanvasSession| -> Vec<u8> {
+        s.copy_layer_contents(id).unwrap().rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect()
+    };
+    let before = alpha(&s);
+    let blur = |s: &CanvasSession| {
+        assert!(s.adjust_begin());
+        s.adjust_swipe(SwipeAdjustment::GaussianBlur, 0.5);
+        s.adjust_end(true);
+    };
+    assert!(s.set_layer_alpha_lock(id, true));
+    blur(&s);
+    assert!(alpha(&s) == before, "the blur stayed inside what was painted");
+    let at = |s: &CanvasSession, x: usize| {
+        <[u8; 4]>::try_from(&s.copy_layer_contents(id).unwrap().rgba[(50 * 100 + x) * 4..][..4]).unwrap()
+    };
+    // it did blur: where the colours meet they mix, at full cover
+    let [r, _, b, a] = at(&s, 50);
+    assert!(r > 40 && b > 40 && a == 255, "{r} {b} {a}");
+    // the same blur without the lock spreads past the edge
+    s.undo();
+    assert!(s.set_layer_alpha_lock(id, false));
+    blur(&s);
+    assert!(at(&s, 18)[3] > 0);
+}
+
+#[test]
+fn a_copy_from_a_bigger_canvas_pastes_whole() {
+    let Some(s) = session(100, 100) else { return };
+    // a 400 × 300 canvas's copy: a red block near its top left corner, and a blue one near the
+    // bottom right, both outside a 100 × 100 canvas's middle
+    let (w, h) = (400usize, 300usize);
+    let mut rgba = vec![0u8; w * h * 4];
+    let mut block = |x0: usize, y0: usize, c: [u8; 4]| {
+        for y in y0..y0 + 20 {
+            for x in x0..x0 + 20 {
+                rgba[(y * w + x) * 4..][..4].copy_from_slice(&c);
+            }
+        }
+    };
+    block(10, 10, [255, 0, 0, 255]);
+    block(370, 270, [0, 0, 255, 255]);
+    let copied = crate::layers::ThumbnailImage { width: w as u32, height: h as u32, rgba };
+    let id = s.paste(copied).unwrap();
+    // what is painted (380 × 280) scaled down to the canvas's width, centred: both blocks are there
+    let layer = s.copy_layer_contents(id).unwrap();
+    let at = |x: usize, y: usize| <[u8; 4]>::try_from(&layer.rgba[(y * 100 + x) * 4..][..4]).unwrap();
+    assert_eq!(at(2, 16), [255, 0, 0, 255]);
+    assert_eq!(at(97, 82), [0, 0, 255, 255]);
+    assert_eq!(at(50, 50)[3], 0);
+    // nothing of it is outside the strip it fills
+    assert_eq!(at(50, 10)[3], 0);
+    assert_eq!(at(50, 90)[3], 0);
+    // a small part of a big canvas comes in at its own size, in the middle
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in 0..10 {
+        for x in 380..390 {
+            rgba[(y * w + x) * 4..][..4].copy_from_slice(&[0, 255, 0, 255]);
+        }
+    }
+    let id = s.paste(crate::layers::ThumbnailImage { width: w as u32, height: h as u32, rgba }).unwrap();
+    let layer = s.copy_layer_contents(id).unwrap();
+    let painted = crate::layer_ops::painted_rect(&layer.rgba, 100).unwrap();
+    assert_eq!((painted.x0, painted.y0, painted.x1, painted.y1), (45, 45, 55, 55));
+}
+
+#[test]
 fn a_copy_reads_only_what_is_selected_and_painted_as_the_whole_layer_would_give() {
     use crate::selection::SelectionJoin;
     let Some(s) = session(300, 300) else { return };
@@ -2730,6 +2993,56 @@ fn a_private_picture_stays_out_of_the_time_lapse() {
     let middle = ((50 * frame.width + 50) * 4) as usize;
     assert_eq!(&frame.rgba[middle..middle + 4], &[255, 255, 255, 255]);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn no_stroke_or_undo_joins_a_plugins_change_while_it_goes_on() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.3);
+    let dot = |x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    dot(20.0);
+    {
+        let _step = s.plugin_step();
+        // a stroke and an undo while a plugin's action runs: neither happens
+        dot(80.0);
+        assert!(s.undo().is_none());
+    }
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255], "no stroke while the plugin's change went on");
+    assert_eq!(pixel(&s, 20, 50)[0], 0, "and the one before wasn't undone");
+    // once it has ended, both go as ever
+    dot(80.0);
+    assert_eq!(pixel(&s, 80, 50)[0], 0);
+    s.undo();
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+}
+
+#[test]
+fn a_shape_snapped_with_symmetry_on_shows_its_copy_while_held() {
+    use crate::guide::{GuideType, SymmetryType};
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.2);
+    s.set_guide_on(true);
+    s.set_guide_kind(GuideType::Symmetry);
+    s.set_guide_symmetry(SymmetryType::Vertical, false);
+    s.set_guide_assisted(true);
+    // a wavering line on the left half, held: a straight line, and its copy on the right
+    let at = |i: usize| {
+        let t = i as f32 / 40.0;
+        sample(10.0 + 30.0 * t, 20.0 + 60.0 * t + 1.5 * (t * 25.0).sin(), i as f64 * 8.0)
+    };
+    s.stroke_begin(PointerKind::Finger, vec![at(0)]);
+    s.stroke_add((1..=40).map(at).collect());
+    assert_eq!(s.quickshape_hold().expect("a shape").kind, QuickShapeKind::Line);
+    // (25, 50) is on the line, (75, 50) its copy
+    assert_eq!(pixel(&s, 25, 50)[0], 0);
+    assert_eq!(pixel(&s, 75, 50)[0], 0, "the copy shows while the pen is down");
+    s.stroke_end(vec![]);
+    s.quickshape_done();
+    assert_eq!(pixel(&s, 75, 50)[0], 0, "and is kept");
 }
 
 #[test]
@@ -4385,7 +4698,7 @@ fn a_p3_canvas_exports_with_its_profile() {
     s.export_jpeg(path.to_string_lossy().into_owned()).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
-    let at = bytes.windows(12).position(|w| w == b"ICC_PROFILE ").expect("an embedded profile");
+    let at = bytes.windows(12).position(|w| w == b"ICC_PROFILE\0").expect("an embedded profile");
     assert_eq!(&bytes[at + 14..at + 14 + icc.len()], &icc[..]);
     let _ = std::fs::remove_file(path);
 }
@@ -4613,11 +4926,25 @@ fn a_stamp_preview_shows_the_stamp_alone() {
     };
     let (left, right) = reach(&s);
     assert!(left < 50 && right > 270, "stroke {left}..{right}");
-    s.studio_begin();
-    s.set_studio_setting("preview_stamp".into(), 1.0);
-    s.studio_end(true);
-    let (left, right) = reach(&s);
-    assert!(left > 110 && right < 220, "stamp {left}..{right}");
+    // a stamp alone in the middle, as wide as the preview size of the brush's most size: twice the
+    // preview size, twice as wide
+    let stamp_at = |s: &CanvasSession, share: f32| {
+        s.studio_begin();
+        s.set_studio_setting("preview_stamp".into(), 1.0);
+        s.set_studio_setting("preview_size".into(), share);
+        s.studio_end(true);
+        reach(s)
+    };
+    let biggest = s.shared.lock().brush(ToolKind::Paint).biggest();
+    let share = (150.0 / biggest).min(0.4);
+    let (left, right) = stamp_at(&s, share);
+    let (wide_left, wide_right) = stamp_at(&s, 2.0 * share);
+    let (narrow, wide) = ((right - left) as f32, (wide_right - wide_left) as f32);
+    assert!(((left + right) as f32 / 2.0 - 163.0).abs() < 4.0, "stamp {left}..{right}");
+    assert!((wide / narrow - 2.0).abs() < 0.25, "{narrow} then {wide}");
+    // as wide as that share of the most size, in the preview's pixels (327 of the canvas's 1060)
+    let expected = share * biggest * 327.0 / 1060.0;
+    assert!((narrow - expected).abs() < expected * 0.2 + 3.0, "{narrow} against {expected}");
 }
 
 #[test]
@@ -5215,6 +5542,73 @@ fn a_rolling_grain_stays_put_when_painting_wet() {
 }
 
 #[test]
+fn a_canvas_grain_laid_stamp_by_stamp_lands_where_it_does_over_the_stroke_and_follows_the_pressure() {
+    use procraft_engine::brush::{Brush, GRAIN_HEIGHT, Grain, GrainMode, PressureCurve};
+    use procraft_engine::curve::Curve;
+    let Some(s) = session(200, 200) else { return };
+    // a brush with a fine paper grain fixed to the canvas, keeping the strongest stamp at each
+    // pixel, its size and opacity not following the pressure
+    let paint = |each: bool, height: bool, pressure: f32| -> Vec<u8> {
+        let mut b = Brush {
+            grain: Grain {
+                image: Some(procraft_engine::textures::grain::NOISE),
+                mode: GrainMode::Texturized,
+                scale: 64.0,
+                depth: if height { 1.0 / 12.0 } else { 1.0 },
+                source: None,
+            },
+            ..Brush::round_pen()
+        };
+        b.hardness = 1.0;
+        for (key, value) in [("rendering_mode", 0.0), ("pressure_size", 0.0), ("pressure_opacity", 0.0), ("flow", 1.0)]
+        {
+            b.set_setting(key, value);
+        }
+        b.set_setting("grain_each_stamp", if each { 1.0 } else { 0.0 });
+        if height {
+            b.set_setting("grain_blend", GRAIN_HEIGHT as f32);
+        }
+        b.pressure_curves.set(PressureCurve::GrainDepth, Some(Curve::linear()));
+        {
+            let mut st = s.shared.lock();
+            let (set, index) = st.paint_brush;
+            st.library[set].brushes[index] = b;
+        }
+        s.set_brush_size(0.6);
+        s.set_color(0.0, 0.0, 0.0);
+        let at = |i: usize| PenSample { pressure, ..sample(40.0 + i as f32 * 3.0, 100.0, i as f64 * 8.0) };
+        s.stroke_begin(PointerKind::Stylus, (0..40).map(at).collect());
+        s.stroke_end(vec![]);
+        let pixels = {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            canvas.read_composite(gpu).unwrap()
+        };
+        assert!(s.undo().is_some());
+        pixels
+    };
+    // the reds of the band the stroke runs along
+    let band = |pixels: &[u8]| -> Vec<u8> {
+        (96..104).flat_map(|y| (60..140).map(move |x| (y * 200 + x) * 4)).map(|i| pixels[i]).collect()
+    };
+    // stamp by stamp, the grain shows where it does over the whole stroke, as strongly
+    let (over, by_stamp) = (band(&paint(false, false, 1.0)), band(&paint(true, false, 1.0)));
+    let most = over.iter().zip(&by_stamp).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    let mean = over.iter().map(|&v| f32::from(v)).sum::<f32>() / over.len() as f32;
+    let spread = (over.iter().map(|&v| (f32::from(v) - mean).powi(2)).sum::<f32>() / over.len() as f32).sqrt();
+    assert!(spread > 10.0 && most <= 3, "spread {spread}, most apart {most}");
+    // as a height, a light touch reaches only the grain's low places stamp by stamp (painted
+    // there: darker than the white paper); over the whole stroke its depth is fixed
+    let painted = |pixels: &[u8]| band(pixels).iter().filter(|&&v| v < 230).count() as f32;
+    let (light, full) = (painted(&paint(true, true, 0.4)), painted(&paint(true, true, 1.0)));
+    assert!(full > 300.0 && light < 0.6 * full, "light {light}, full {full}");
+    let (light, full) = (painted(&paint(false, true, 0.4)), painted(&paint(false, true, 1.0)));
+    assert!((light - full).abs() <= 0.05 * full, "light {light}, full {full}");
+}
+
+#[test]
 fn a_moving_grain_streaks_along_the_stroke_however_the_stamps_turn() {
     use procraft_engine::brush::{Brush, Grain, GrainMode};
     let Some(s) = session(200, 200) else { return };
@@ -5366,6 +5760,119 @@ fn keys_a_brush_file_has_that_nothing_draws_yet_are_kept_and_written_again() {
     for (key, v) in expected {
         assert_eq!(out.settings.iter().rev().find(|(k, _)| k == key).map(|(_, v)| *v), Some(v), "{key}");
     }
+}
+
+/// The window pixel (`x`, `y`) as it is shown (the canvas through the view, a veil over it).
+fn shown(s: &CanvasSession, x: f32, y: f32) -> [u8; 3] {
+    let p = s.pick(x, y, 1).unwrap();
+    [p.pixels[0], p.pixels[1], p.pixels[2]]
+}
+
+/// The dropped colour's spreading as it is `seconds` in, given to the canvas as a frame does.
+fn spread_to(s: &CanvasSession, seconds: f32) {
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let hole = st.reveal.as_ref().unwrap().hole_after(seconds).unwrap();
+    st.canvas.as_mut().unwrap().veil_hole(&hole);
+}
+
+#[test]
+fn a_dropped_colour_is_one_undo_step_at_once_and_spreads_in_from_where_it_landed() {
+    let Some(s) = session(100, 100) else { return };
+    // red dropped on the white canvas fills all of it, made at once: the composite has it
+    assert!(s.pour_drop(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    s.pour_end(true, None);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    assert!(s.shared.lock().canvas.as_ref().unwrap().veil_rect().is_some());
+    // shown through a hole ten points round where it landed (twenty window pixels here), the
+    // canvas as it was round that
+    spread_to(&s, 0.0);
+    assert_eq!(shown(&s, 20.0, 50.0), [255, 0, 0]);
+    assert_eq!(shown(&s, 20.0, 66.0), [255, 0, 0]);
+    assert_eq!(shown(&s, 20.0, 75.0), [255, 255, 255]);
+    assert_eq!(shown(&s, 80.0, 50.0), [255, 255, 255]);
+    // near its end the hole is past the whole canvas
+    spread_to(&s, 0.499);
+    for (x, y) in [(1.0, 1.0), (99.0, 1.0), (1.0, 99.0), (99.0, 99.0), (80.0, 50.0)] {
+        assert_eq!(shown(&s, x, y), [255, 0, 0], "({x}, {y})");
+    }
+    // undone while it spreads: the undo isn't held up, and the spreading is over
+    spread_to(&s, 0.0);
+    assert!(s.undo().is_some());
+    assert!(s.shared.lock().reveal.is_none());
+    assert!(s.shared.lock().canvas.as_ref().unwrap().veil_rect().is_none());
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(shown(&s, 80.0, 50.0), [255, 255, 255]);
+    // and redone, all of it at once
+    assert!(s.redo().is_some());
+    assert_eq!(shown(&s, 80.0, 50.0), [255, 0, 0]);
+}
+
+#[test]
+fn a_dropped_colour_s_veil_is_the_canvas_before_it_while_its_threshold_slides() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    // a line down the middle: the left half fills
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, -10.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
+    assert!(s.pour_drop(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    spread_to(&s, 0.0);
+    assert_eq!(shown(&s, 20.0, 50.0), [255, 0, 0]);
+    assert_eq!(shown(&s, 20.0, 85.0), [255, 255, 255]);
+    // slid down and up again, what the hole doesn't show yet stays as it was
+    s.pour_threshold(0.0);
+    s.pour_threshold(0.7);
+    assert_eq!(shown(&s, 20.0, 50.0), [255, 0, 0]);
+    assert_eq!(shown(&s, 20.0, 85.0), [255, 255, 255]);
+    s.pour_end(true, None);
+    assert_eq!(pixel(&s, 20, 85), [255, 0, 0, 255]);
+}
+
+#[test]
+fn a_large_canvas_zoomed_out_is_veiled_at_the_size_it_is_shown() {
+    // 400 pixels shown in 100: the veil is kept a quarter the size, and still shows right
+    let Some(s) = session(400, 100) else { return };
+    assert!(s.pour_drop(20.0, 50.0, 0.0, 0.0, 1.0, 0.5));
+    s.pour_end(true, None);
+    spread_to(&s, 0.0);
+    assert_eq!(shown(&s, 20.0, 50.0), [0, 0, 255]);
+    assert_eq!(shown(&s, 80.0, 50.0), [255, 255, 255]);
+    assert_eq!(shown(&s, 50.0, 90.0), [255, 255, 255]);
+    spread_to(&s, 0.499);
+    assert_eq!(shown(&s, 80.0, 50.0), [0, 0, 255]);
+}
+
+#[test]
+fn continue_filling_and_reduce_motion_show_a_fill_at_once() {
+    let Some(s) = session(100, 100) else { return };
+    let spreading = |s: &CanvasSession| {
+        let st = s.shared.lock();
+        st.reveal.is_some() || st.canvas.as_ref().unwrap().veil_rect().is_some()
+    };
+    // Continue filling's touches (and Recolor) pour, not drop: no spreading
+    assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    s.pour_end(true, None);
+    assert!(!spreading(&s));
+    // with Reduce Motion a dropped colour shows at once too
+    s.set_reduce_motion(true);
+    assert!(s.pour_drop(20.0, 50.0, 0.0, 0.0, 1.0, 0.5));
+    s.pour_end(true, None);
+    assert!(!spreading(&s));
+    assert_eq!(shown(&s, 80.0, 50.0), [0, 0, 255]);
+    s.set_reduce_motion(false);
+    assert!(s.pour_drop(20.0, 50.0, 0.0, 1.0, 0.0, 0.5));
+    s.pour_end(true, None);
+    assert!(spreading(&s));
+    // a stroke begun while it spreads has all of the fill shown first
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 10.0, 0.0)]);
+    assert!(!spreading(&s));
+    s.stroke_end(vec![sample(12.0, 10.0, 20.0)]);
+    // a fill begun while one spreads ends that one
+    assert!(s.pour_drop(20.0, 50.0, 1.0, 1.0, 0.0, 0.5));
+    assert!(s.pour_begin(80.0, 50.0, 1.0, 0.0, 1.0, 0.5));
+    assert!(!spreading(&s));
+    s.pour_end(true, None);
 }
 
 #[test]
@@ -5637,18 +6144,23 @@ fn a_layer_shown_alone_hides_the_others_until_solo_ends() {
     assert_eq!(s.solo(), Some(top));
     assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
     assert_eq!(pixel(&s, 80, 50), [0, 0, 0, 255]);
-    // undo changes the artwork, not how it is looked at
-    s.undo();
-    assert_eq!(s.solo(), Some(top));
-    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
-    assert!(s.set_solo(None));
-    assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
-    assert!(!s.set_solo(Some(999)));
-    // the layer shown alone undone away: every layer shows again
-    assert!(s.set_solo(Some(top)));
+    // a step of its own: undone, every layer shows again; redone, the layer alone again
     s.undo();
     assert_eq!(s.solo(), None);
     assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
+    s.redo();
+    assert_eq!(s.solo(), Some(top));
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    // ended, a step too: undone, the layer alone again
+    assert!(s.set_solo(None));
+    assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
+    s.undo();
+    assert_eq!((s.solo(), pixel(&s, 20, 50)), (Some(top), [255, 255, 255, 255]));
+    // asked for again as it is, or for no layer: no step
+    assert!(s.set_solo(Some(top)));
+    assert!(!s.set_solo(Some(999)));
+    s.undo();
+    assert_eq!(s.solo(), None, "the undo took back the solo, not a step that changed nothing");
 }
 
 #[test]
@@ -5987,7 +6499,9 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
     // the preview left out: drawn again each time
     let read = |b: &[u8]| brushfile::read(b).map(|f| BrushFile { thumbnail: None, ..f });
     let mut failures = Vec::new();
-    let (mut brushes, mut grained) = (0, 0);
+    let (mut brushes, mut grained, mut tipped) = (0, 0, 0);
+    // dual brushes, by the mode their two strokes combine by
+    let mut duals = std::collections::BTreeMap::<u32, usize>::new();
     for path in &files {
         let Some(s) = session(64, 64) else { return };
         let bytes = std::fs::read(path).unwrap();
@@ -6026,14 +6540,23 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
         }
         for i in 0..count {
             brushes += 1;
-            if s.shared
-                .lock()
-                .library
-                .get(set as usize)
-                .and_then(|l| l.brushes.get(i as usize))
-                .is_some_and(|b| b.grain.source.is_some())
-            {
-                grained += 1;
+            // whether it came with a grain, and a tip image (not our round one), of its own, and
+            // a second's mode
+            let (grain, tip, dual) =
+                s.shared.lock().library.get(set as usize).and_then(|l| l.brushes.get(i as usize)).map_or(
+                    (false, false, None),
+                    |b| {
+                        let dual = b.secondary.as_ref().map(|_| b.setting("dual_blend").round() as u32);
+                        (b.grain.source.is_some(), b.shape.source.is_some(), dual)
+                    },
+                );
+            grained += usize::from(grain);
+            tipped += usize::from(tip);
+            if let Some(mode) = dual {
+                *duals.entry(mode).or_default() += 1;
+            }
+            if std::env::var_os("BRUSH_CORPUS_LIST").is_some() {
+                eprintln!("{} #{}: tip {tip}, grain {grain}, dual {dual:?}", path.display(), i + 1);
             }
             let at = format!("{} #{}", path.display(), i + 1);
             let drawn =
@@ -6064,7 +6587,8 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
             }
         }
     }
-    eprintln!("{} files, {brushes} brushes, {grained} with a grain of their own", files.len());
+    eprintln!("{} files, {brushes} brushes, {tipped} with a tip and {grained} with a grain of their own", files.len());
+    eprintln!("{} dual brushes, by mode: {duals:?}", duals.values().sum::<usize>());
     assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures.join("\n"));
 }
 
@@ -6216,12 +6740,147 @@ fn a_krita_preset_becomes_a_round_brush_with_its_settings() {
     let st = s.shared.lock();
     let b = &st.library[set].brushes[0];
     assert_eq!(b.name, "Soft Round");
-    assert!((b.spacing - 0.2).abs() < 1e-6 && (b.hardness - 0.25).abs() < 1e-6 && b.shape.roundness == 0.5);
+    // a fade of 0.25: our hardness paints half where Krita's fade does
+    let hardness = 2.0 * ((1.0f32 + 0.25 * 0.25) / 2.0).sqrt() - 1.0;
+    assert!((b.spacing - 0.2).abs() < 1e-6 && (b.hardness - hardness).abs() < 1e-6 && b.shape.roundness == 0.5);
     assert_eq!(b.pressure_size, 0.0);
     assert!(b.shape.source.is_none());
-    // the texture as paper grain: 70 % strong, its 100 px tiles at half size
+    // the texture as paper grain, its 100 px tiles at half size: multiplied whole, as Krita
+    // multiplies it, its 70 % strength in the paint laid
     assert!(b.grain.source.is_some());
-    assert_eq!((b.grain.depth, b.grain.scale), (0.7, 50.0));
+    assert_eq!((b.grain.depth, b.grain.scale), (1.0, 50.0));
+    assert!((b.flow - 0.7).abs() < 1e-6, "{}", b.flow);
+}
+
+#[test]
+fn a_krita_preset_holding_its_pictures_keeps_its_tip_and_texture() {
+    let s = CanvasSession::new(64, 64);
+    // a GIMP brush 4 x 4, its left half painting, and a GIMP pattern 64 x 64, its left half white
+    let mut tip = Vec::new();
+    for v in [29u32, 2, 4, 4, 1] {
+        tip.extend_from_slice(&v.to_be_bytes());
+    }
+    tip.extend_from_slice(b"GIMP");
+    tip.extend_from_slice(&10u32.to_be_bytes());
+    tip.push(0);
+    tip.extend((0..16).map(|i| if i % 4 < 2 { 255 } else { 0 }));
+    let mut paper = Vec::new();
+    for v in [25u32, 1, 64, 64, 3] {
+        paper.extend_from_slice(&v.to_be_bytes());
+    }
+    paper.extend_from_slice(b"GPAT");
+    paper.push(0);
+    paper.extend((0..64 * 64).flat_map(|i| if i % 64 < 32 { [255; 3] } else { [0; 3] }));
+    let (tip, paper) = (procraft_engine::base64::encode(&tip), procraft_engine::base64::encode(&paper));
+    let xml = format!(
+        r#"<Preset paintopid="paintbrush" name="Gild" embedded_resources="2"><resources><resource md5sum="aa" filename="Tip.gbr" name="Tip" type="brushes"><![CDATA[{tip}]]></resource><resource md5sum="bb" filename="Grain.0001.pat" name="Grain" type="patterns"><![CDATA[{paper}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush md5sum="aa" type="gbr_brush" filename="Tip.gbr" useAutoSpacing="1"/>]]></param><param name="Texture/Pattern/Enabled"><![CDATA[true]]></param><param name="Texture/Pattern/Name"><![CDATA[Grain]]></param><param name="Texture/Pattern/PatternFileName"><![CDATA[Grain.0001.pat]]></param><param name="Texture/Pattern/PatternMD5Sum"><![CDATA[bb]]></param><param name="Texture/Pattern/Scale"><![CDATA[0.5]]></param></Preset>"#
+    );
+    let chunk = |kind: &[u8], data: &[u8]| {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&[0; 4]);
+        out
+    };
+    let mut kpp = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+    let mut text = b"preset\0".to_vec();
+    text.extend_from_slice(xml.as_bytes());
+    kpp.extend(chunk(b"tEXt", &text));
+    kpp.extend(chunk(b"IEND", &[]));
+    let set = s.import_other_brushes(kpp, "Krita".to_owned()).unwrap() as usize;
+    let st = s.shared.lock();
+    let b = &st.library[set].brushes[0];
+    assert_eq!(b.name, "Gild");
+    // its own tip, painting on the left and not the right
+    let shape = b.shape.source.as_ref().unwrap();
+    let row = procraft_engine::textures::TEXTURE_SIZE * 128;
+    assert!(shape.pixels[row + 40] == 255 && shape.pixels[row + 216] == 0);
+    // its texture as paper grain, its 64 px tiles at half size
+    assert!(b.grain.source.is_some());
+    assert_eq!(b.grain.scale, 32.0);
+}
+
+#[test]
+fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
+    use procraft_engine::document::BlendMode;
+    // the masking brush's tip: a GIMP brush 4 x 4, its top half painting, held in the preset
+    let mut tip = Vec::new();
+    for v in [29u32, 2, 4, 4, 1] {
+        tip.extend_from_slice(&v.to_be_bytes());
+    }
+    tip.extend_from_slice(b"GIMP");
+    tip.extend_from_slice(&10u32.to_be_bytes());
+    tip.push(0);
+    tip.extend((0..16).map(|i| if i < 8 { 255 } else { 0 }));
+    let tip = procraft_engine::base64::encode(&tip);
+    let kpp = |op: &str| {
+        let xml = format!(
+            r#"<Preset paintopid="paintbrush" name="Eroded" embedded_resources="1"><resources><resource md5sum="dd" filename="Debris.gbr" name="Debris" type="brushes"><![CDATA[{tip}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.1" useAutoSpacing="0"><MaskGenerator type="circle" hfade="0.8" vfade="0.8"/></Brush>]]></param><param name="MaskingBrush/Enabled"><![CDATA[true]]></param><param name="MaskingBrush/MaskingCompositeOp"><![CDATA[{op}]]></param><param name="MaskingBrush/UseMasterSize"><![CDATA[true]]></param><param name="MaskingBrush/MasterSizeCoeff"><![CDATA[0.5]]></param><param name="MaskingBrush/Preset/brush_definition"><![CDATA[<Brush md5sum="dd" type="gbr_brush" filename="Debris.gbr" spacing="0.3" useAutoSpacing="0"/>]]></param><param name="MaskingBrush/Preset/PressureSize"><![CDATA[false]]></param><param name="MaskingBrush/Preset/FlowValue"><![CDATA[0.4]]></param><param name="MaskingBrush/Preset/OpacityValue"><![CDATA[0.9]]></param><param name="MaskingBrush/Preset/OpacityUseCurve"><![CDATA[false]]></param><param name="MaskingBrush/Preset/FlowUseCurve"><![CDATA[false]]></param></Preset>"#
+        );
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&[0; 4]);
+            out
+        };
+        let mut kpp = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+        let mut text = b"preset\0".to_vec();
+        text.extend_from_slice(xml.as_bytes());
+        kpp.extend(chunk(b"tEXt", &text));
+        kpp.extend(chunk(b"IEND", &[]));
+        kpp
+    };
+    let s = CanvasSession::new(64, 64);
+    let set = s.import_other_brushes(kpp("subtract"), "Krita".to_owned()).unwrap();
+    {
+        let st = s.shared.lock();
+        let b = &st.library[set as usize].brushes[0];
+        // the main brush round; its second the masking tip, painting at the top and not the bottom
+        let hardness = 2.0 * ((1.0f32 + 0.8 * 0.8) / 2.0).sqrt() - 1.0;
+        assert!(b.shape.source.is_none() && (b.hardness - hardness).abs() < 1e-6);
+        let second = b.secondary.as_deref().unwrap();
+        let shape = second.shape.source.as_ref().unwrap();
+        let n = procraft_engine::textures::TEXTURE_SIZE;
+        assert!(shape.pixels[n * n / 4 + n / 2] == 255 && shape.pixels[n * n * 3 / 4 + n / 2] == 0);
+        assert_eq!(b.setting("dual_blend"), BlendMode::Subtract.id() as f32);
+        // half the main brush's size at every slider, its own spacing, flow, opacity and pressure
+        // (its pen settings off for the opacity and flow, which would else follow the pressure)
+        for slider in [0.0, 0.3, 1.0] {
+            assert!((second.diameter(slider) / b.diameter(slider) - 0.5).abs() < 1e-4);
+        }
+        assert!((second.spacing - 0.3).abs() < 1e-6 && (second.flow - 0.4).abs() < 1e-6);
+        assert_eq!((second.pressure_size, second.pressure_opacity), (0.0, 0.0));
+        assert!(second.grain.source.is_none() && second.secondary.is_none());
+        // as Krita masks, in its wash mode: the stroke builds up to its opacity and no further
+        assert_eq!((second.rendering, second.max_opacity), (procraft_engine::brush::Rendering::Capped, 1.0));
+        let most = second.pressure_curves.get(procraft_engine::brush::PressureCurve::Flow).unwrap();
+        assert!((most.eval(0.2) - 0.9).abs() < 1e-3 && (most.eval(1.0) - 0.9).abs() < 1e-3);
+        assert_eq!(second.setting("pressure_flow"), 1.0);
+    }
+    // written out it is a dual brush that comes back the same
+    let file = s.brush_as_file(set, 0).unwrap();
+    let read = procraft_engine::brushfile::read(&file).unwrap();
+    assert!(read.secondary.is_some());
+    let t = CanvasSession::new(64, 64);
+    let back = t.import_brushes(file).unwrap();
+    let again = t.shared.lock().library[back as usize].brushes[0].clone();
+    assert_eq!(again.setting("dual_blend"), BlendMode::Subtract.id() as f32);
+    assert!(again.secondary.as_deref().is_some_and(|s| s.shape.source.is_some()));
+    // each op by the nearest mode: Krita's linear dodge as Add, which draws though not listed
+    for (op, mode) in [
+        ("linear_dodge", BlendMode::Add.id()),
+        ("burn", BlendMode::ColorBurn.id()),
+        ("hard_mix_softer_photoshop", BlendMode::LinearBurn.id()),
+        ("hard_mix_photoshop", BlendMode::HardMix.id()),
+        ("linear_height_photoshop", procraft_engine::brush::GRAIN_LINEAR_HEIGHT),
+        ("no such op", BlendMode::Multiply.id()),
+    ] {
+        let set = s.import_other_brushes(kpp(op), "Krita".to_owned()).unwrap();
+        assert_eq!(s.shared.lock().library[set as usize].brushes[0].setting("dual_blend"), mode as f32, "{op}");
+    }
 }
 
 #[test]
@@ -10027,4 +10686,801 @@ fn while_a_layer_is_shown_alone_the_other_boxes_show_hidden_and_a_tap_ends_it() 
     assert_eq!(s.hold_visibility(below).as_deref(), Some("Solo visibility on"));
     assert_eq!(s.hold_visibility(below).as_deref(), Some("Solo visibility off"));
     assert_eq!(s.tap_visibility(999), None);
+}
+
+#[test]
+fn a_dip_pen_at_its_least_draws_a_fine_line_at_any_zoom_and_pressure() {
+    // the ink across a pen line with the Dip Pen at `slider` and `pressure`, the canvas zoomed in
+    // `zoom` times (brush sizes kept relative to the canvas), where the line falls `off` into a
+    // pixel; in canvas pixels of full paint
+    let ink = |slider: f32, pressure: f32, zoom: f32, off: f32| {
+        let s = session(400, 400)?;
+        let dip = s.shared.lock().library.iter().enumerate().find_map(|(set, brushes)| {
+            brushes.brushes.iter().position(|b| b.name == "Dip Pen").map(|i| (set as u32, i as u32))
+        });
+        let (set, index) = dip.unwrap();
+        assert!(s.select_brush(set, index));
+        s.set_brush_size(slider);
+        if zoom != 1.0 {
+            s.view_gesture(200.0, 200.0, 0.0, 0.0, zoom, 0.0);
+        }
+        let at = |i: usize| {
+            let x = 200.0 + (150.0 + i as f32 - 200.0) * zoom;
+            PenSample { pressure, ..sample(x, 200.0 + off * zoom, i as f64 * 8.0) }
+        };
+        s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+        for i in 1..100 {
+            s.stroke_add(vec![at(i)]);
+        }
+        s.stroke_end(vec![at(100)]);
+        let _ = pixel(&s, 0, 0);
+        let px = {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            st.canvas.as_mut().unwrap().read_composite(st.gpu.as_ref().unwrap()).unwrap()
+        };
+        let column =
+            |x: u32| (180..220u32).map(|y| 1.0 - f32::from(px[((y * 400 + x) * 4) as usize]) / 255.0).sum::<f32>();
+        Some((190..210).map(column).sum::<f32>() / 20.0)
+    };
+    for off in [0.0, 0.5] {
+        let Some(least) = ink(0.01, 1.0, 1.0, off) else { return };
+        // a line of about a pixel and a half at its least, the same zoomed in
+        assert!(least < 1.8, "{least} at {off}");
+        assert!((ink(0.01, 1.0, 4.0, off).unwrap() - least).abs() < 0.02);
+        // a light touch takes its usual size down to about that, a firm one doesn't
+        let light = ink(0.335, 0.02, 1.0, off).unwrap();
+        assert!(light < least + 0.1, "{light} {least}");
+        assert!(ink(0.335, 1.0, 1.0, off).unwrap() > 5.0);
+    }
+}
+
+#[test]
+fn liquify_turns_away_an_alpha_locked_layer_and_other_adjustments_take_it() {
+    use crate::adjust_menu::Adjustment;
+    use crate::layers::Blocked;
+    let Some(s) = session(64, 64) else { return };
+    let id = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    assert!(s.set_layer_alpha_lock(id, true));
+    assert_eq!(s.why_not_adjusted(Adjustment::Liquify), Some(Blocked::AlphaLocked));
+    assert!(!s.adjustment_start(Adjustment::Liquify));
+    assert_eq!(s.why_not_adjusted(Adjustment::GaussianBlur), None);
+    assert!(s.adjustment_start(Adjustment::GaussianBlur));
+    s.adjustment_end(false);
+    // the lock off, Liquify starts
+    assert!(s.set_layer_alpha_lock(id, false));
+    assert_eq!(s.why_not_adjusted(Adjustment::Liquify), None);
+    assert!(s.adjustment_start(Adjustment::Liquify));
+    s.adjustment_end(false);
+}
+
+#[test]
+fn merge_down_keeps_a_multiply_layer_s_look() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(1.0);
+    // yellow below, cyan above set to Multiply: green where they meet
+    s.set_color(1.0, 1.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let upper = s.add_layer();
+    s.set_color(0.0, 1.0, 1.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.set_layer_blend(upper, procraft_engine::document::BlendMode::Multiply.id()));
+    let shown = pixel(&s, 50, 50);
+    assert_eq!(shown, [0, 255, 0, 255]);
+    assert!(s.merge_down(upper));
+    assert_eq!(pixel(&s, 50, 50), shown, "the merged layer looks as the two did");
+}
+
+#[test]
+fn an_inbetween_frame_goes_between_a_frame_and_the_next_as_a_plugin_draws_it() {
+    use crate::plugin_file::tests::{coded, pack};
+    use crate::plugin_run::MODULE;
+    use procraft_engine::document::LayerId;
+    let Some(s) = session(64, 64) else { return };
+    assert!(s.set_animation_assist(true));
+    let (a, b) = (s.add_frame(), s.add_frame());
+    // a white square on each, at the left and at the right
+    let square = |x: usize| {
+        let mut out = vec![0u8; 64 * 64 * 4];
+        for row in 24..32 {
+            for col in x..x + 8 {
+                out[(row * 64 + col) * 4..(row * 64 + col) * 4 + 4].copy_from_slice(&[255; 4]);
+            }
+        }
+        out
+    };
+    s.shared.lock().canvas.as_mut().unwrap().write_layers(vec![(LayerId(a), square(4)), (LayerId(b), square(44))]);
+    // none without a plugin on the hook
+    assert_eq!(s.add_inbetween(a), None);
+    let dir = std::env::temp_dir().join(format!("procraft-tween-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::plugins::Plugins::with_store(dir.to_string_lossy().into_owned());
+    // a plugin on the hook that draws nothing: nothing made
+    let module = wat::parse_str(
+        r#"(module (memory (export "memory") 1)
+            (func (export "procraft_between_begin") (param i32 i32) (result i32) (i32.const 0))
+            (func (export "procraft_between_row") (param i32 i32))
+            (func (export "procraft_between_run") (result i32) (i32.const 0))
+            (func (export "procraft_between_out") (param i32)))"#,
+    )
+    .unwrap();
+    let mut manifest = coded("org.example.nothing", &module);
+    manifest["hooks"] = serde_json::json!(["inbetween"]);
+    assert_eq!(plugins.install(pack(&manifest, &[(MODULE, module.as_slice())])), None);
+    assert!(plugins.set_on("org.example.nothing".to_owned(), true));
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert_eq!(s.add_inbetween(a), None);
+    assert!(plugins.set_on("org.example.nothing".to_owned(), false));
+    // the Tweening plugin the app comes with
+    let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "tweening").unwrap();
+    assert_eq!(plugins.install(bytes.to_vec()), None);
+    assert!(plugins.set_on("io.github.artcraftandroid.tweening".to_owned(), true));
+    assert!(plugins.tweens());
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    // the last frame has no next
+    assert_eq!(s.add_inbetween(b), None);
+    let made = s.add_inbetween(a).unwrap();
+    let frames = s.animation_frames();
+    let at = frames.iter().position(|f| *f == a).unwrap();
+    assert_eq!(&frames[at..at + 3], &[a, made, b]);
+    let pixels = s.shared.lock().layer_pixels(LayerId(made)).unwrap();
+    let alpha = |x: usize, y: usize| pixels[(y * 64 + x) * 4 + 3];
+    assert_eq!((alpha(28, 28), alpha(8, 28), alpha(48, 28)), (255, 0, 0), "the square halfway");
+    // one undo takes it back
+    s.undo();
+    assert!(!s.animation_frames().contains(&made));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn add_frame_names_its_layer_frame_or_page_by_the_count() {
+    let Some(s) = session(64, 64) else { return };
+    assert!(s.set_animation_assist(true));
+    let frame = s.add_frame();
+    let name =
+        |s: &CanvasSession, id: u64| s.layers().into_iter().find(|l| l.id == id).map(|l| l.name).unwrap_or_default();
+    assert_eq!(name(&s, frame), "Frame 2");
+    let next = s.add_frame();
+    assert_eq!(name(&s, next), "Frame 3");
+    // a plain new layer keeps its own name
+    let layer = s.add_layer();
+    assert!(name(&s, layer).starts_with("Layer"));
+}
+
+/// Six painted layers with GPU room for only two (the rest kept compressed, as on a smaller
+/// tablet), two masked and one hidden.
+fn six_layers_two_on_the_gpu() -> Option<std::sync::Arc<CanvasSession>> {
+    let s = session(300, 400)?;
+    let (w, h) = (s.info().width, s.info().height);
+    s.shared.lock().canvas.as_mut().unwrap().set_resident_budget(2 * u64::from(w) * u64::from(h) * 4);
+    s.set_brush_size(0.6);
+    let mut layers = vec![s.layers()[0].id];
+    for (i, x) in [40.0f32, 80.0, 120.0, 160.0, 200.0, 240.0].into_iter().enumerate() {
+        if i > 0 {
+            layers.push(s.add_layer());
+        }
+        s.set_color(i as f32 * 0.15, 0.2, 1.0 - i as f32 * 0.15);
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 100.0, 0.0)]);
+        s.stroke_add((1..20).map(|k| sample(x, 100.0 + k as f32 * 12.0, k as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    s.add_mask(layers[1]);
+    s.add_mask(layers[2]);
+    assert!(s.set_layer_visible(layers[0], false));
+    Some(s)
+}
+
+fn painted_per_layer(s: &CanvasSession) -> Vec<usize> {
+    s.layers()
+        .iter()
+        .filter(|l| l.kind == crate::layers::LayerType::Paint)
+        .map(|l| s.copy_layer_contents(l.id).map_or(0, |p| p.rgba.chunks(4).filter(|px| px[3] > 0).count()))
+        .collect()
+}
+
+fn reopened_at(dir: &std::path::Path, gpu: &Gpu) -> std::sync::Arc<CanvasSession> {
+    let o = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    o.use_gpu(gpu.clone());
+    {
+        let mut st = o.shared.lock();
+        let (w, h) = (st.doc.width(), st.doc.height());
+        st.window_size = (300, 400);
+        st.view = Some(View::fit((w, h), (300, 400)));
+        st.ensure_canvas();
+    }
+    o
+}
+
+#[test]
+fn a_crop_with_layers_off_the_gpu_saves_and_reopens_whole() {
+    let Some(s) = six_layers_two_on_the_gpu() else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    // saved once before the crop (an autosave), into the folder the crop is saved to after
+    let dir = std::env::temp_dir().join(format!("procraft-crop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert!(s.crop_canvas(40.0, 80.0, 230.0, 290.0, 0.0, false, 0, 0));
+    let cropped = painted_per_layer(&s);
+    assert!(cropped.iter().all(|&n| n > 0), "{cropped:?}");
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    // every layer back as cropped, and still after the reopened one is saved and opened again
+    let o = reopened_at(&dir, &gpu);
+    assert_eq!((o.info().width, o.info().height), (230, 290));
+    assert_eq!(painted_per_layer(&o), cropped);
+    o.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(painted_per_layer(&reopened_at(&dir, &gpu)), cropped);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_crop_undone_and_redone_after_a_save_saves_every_layer_at_its_size() {
+    let Some(s) = six_layers_two_on_the_gpu() else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let dir = std::env::temp_dir().join(format!("procraft-crop-undo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let whole = painted_per_layer(&s);
+    let size = (s.info().width, s.info().height);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert!(s.crop_canvas(40.0, 80.0, 230.0, 290.0, 0.0, false, 0, 0));
+    let cropped = painted_per_layer(&s);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    // undone: the canvas from before, saved over the cropped files
+    assert_eq!(s.undo().as_deref(), Some("Crop canvas"));
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let o = reopened_at(&dir, &gpu);
+    assert_eq!((o.info().width, o.info().height), size);
+    assert_eq!(painted_per_layer(&o), whole);
+    // redone: cropped again, saved over the whole ones
+    assert_eq!(s.redo().as_deref(), Some("Crop canvas"));
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(painted_per_layer(&reopened_at(&dir, &gpu)), cropped);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_selections_bands_ask_for_a_frame_when_they_have_moved_a_pixel_not_every_frame() {
+    let Some(s) = session(200, 300) else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    s.set_display_scale(3.0);
+    let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+    let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
+        label: Some("window"),
+        size: procraft_gpu::wgpu::Extent3d { width: 300, height: 300, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: procraft_gpu::wgpu::TextureDimension::D2,
+        format,
+        usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let started = std::time::Instant::now();
+    let draw = || {
+        // caches remade first: those frames are wanted at once
+        let mut after = s.draw(&view, format, (300, 300), procraft_engine::profile::Profile::Srgb, started);
+        for _ in 0..50 {
+            if after != Some(std::time::Duration::ZERO) {
+                break;
+            }
+            after = s.draw(&view, format, (300, 300), procraft_engine::profile::Profile::Srgb, started);
+        }
+        after
+    };
+    // nothing moving: no frame wanted
+    assert_eq!(draw(), None);
+    // the bands drift 10 points a second: on a 3x screen a pixel every 1/30 s
+    s.select_shape(false, 40.0, 40.0, 120.0, 120.0, crate::SelectionJoin::Add);
+    let after = draw().expect("the bands keep drawing");
+    assert!(after > std::time::Duration::from_millis(20) && after <= std::time::Duration::from_millis(34), "{after:?}");
+    // tinted instead, nothing drifts
+    s.set_selection_display(crate::selection::SelectionDisplay::Tint);
+    assert_eq!(draw(), None);
+}
+
+#[test]
+fn time_counts_while_tracking_is_on_and_is_saved_with_the_artwork() {
+    let Some(s) = session(64, 64) else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let wait = |ms: u64| std::thread::sleep(std::time::Duration::from_millis(ms));
+    // off by default: nothing counts
+    wait(30);
+    assert_eq!(s.artwork_info().tracked_ms, 0);
+    s.set_tracking(true);
+    wait(60);
+    let running = s.artwork_info().tracked_ms;
+    assert!(running >= 60, "{running} ms counted, read while it runs");
+    s.set_tracking(false);
+    let stopped = s.artwork_info().tracked_ms;
+    wait(40);
+    assert_eq!(s.artwork_info().tracked_ms, stopped, "off: nothing more counts");
+    // on again: a save takes what has counted so far
+    s.set_tracking(true);
+    wait(30);
+    let dir = std::env::temp_dir().join(format!("procraft-tracked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let saved = s.artwork_info().tracked_ms;
+    assert!(saved >= stopped + 30, "{saved} ms after the save, {stopped} before");
+    let o = reopened_at(&dir, &gpu);
+    let reopened = o.artwork_info().tracked_ms;
+    assert!(reopened >= stopped + 30 && reopened <= saved, "{reopened} ms reopened");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn undo_while_transforming_takes_back_the_transforms_change_not_a_step_under_it() {
+    use crate::transform::TransformHandle;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    s.set_color(0.0, 0.0, 0.0);
+    // two strokes: the first a step the transform must not take back
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+    s.stroke_end(vec![]);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let dark = |x: u32, y: u32| pixel(&s, x, y)[0] < 128;
+    assert!(dark(20, 20) && dark(30, 30));
+    assert!(s.transform_begin().is_some());
+    s.transform_grab(TransformHandle::Move, 30.0, 30.0);
+    s.transform_drag(60.0, 60.0);
+    s.transform_release();
+    // the move goes back; neither stroke does; nothing is redone meanwhile
+    assert_eq!(s.undo(), None);
+    assert_eq!(s.redo(), None);
+    s.transform_end(true);
+    assert!(dark(20, 20) && dark(30, 30), "both strokes where they were");
+    assert!(!dark(50, 50) && !dark(40, 40), "nothing moved");
+    // once it has ended, undo is the canvas's again: the transform's step, then the second stroke
+    assert!(s.undo().is_some_and(|n| n.contains("transform")));
+    assert!(dark(20, 20) && dark(30, 30));
+    assert_eq!(s.undo().as_deref(), Some("Paint stroke"));
+    assert!(dark(20, 20) && !dark(30, 30));
+}
+
+/// Each layer's pixels, the paint layers' only, as a hash each (top first).
+fn layer_hashes(s: &CanvasSession) -> Vec<u64> {
+    s.layers()
+        .iter()
+        .filter(|l| l.kind == crate::layers::LayerType::Paint)
+        .map(|l| s.copy_layer_contents(l.id).map_or(0, |p| crate::project::pixels_hash(&p.rgba)))
+        .collect()
+}
+
+#[test]
+fn whole_canvas_changes_with_layers_off_the_gpu_save_and_reopen_as_with_them_all_on_it() {
+    type Change = fn(&CanvasSession);
+    let changes: [(&str, Change); 5] = [
+        ("flip across", |s| s.flip_canvas(true)),
+        ("flip down", |s| s.flip_canvas(false)),
+        ("merge down", |s| {
+            // (the list is top first)
+            let top = s.layers().iter().find(|l| l.kind == crate::layers::LayerType::Paint).unwrap().id;
+            assert!(s.merge_down(top));
+        }),
+        ("duplicate", |s| {
+            let first = s.layers().iter().find(|l| l.kind == crate::layers::LayerType::Paint).unwrap().id;
+            assert!(s.duplicate_layer(first).is_some());
+        }),
+        ("flip, undone", |s| {
+            s.flip_canvas(true);
+            assert!(s.undo().is_some());
+        }),
+    ];
+    for (name, change) in changes {
+        let run = |budgeted: bool| -> Option<(Vec<u64>, Vec<u64>)> {
+            let s = six_layers_two_on_the_gpu()?;
+            let gpu = s.shared.lock().gpu.clone().unwrap();
+            if !budgeted {
+                s.shared.lock().canvas.as_mut().unwrap().set_resident_budget(0);
+            }
+            let dir = std::env::temp_dir().join(format!(
+                "procraft-whole-{}-{budgeted}-{}",
+                name.replace([' ', ','], "-"),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            s.save(dir.to_string_lossy().into_owned()).unwrap();
+            change(&s);
+            let shown = layer_hashes(&s);
+            s.save(dir.to_string_lossy().into_owned()).unwrap();
+            let reopened = layer_hashes(&reopened_at(&dir, &gpu));
+            let _ = std::fs::remove_dir_all(&dir);
+            Some((shown, reopened))
+        };
+        let Some((all_on, all_on_reopened)) = run(false) else { return };
+        let (budgeted, budgeted_reopened) = run(true).unwrap();
+        assert_eq!(all_on, all_on_reopened, "{name}: all on the GPU, reopened");
+        assert_eq!(budgeted, all_on, "{name}: kept off the GPU, shown");
+        assert_eq!(budgeted_reopened, all_on, "{name}: kept off the GPU, reopened");
+    }
+}
+
+/// Painting, smudging and erasing, fills, clears and inverts, adjustments, transforms, liquify,
+/// ColorDrop, flips, copies and pastes, merges and duplicates, layers made, picked, moved, hidden
+/// and deleted, undo and redo, and saves now and then (some with an edit open, as the app going
+/// into the background saves): a canvas that keeps one layer on the GPU, the others compressed off
+/// it, has every layer as one that keeps them all after each step, and opened again from its
+/// last save.
+fn layers_off_the_gpu_keep_every_edit(seed: u32, steps: usize) {
+    use crate::Adjustment;
+    use crate::transform::TransformHandle;
+    let side = 160u32;
+    let make = |resident: u64| -> Option<std::sync::Arc<CanvasSession>> {
+        let s = session(side, side)?;
+        {
+            let mut st = s.shared.lock();
+            let canvas = st.canvas.as_mut().unwrap();
+            // as the app has it: the layers not worked on composited once, kept
+            canvas.set_cache_composites(true);
+            canvas.set_resident_budget(resident * u64::from(side) * u64::from(side) * 4);
+        }
+        s.set_brush_size(0.3);
+        Some(s)
+    };
+    let Some(all) = make(0) else { return };
+    let one = make(1).unwrap();
+    let gpu = one.shared.lock().gpu.clone().unwrap();
+    let dir = std::env::temp_dir().join(format!("procraft-off-gpu-{}-{seed}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let save = |s: &CanvasSession| s.save(dir.to_string_lossy().into_owned()).unwrap();
+    // a frame, as the app draws one after every change: layers are parked there
+    let frame = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render(g, &mut st.doc, None);
+            g.flush();
+        }
+    };
+    let mut state = seed;
+    let mut next = |n: u32| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) % n.max(1)
+    };
+    let mut done: Vec<String> = Vec::new();
+    // how many layers were found parked, step by step: the test is no test without
+    let mut parked_seen = 0;
+    for step in 0..steps {
+        // the step's numbers drawn once, then the same step on both
+        let (kind, r): (u32, [u32; 6]) = (next(26), std::array::from_fn(|_| next(1000)));
+        let at = |k: usize| 15.0 + (r[k] % 130) as f32;
+        let apply = |s: &CanvasSession| -> String {
+            let layers: Vec<u64> =
+                s.layers().iter().filter(|l| l.kind == crate::layers::LayerType::Paint).map(|l| l.id).collect();
+            let any = |k: usize| layers[r[k] as usize % layers.len()];
+            let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+            let stroke = |s: &CanvasSession| {
+                s.set_color((r[0] % 7) as f32 / 6.0, (r[1] % 5) as f32 / 4.0, (r[2] % 3) as f32 / 2.0);
+                let (x0, y0, x1, y1) = (at(3), at(4), at(5), at(0));
+                s.stroke_begin(PointerKind::Finger, vec![sample(x0, y0, 0.0)]);
+                s.stroke_add(
+                    (1..16)
+                        .map(|k| {
+                            let t = k as f32 / 16.0;
+                            sample(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, f64::from(k) * 8.0)
+                        })
+                        .collect(),
+                );
+                s.stroke_end(vec![sample(x1, y1, 136.0)]);
+            };
+            match kind {
+                0..=4 => {
+                    stroke(s);
+                    "stroke".to_owned()
+                }
+                5 | 6 => {
+                    let tool = if kind == 5 { ToolKind::Erase } else { ToolKind::Smudge };
+                    s.set_tool(tool);
+                    stroke(s);
+                    s.set_tool(ToolKind::Paint);
+                    format!("{tool:?} stroke")
+                }
+                7 | 8 => format!("new layer {}", s.add_layer()),
+                9 => format!("select {}: {}", any(1), s.select_layer(any(1))),
+                10 => {
+                    let id = any(2);
+                    format!("delete {id}: {}", layers.len() > 1 && s.delete_layer(id))
+                }
+                11 => format!("undo: {:?}", s.undo()),
+                12 => format!("redo: {:?}", s.redo()),
+                13 => format!("fill {current}: {}", s.fill_layer(current)),
+                14 => {
+                    s.clear_layer();
+                    format!("clear {current}")
+                }
+                15 => format!("invert {current}: {}", s.invert_layer(current)),
+                16 | 17 => {
+                    let adjustment =
+                        [Adjustment::GaussianBlur, Adjustment::Hsb, Adjustment::Liquify][r[1] as usize % 3];
+                    let started = s.adjustment_start(adjustment);
+                    if adjustment == Adjustment::Liquify {
+                        let (x, y) = (at(3), at(4));
+                        s.adjustment_liquify_stroke(
+                            (0..12).flat_map(|i| [x + i as f32 * 3.0, y, 1.0, 8.0]).collect(),
+                            true,
+                            false,
+                        );
+                    } else {
+                        s.adjustment_amount_by(0.3);
+                    }
+                    // the app sent away with it open: saved as it shows
+                    if kind == 17 {
+                        save(s);
+                    }
+                    let kept = r[2] % 4 != 0;
+                    format!("{adjustment:?} {started}, kept {kept}: {}", s.adjustment_end(kept))
+                }
+                18 | 19 => {
+                    let begun = s.transform_begin().is_some();
+                    s.transform_grab(TransformHandle::Move, 80.0, 80.0);
+                    s.transform_drag(80.0 + (r[3] % 40) as f32 - 20.0, 80.0 + (r[4] % 40) as f32 - 20.0);
+                    s.transform_release();
+                    if kind == 19 {
+                        save(s);
+                    }
+                    let kept = r[2] % 4 != 0;
+                    s.transform_end(kept);
+                    format!("transform {begun}, kept {kept}")
+                }
+                20 => {
+                    let (x, y) = (at(3), at(4));
+                    let poured = s.pour_begin(x, y, 0.2, 0.7, 0.3, 0.4);
+                    if poured {
+                        s.pour_end(true, None);
+                    }
+                    format!("ColorDrop at {x},{y}: {poured}")
+                }
+                21 => {
+                    s.flip_canvas(r[1] % 2 == 0);
+                    "flip".to_owned()
+                }
+                22 => {
+                    let pasted = s.copy_layer().and_then(|c| s.paste(c));
+                    format!("copy and paste: {pasted:?}")
+                }
+                23 => {
+                    if r[1] % 2 == 0 {
+                        format!("merge down {current}: {}", s.merge_down(current))
+                    } else {
+                        format!("duplicate {current}: {:?}", s.duplicate_layer(current))
+                    }
+                }
+                24 => {
+                    let (id, to) = (any(1), r[2] % (layers.len() as u32 + 1));
+                    let visible = r[3] % 2 == 0;
+                    format!(
+                        "move {id} to {to}: {}; visible {visible}: {}",
+                        s.move_layer(id, to),
+                        s.set_layer_visible(id, visible)
+                    )
+                }
+                _ => {
+                    save(s);
+                    "save".to_owned()
+                }
+            }
+        };
+        let what = apply(&all);
+        let also = apply(&one);
+        done.push(format!("{step}: {what}"));
+        assert_eq!(what, also, "seed {seed}: the two went apart at step {step}\n{}", done.join("\n"));
+        frame(&all);
+        frame(&one);
+        parked_seen += one.shared.lock().canvas.as_ref().map_or(0, |c| c.parked_layers());
+        assert_eq!(
+            layer_hashes(&one),
+            layer_hashes(&all),
+            "seed {seed}: a layer kept off the GPU differs after\n{}",
+            done.join("\n")
+        );
+    }
+    assert!(parked_seen > 0, "seed {seed}: no layer was ever kept off the GPU");
+    let shown = layer_hashes(&all);
+    save(&one);
+    let reopened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    reopened.use_gpu(gpu);
+    {
+        let mut st = reopened.shared.lock();
+        st.window_size = (side, side);
+        st.view = Some(View::fit((side, side), (side, side)));
+        st.ensure_canvas();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(layer_hashes(&reopened), shown, "seed {seed}: opened again\n{}", done.join("\n"));
+}
+
+#[test]
+fn layers_off_the_gpu_keep_every_kind_of_edit_through_saves() {
+    let seeds: u32 = std::env::var("OFF_GPU_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    for seed in 1..=seeds {
+        layers_off_the_gpu_keep_every_edit(seed, 60);
+    }
+}
+
+#[test]
+fn a_copied_drawing_becomes_a_shape_source_filling_it_as_drawn() {
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.6);
+    s.set_color(1.0, 1.0, 1.0);
+    // a short white stroke in a corner of a transparent layer
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_add((1..10).map(|k| sample(30.0 + k as f32 * 4.0, 30.0, k as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let copied = s.copy_layer().expect("a copy");
+    let source = crate::studio::source_from_copy(copied.clone());
+    let n = (source.len() as f64).sqrt() as usize;
+    assert!(n > 0 && n * n == source.len());
+    // cut to the stroke: it spans the square's width, white where painted, black around
+    let middle = &source[n / 2 * n..n / 2 * n + n];
+    let lit: Vec<usize> = middle.iter().enumerate().filter(|(_, v)| **v > 128).map(|(i, _)| i).collect();
+    assert!(lit.first().is_some_and(|&a| a < n / 8) && lit.last().is_some_and(|&b| b > n * 7 / 8), "{lit:?}");
+    assert!(source[..n].iter().all(|&v| v < 16), "black above the stroke");
+    // nothing painted, nothing to take
+    let empty = crate::layers::ThumbnailImage { width: 4, height: 4, rgba: vec![0; 64] };
+    assert!(crate::studio::source_from_copy(empty).is_empty());
+}
+
+#[test]
+fn smudging_moves_paint_only_inside_the_selection() {
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.6);
+    s.set_color(0.0, 0.0, 1.0);
+    for y in [40.0f32, 80.0, 120.0, 160.0] {
+        s.stroke_begin(PointerKind::Finger, vec![sample(10.0, y, 0.0)]);
+        s.stroke_add((1..20).map(|k| sample(10.0 + k as f32 * 9.5, y, k as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    let layer = s.layers()[0].id;
+    let before = s.copy_layer_contents(layer).unwrap().rgba;
+    // the left half selected; a smudge from inside it out across the middle
+    s.select_shape(false, 0.0, 0.0, 100.0, 200.0, crate::SelectionJoin::Add);
+    s.set_tool(ToolKind::Smudge);
+    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 20.0, 0.0)]);
+    s.stroke_add((1..40).map(|k| sample(60.0 + k as f32 * 3.0, 20.0 + k as f32 * 4.0, k as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let after = s.copy_layer_contents(layer).unwrap().rgba;
+    let changed = |xs: std::ops::Range<usize>| {
+        (0..200usize)
+            .flat_map(|y| xs.clone().map(move |x| (y * 200 + x) * 4))
+            .filter(|&i| before[i..i + 4] != after[i..i + 4])
+            .count()
+    };
+    assert!(changed(0..95) > 100, "smudged inside");
+    assert_eq!(changed(102..200), 0, "nothing moved outside");
+}
+
+/// How long a large library takes to keep and to open again: `LIBRARY_CORPUS` a folder of brush
+/// files (searched through), all brought in first.
+#[test]
+#[ignore]
+fn a_large_librarys_keeping_and_opening_timed() {
+    let Ok(root) = std::env::var("LIBRARY_CORPUS") else { return };
+    let mut files = Vec::new();
+    let mut folders = vec![std::path::PathBuf::from(&root)];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            let path = entry.path();
+            let kind = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if path.is_dir() {
+                folders.push(path);
+            } else if matches!(kind.as_str(), "brush" | "brushset" | "abr" | "kpp" | "gbr" | "sut") {
+                files.push((path, kind));
+            }
+        }
+    }
+    files.sort();
+    let s = CanvasSession::new(64, 64);
+    let started = std::time::Instant::now();
+    for (path, kind) in &files {
+        let bytes = std::fs::read(path).unwrap();
+        if kind == "brush" || kind == "brushset" {
+            s.import_brushes(bytes);
+        } else {
+            s.import_other_brushes(bytes, "Corpus".to_owned());
+        }
+    }
+    let count: usize = s.brush_library().iter().map(|set| set.brushes.len()).sum();
+    eprintln!("{} files, {count} brushes, brought in in {:?}", files.len(), started.elapsed());
+    let dir = std::env::temp_dir().join(format!("procraft-library-timed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_string_lossy().into_owned();
+    let t = std::time::Instant::now();
+    assert!(s.keep_brushes(d.clone()));
+    eprintln!("kept whole in {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    assert!(s.keep_brush_choices(d.clone()));
+    eprintln!("choices kept in {:?}", t.elapsed());
+    let set = s.brush_library().iter().position(|set| set.brushes.len() > 1).unwrap() as u32;
+    assert!(s.select_brush(set, 1));
+    let t = std::time::Instant::now();
+    assert!(s.keep_brushes(d.clone()));
+    eprintln!("kept again after a brush chosen in {:?}", t.elapsed());
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        eprintln!("  {} {} KB", entry.file_name().to_string_lossy(), entry.metadata().unwrap().len() / 1024);
+    }
+    let t = std::time::Instant::now();
+    let json = s.saved_brush_library();
+    eprintln!("written as text in {:?} ({} KB)", t.elapsed(), json.len() / 1024);
+
+    let taken = CanvasSession::new(64, 64);
+    let t = std::time::Instant::now();
+    assert!(taken.open_brushes(d.clone()));
+    eprintln!("opened as held from the keeping in {:?}", t.elapsed());
+    // as read from the file: what it was held as let go (another file kept)
+    s.keep_brushes(dir.join("elsewhere").to_string_lossy().into_owned());
+    let other = CanvasSession::new(64, 64);
+    let t = std::time::Instant::now();
+    assert!(other.open_brushes(d.clone()));
+    eprintln!("opened in {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    assert!(other.keep_brushes(d));
+    eprintln!("kept by the session that opened it in {:?}", t.elapsed());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each brush brought in from `SIZE_CORPUS` (a folder of brush files) keeps its size range and
+/// sizes through the library kept and read back, as after a restart.
+#[test]
+#[ignore]
+fn brushes_brought_in_keep_their_size_range_through_a_restart() {
+    let Ok(root) = std::env::var("SIZE_CORPUS") else { return };
+    let mut files = Vec::new();
+    let mut folders = vec![std::path::PathBuf::from(&root)];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            let path = entry.path();
+            let kind = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if path.is_dir() {
+                folders.push(path);
+            } else if matches!(
+                kind.as_str(),
+                "brush" | "brushset" | "abr" | "kpp" | "gbr" | "vbr" | "gih" | "sut" | "bundle"
+            ) {
+                files.push((path, kind));
+            }
+        }
+    }
+    files.sort();
+    let s = CanvasSession::new(64, 64);
+    for (path, kind) in &files {
+        let bytes = std::fs::read(path).unwrap();
+        if kind == "brush" || kind == "brushset" {
+            s.import_brushes(bytes);
+        } else {
+            s.import_other_brushes(bytes, "Corpus".to_owned());
+        }
+    }
+    let t = CanvasSession::new(64, 64);
+    assert!(t.load_brush_library(s.saved_brush_library()));
+    let (before, after) = (s.shared.lock(), t.shared.lock());
+    let mut shifted = Vec::new();
+    let mut count = 0;
+    for (a, b) in before.library.iter().zip(after.library.iter()) {
+        let pairs = a.brushes.iter().zip(b.brushes.iter());
+        let seconds = pairs.clone().filter_map(|(x, y)| x.secondary.as_deref().zip(y.secondary.as_deref()));
+        for (x, y) in pairs.chain(seconds) {
+            count += 1;
+            let close = |p: f32, q: f32| (p - q).abs() <= 1e-4 * p.abs().max(1.0);
+            if !close(x.max_size, y.max_size) || !close(x.min_size, y.min_size) || x.size_unit() != y.size_unit() {
+                shifted.push(format!(
+                    "{} / {}: max {} -> {}, min {} -> {}, unit {} -> {}",
+                    a.name,
+                    x.name,
+                    x.max_size,
+                    y.max_size,
+                    x.min_size,
+                    y.min_size,
+                    x.size_unit(),
+                    y.size_unit()
+                ));
+            }
+        }
+    }
+    eprintln!("{count} brushes, {} shifted", shifted.len());
+    for line in shifted.iter().take(20) {
+        eprintln!("  {line}");
+    }
+    assert!(shifted.is_empty());
 }

@@ -17,8 +17,25 @@ object Pc {
 
     val Panel: Color get() = pick(0xF7262626, 0xF7E6E6E6)
     val Row: Color get() = pick(0xFF303030, 0xFFD8D8D8)
-    val RowSelected = Color(0xFF0076FD)
-    val Accent = Color(0xFF0076FD)
+
+    /** A plugin has the colour panel's Classic show a triangle in place of its square. */
+    var colourTriangle by mutableStateOf(false)
+
+    /** A picker plugin's Classic square, while one is on: its picture, and where touches land and the knob sits. */
+    var picker by mutableStateOf<ClassicPicker?>(null)
+
+    /** The accent a plugin gives the interface, if one does: drawn in place of the interface's blues. */
+    var accentGiven by mutableStateOf<Color?>(null)
+
+    /** [blue], one of the interface's own blues, or the accent a plugin gives in its place (its alpha kept). */
+    fun tinted(blue: Color): Color = accentGiven?.copy(alpha = blue.alpha) ?: blue
+
+    /** The accent [plugins] give, if any. */
+    fun accentOf(plugins: io.github.artcraftandroid.procraft.core.Plugins): Color? =
+        plugins.accentColour()?.let { Color(0xFF000000L or it.toLong()) }
+
+    val RowSelected: Color get() = tinted(Color(0xFF0076FD))
+    val Accent: Color get() = tinted(Color(0xFF0076FD))
     val Text: Color get() = pick(0xFFFFFFFF, 0xFF222222)
     val TextDim: Color get() = pick(0x99FFFFFF, 0x99000000)
     val Disabled: Color get() = pick(0x4DFFFFFF, 0x4D000000)
@@ -31,7 +48,7 @@ object Pc {
     val Bar: Color get() = pick(0xE61C1C1C, 0xCFE6E6E6)
     val BarText: Color get() = pick(0xFFAAAAAA, 0xFF3B3B3B)
     val BarGlyph: Color get() = pick(0xFFC7C7C7, 0xFF373737)
-    val BarGlyphSelected = Color(0xFF0076FD)
+    val BarGlyphSelected: Color get() = tinted(Color(0xFF0076FD))
     val ActionDisc: Color get() = pick(0xFF141414, 0xFFEDEDED)
     val ActionGlyph: Color get() = pick(0xFF969696, 0xFF646464)
     val ColorRing: Color get() = pick(0xFF969696, 0xFF696969)
@@ -263,9 +280,31 @@ object CanvasSpace {
         }
     }
 
-    /** [bitmap], of the canvas's colours, marked with the canvas's space. */
+    /** [bitmap], of the canvas's colours, marked with the canvas's space (on Android 9, a copy so marked). */
     fun tag(bitmap: android.graphics.Bitmap): android.graphics.Bitmap {
-        if (p3) bitmap.setColorSpace(displayP3)
-        return bitmap
+        if (!p3) return bitmap
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            bitmap.setColorSpace(displayP3)
+            return bitmap
+        }
+        // a bitmap's space can't be changed before Android 10: its pixels go into one made in it
+        val config = bitmap.config ?: android.graphics.Bitmap.Config.ARGB_8888
+        val tagged = android.graphics.Bitmap.createBitmap(bitmap.width, bitmap.height, config, true, displayP3)
+        val pixels = java.nio.ByteBuffer.allocate(bitmap.byteCount)
+        bitmap.copyPixelsToBuffer(pixels)
+        pixels.rewind()
+        tagged.copyPixelsFromBuffer(pixels)
+        return tagged
     }
 }
+
+/**
+ * A picker plugin's Classic square: [pick] gives the saturation and brightness at a point and [point] where they sit
+ * (points 0..1 across and down); [picture] draws it for a hue, a side in pixels, premultiplied RGBA (none if it
+ * couldn't be drawn: its plugin goes off).
+ */
+class ClassicPicker(
+    val pick: (Float, Float) -> List<Float>?,
+    val point: (Float, Float) -> List<Float>?,
+    val picture: (Float, Int) -> ByteArray?,
+)

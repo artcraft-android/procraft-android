@@ -67,7 +67,7 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
       # the code only Android builds (the surface and the render thread)
       - name: Clippy for Android
-        run: cargo ndk -t arm64-v8a --platform 29 clippy -p procraft-core --lib -- -D warnings
+        run: cargo ndk -t arm64-v8a --platform 28 clippy -p procraft-core --lib -- -D warnings
       - uses: gradle/actions/setup-gradle@v4
       - name: Release APK and lint
         working-directory: android

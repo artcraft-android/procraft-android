@@ -16,6 +16,21 @@ pub fn encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Each byte's place in [`ALPHABET`], or 64 for one that isn't in it (a picture's base64 can run
+/// to tens of megabytes, too many to look each up in turn).
+const PLACES: [u8; 256] = {
+    let mut places = [64u8; 256];
+    let mut i = 0;
+    while i < 64 {
+        #[allow(clippy::indexing_slicing)] // const evaluation: i is below 64, a byte below 256
+        {
+            places[ALPHABET[i] as usize] = i as u8;
+        }
+        i += 1;
+    }
+    places
+};
+
 /// The bytes in base64 `text` (spaces at either end ignored); none if it isn't base64.
 pub fn decode(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
@@ -26,7 +41,8 @@ pub fn decode(text: &str) -> Option<Vec<u8>> {
             if c == b'=' {
                 break;
             }
-            n |= (ALPHABET.iter().position(|&x| x == c)? as u32) << (18 - 6 * k);
+            let place = PLACES.get(usize::from(c)).copied().filter(|p| *p < 64)?;
+            n |= u32::from(place) << (18 - 6 * k);
             real += 1;
         }
         out.extend([(n >> 16) as u8, (n >> 8) as u8, n as u8].into_iter().take(real.max(1) - 1));

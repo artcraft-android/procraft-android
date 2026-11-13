@@ -45,6 +45,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.boundsInRoot
@@ -73,6 +74,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -323,8 +325,9 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
         FloatingWidth,
         0.dp,
         Modifier.offset(x, y).height(height).pointerInput(Unit) {
-            // the canvas under it takes no touch
-            awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+            // the canvas under it takes no touch (a move stays unconsumed: the grabber's drag gives up
+            // on one consumed before it has gone far enough)
+            awaitEachGesture { awaitFirstDown().consume() }
         },
         side = ArrowSide.NONE,
     ) {
@@ -542,8 +545,8 @@ private fun discToSquare(u: Float, v: Float): Offset =
 
 /**
  * A picker's picture, [side] pixels square, kept in one Bitmap for its size: the first made at
- * once, each after it off the main thread (only the newest asked for), so a drag never waits on
- * the core making it. Read [version] where it is drawn, so a new one draws.
+ * once, each after it off the main thread, so a drag never waits on the core making it. Read
+ * [version] where it is drawn, so a new one draws.
  */
 private class PickerPicture(side: Int) {
     val bitmap: android.graphics.Bitmap =
@@ -557,20 +560,29 @@ private class PickerPicture(side: Int) {
     }
 }
 
-/** The picture [make] draws for [key] at [side] pixels, as [PickerPicture] keeps it. */
+/**
+ * The picture [make] draws for [key] at [side] pixels, as [PickerPicture] keeps it. While a drag
+ * moves the key faster than a slow device makes pictures, each one made is shown and the next is
+ * for the key as it is by then: one dropped whenever the key moved on would leave the picture as
+ * it was until the drag stops.
+ */
 @Composable
 private fun rememberPickerPicture(key: Any, side: Int, p3: Boolean, make: (Int) -> ByteArray): PickerPicture {
     val n = side.coerceAtLeast(1)
     val picture = remember(n, p3) { PickerPicture(n).also { it.fill(make(n)) } }
-    val first = remember(picture) { arrayOf(true) }
-    LaunchedEffect(picture, key) {
+    val latestKey by rememberUpdatedState(key)
+    val latestMake by rememberUpdatedState(make)
+    LaunchedEffect(picture) {
         // the first was made with the picture itself
-        if (first[0]) {
-            first[0] = false
-            return@LaunchedEffect
+        var made: Any = latestKey
+        snapshotFlow { latestKey }.conflate().collect {
+            val k = latestKey
+            val makeNow = latestMake
+            if (k == made) return@collect
+            val rgba = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { makeNow(n) }
+            made = k
+            picture.fill(rgba)
         }
-        val rgba = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { make(n) }
-        picture.fill(rgba)
     }
     return picture
 }
@@ -669,6 +681,11 @@ private fun DrawScope.knob(c: Offset, r: Float, fill: Color) {
 
 @Composable
 private fun SaturationBrightness(c: ColorPick, compact: Boolean, height: Dp = 344.dp) {
+    // a plugin's: its picker, or a triangle, in its place
+    if (Pc.colourTriangle || Pc.picker != null) {
+        ColourTriangle(c, compact, height)
+        return
+    }
     val hue by rememberUpdatedState(c.hue)
     val pure = hsvColor(c.hue, 1f, 1f)
     val current = rgbColor(c.rgb())
@@ -685,6 +702,44 @@ private fun SaturationBrightness(c: ColorPick, compact: Boolean, height: Dp = 34
                 .drawBehind {
                     drawRect(Brush.horizontalGradient(oneSpace(listOf(Color.White, pure))))
                     drawRect(Brush.verticalGradient(listOf(Color.Transparent, Color.Black)))
+                },
+        )
+    }
+}
+
+/**
+ * A plugin's picker in Classic's square, as big as fits: a picker plugin's picture, touches and knob, or else a
+ * triangle (saturation and brightness between the pure hue at the right, white at the top left and black at the
+ * bottom left) drawn by the core.
+ */
+@Composable
+private fun ColourTriangle(c: ColorPick, compact: Boolean, height: Dp) {
+    val hue by rememberUpdatedState(c.hue)
+    val picker by rememberUpdatedState(Pc.picker)
+    val current = rgbColor(c.rgb())
+    val box = if (compact) 248.dp else 344.dp
+    val side = if (compact) 248.dp else minOf(344.dp, height)
+    val px = with(LocalDensity.current) { side.roundToPx() }
+    val picture = rememberPickerPicture(c.hue to (picker != null), px, false) { n ->
+        val drawn = picker?.let { it.picture(hue, n) ?: ByteArray(n * n * 4) }
+        drawn ?: io.github.artcraftandroid.procraft.core.trianglePicture(hue, n.toUInt())
+    }
+    Box(Modifier.padding(horizontal = if (compact) 6.dp else 16.dp).size(box, if (compact) 248.dp else height), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(side)
+                .pointerInput(Unit) {
+                    track { x, y ->
+                        val sv = picker?.pick?.invoke(x, y) ?: io.github.artcraftandroid.procraft.core.triangleSv(x, y)
+                        c.setHsv(hue, sv[0], sv[1])
+                    }
+                }
+                .drawWithContent {
+                    // read, so a new picture draws
+                    picture.version
+                    drawImage(picture.image, dstSize = androidx.compose.ui.unit.IntSize(size.width.roundToInt(), size.height.roundToInt()))
+                    val at = picker?.point?.invoke(c.saturation, c.brightness)
+                        ?: io.github.artcraftandroid.procraft.core.trianglePoint(c.saturation, c.brightness)
+                    knob(Offset(at[0] * size.width, at[1] * size.height), 10.75.dp.toPx(), current)
                 },
         )
     }

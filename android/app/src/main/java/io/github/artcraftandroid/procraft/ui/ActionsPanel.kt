@@ -60,6 +60,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.PluginControl
+import io.github.artcraftandroid.procraft.core.PluginFile
 import io.github.artcraftandroid.procraft.core.PluginInfo
 import io.github.artcraftandroid.procraft.core.PluginSlider
 import io.github.artcraftandroid.procraft.core.PluginSource
@@ -69,6 +70,7 @@ import io.github.artcraftandroid.procraft.core.pluginSliderShown
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import java.io.File
+import io.github.artcraftandroid.procraft.core.PanelRow
 
 private val ActionsWidth = 390.dp
 
@@ -244,7 +246,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             listOf(Act("Canvas information") { vm.canvasInfoOpen = true }),
         )
         2 -> listOf(
-            listOf(
+            listOfNotNull(
                 Heading("Share Image"),
                 // ours first, then the same package named for the other app
                 Act(CanvasViewModel.OWN_LABEL) { sharePackage(CanvasViewModel.OWN_EXTENSION) },
@@ -254,6 +256,8 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("JPEG") { share(jpeg = true) },
                 Act("PNG") { share(jpeg = false) },
                 Act("TIFF") { share(CanvasViewModel.Export.TIFF) },
+                // a plugin's artwork, its shapes kept
+                Act("SVG") { share(CanvasViewModel.Export.SVG) }.takeIf { vm.session?.exportsSvg() == true },
             ),
             listOf(
                 Heading("Share Layers"),
@@ -588,26 +592,13 @@ private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
     }
 }
 
-/** The tag on a card. */
-private val PluginTag get() = if (Pc.light) Color(0x14000000) else Color(0x1FFFFFFF)
-
-/** A plugin: its name and tag, what it does, what is the matter with it, its controls whatever they are, and the rows that turn it on or off and remove it. */
+/** A plugin: its name, what it does, what is the matter with it, its controls whatever they are, what it does when tapped, and the rows that turn it on or off and remove it. */
 @Composable
 private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
         Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(plugin.name, color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                if (plugin.experimental) {
-                    Text(
-                        "experimental",
-                        color = Pc.ActionsRow,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        modifier = Modifier.padding(start = 8.dp).clip(RoundedCornerShape(9.dp)).background(PluginTag).padding(horizontal = 7.dp, vertical = 2.dp),
-                    )
-                }
             }
             Text(plugin.description, color = Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
             plugin.problem?.let { Text(it, color = Pc.SlideValue, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp)) }
@@ -618,7 +609,12 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
                 when (control) {
                     is PluginControl.Switch -> ActionRowView(Toggle(control.control.label, control.control.on) { vm.setPluginSwitch(control.control.key, it) })
                     is PluginControl.Slider -> PluginSliderRow(control.control, vm::setPluginSlider)
+                    is PluginControl.File -> PluginFileRow(control.control, vm)
                 }
+            }
+            for (action in plugin.actions) {
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                PluginActionRow(action.label) { vm.runPluginAction(action.key) }
             }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
@@ -626,6 +622,119 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
         if (plugin.source == PluginSource.FILE) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
             ActionRowView(Act("Remove") { vm.removePlugin(plugin) })
+        }
+    }
+}
+
+/**
+ * A plugin's own panel, while its action keeps it open: floating under the bar at the right, its
+ * title and Done, then its rows on a card as the Actions panel's are. A slider is told as it lets go,
+ * anything else at once.
+ */
+@Composable
+fun PluginPanelView(vm: CanvasViewModel, modifier: Modifier = Modifier) {
+    val panel = vm.pluginPanel ?: return
+    Popover(340.dp, 0.dp, modifier, side = ArrowSide.NONE) {
+        Row(Modifier.fillMaxWidth().height(52.dp).padding(start = 24.dp, end = 24.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(panel.title, color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+            Text("Done", color = Pc.Accent, fontSize = 17.sp, maxLines = 1, modifier = Modifier.clickable { vm.closePluginPanel() })
+        }
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 10.dp)) {
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Pc.ActionsGroup)) {
+                panel.rows.forEachIndexed { i, row ->
+                    if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                    when (row) {
+                        is PanelRow.Text -> Text(row.text, color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp))
+                        is PanelRow.Slider -> PanelSliderRow(row) { vm.touchPluginPanel(i, it) }
+                        is PanelRow.Switch -> ActionRowView(Toggle(row.label, row.on) { vm.touchPluginPanel(i, if (it) 1f else 0f) })
+                        is PanelRow.Choice -> PanelChoiceRow(row) { vm.touchPluginPanel(i, it.toFloat()) }
+                        is PanelRow.Button -> PluginActionRow(row.label) { vm.touchPluginPanel(i, 1f) }
+                        is PanelRow.Keys -> PanelKeysRow(row) { vm.touchPluginPanel(i, 1f) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A slider on a plugin's panel: its value whole with whole steps, else to two places, then its unit. */
+@Composable
+private fun PanelSliderRow(row: PanelRow.Slider, onSet: (Float) -> Unit) {
+    var moved by remember(row) { mutableStateOf<Float?>(null) }
+    val value = moved ?: row.value
+    val whole = row.step >= 1f && row.step % 1f == 0f
+    val shown = (if (whole) value.roundToInt().toString() else String.format(java.util.Locale.ROOT, "%.2f", value)) + row.unit
+    SlideRow(
+        Slide(
+            row.label,
+            shown,
+            (value - row.least) / (row.most - row.least),
+            onDone = {
+                moved?.let(onSet)
+                moved = null
+            },
+            onChange = { along ->
+                val to = row.least + along * (row.most - row.least)
+                val stepped = if (row.step > 0f) row.least + ((to - row.least) / row.step).roundToInt() * row.step else to
+                moved = stepped.coerceIn(row.least, row.most)
+            },
+        ),
+    )
+}
+
+/** A choice on a plugin's panel: its label, the one picked in blue; a tap picks the next. */
+@Composable
+private fun PanelChoiceRow(row: PanelRow.Choice, onPick: (Int) -> Unit) {
+    val count = row.options.size.coerceAtLeast(1)
+    Row(
+        Modifier.fillMaxWidth().height(44.dp).clickable { onPick((row.chosen.toInt() + 1) % count) }.padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
+        Box(Modifier.weight(1f))
+        Text(row.options.getOrElse(row.chosen.toInt()) { "" }, color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+    }
+}
+
+/** A row of keys on a plugin's panel: its label, the keys at its end as a file control's name is; tapped as a button is. */
+@Composable
+private fun PanelKeysRow(row: PanelRow.Keys, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().height(44.dp).clickable(onClick = onClick).padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        Box(Modifier.weight(1f))
+        Text(row.keys, color = Pc.SlideValue, fontSize = 15.sp, maxLines = 1, modifier = Modifier.padding(start = 12.dp))
+    }
+}
+
+/** One of a plugin's actions on its card: its words in blue, run when tapped. */
+@Composable
+private fun PluginActionRow(label: String, onClick: () -> Unit) {
+    Box(Modifier.fillMaxWidth().height(44.dp).clickable(onClick = onClick).padding(horizontal = 16.dp), contentAlignment = Alignment.CenterStart) {
+        Text(label, color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+    }
+}
+
+/** A file control on a card (a sound): its label, then the name of what was picked and Clear, or Import; a tap on the row picks another. */
+@Composable
+private fun PluginFileRow(file: PluginFile, vm: CanvasViewModel) {
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vm.pickPluginSound(file.key, it) }
+    }
+    Row(
+        Modifier.fillMaxWidth().height(44.dp).clickable { picker.launch(arrayOf("audio/*")) }.padding(start = 16.dp, end = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(file.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
+        Box(Modifier.weight(1f))
+        val chosen = file.chosen
+        if (chosen != null) {
+            Text(chosen, color = Pc.SlideValue, fontSize = 15.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(start = 12.dp).weight(1f, fill = false))
+            Text("Clear", color = Pc.Accent, fontSize = 17.sp, maxLines = 1, modifier = Modifier.clickable { vm.clearPluginFile(file.key) }.padding(start = 12.dp))
+        } else {
+            Text("Import", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
         }
     }
 }
@@ -675,6 +784,36 @@ fun PluginOfferAlert(vm: CanvasViewModel) {
         destructive = false,
     )
 }
+
+/** The 32-bit build on a tablet that runs the 64-bit one: which to install instead, once a version. */
+@Composable
+fun WrongBuildAlert(vm: CanvasViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Alert(
+        Unit.takeIf { vm.wrongBuildNotice },
+        title = { "Use the 64-bit version" },
+        message = {
+            "This is ProCraft's 32-bit version, for older tablets. This tablet runs the 64-bit one, which newer " +
+                "Android expects: install the file ending in arm64.apk over this one, and your artworks stay."
+        },
+        action = "Releases",
+        cancel = "Later",
+        onCancel = vm::wrongBuildNoticeRead,
+        onAction = {
+            vm.wrongBuildNoticeRead()
+            runCatching {
+                context.startActivity(
+                    android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(RELEASES_PAGE))
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        },
+        destructive = false,
+    )
+}
+
+/** Where each release's files are. */
+private const val RELEASES_PAGE = "https://github.com/artcraft-android/procraft/releases/latest"
 
 /** Choices as rows of a rounded group, the chosen one a full blue row. */
 @Composable

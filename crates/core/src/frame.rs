@@ -1,7 +1,7 @@
 //! Drawing a frame into a window's image: by the render thread on Android and iPadOS, and by the
 //! desktop app's own loop; and setting up the window's surface for it.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use procraft_engine::geom::Vec2;
 use procraft_engine::profile::Profile;
@@ -67,6 +67,13 @@ impl State {
         }
     }
 
+    /// When the selection's bands next show moved: when they have drifted a pixel (at 10 points a
+    /// second, 30 frames a second on a 3x screen rather than every frame a 120 Hz screen makes).
+    fn stripes_due(&self) -> Instant {
+        let pixel = 1.0 / (STRIPE_SPEED_PT * self.display_scale.max(0.5));
+        Instant::now() + Duration::from_secs_f32(pixel.clamp(1.0 / 240.0, 0.1))
+    }
+
     /// Draws a frame into `view` (`format`, `size` window pixels, its colours shown in `screen`):
     /// the model open to paint on, the drawing pad as a sphere, or the canvas with its surround,
     /// grid, selection and frosted panels. `started` is when drawing began, for the bands' drift.
@@ -80,6 +87,7 @@ impl State {
         started: Instant,
     ) {
         self.needs_frame = false;
+        self.frame_due = None;
         // the view settling into place keeps drawing until it is there
         if self.step_view_motion() {
             self.needs_frame = true;
@@ -93,9 +101,9 @@ impl State {
             let convert = colours_to(self.doc.profile, screen);
             let selected = self.selection.is_some();
             let look = selected.then_some(selection_shown);
-            // the bands drift, so they keep drawing
+            // the bands drift, so they keep drawing, a frame each time they have moved a pixel
             if matches!(look, Some(SelectionLook::Stripes(_))) {
-                self.needs_frame = true;
+                self.frame_due = Some(self.stripes_due());
             }
             self.scene_selection_look(look);
             self.render_scene(view, format, size, convert);
@@ -125,6 +133,18 @@ impl State {
                 windows: &self.backdrop_windows,
                 sigma: BACKDROP_SIGMA_PT * s,
             });
+            // a dropped colour's fill spreading in: the canvas as it was over it, but for a hole
+            match self.reveal.as_ref().map(|r| r.hole_at(Instant::now())) {
+                Some(Some(hole)) => {
+                    canvas.veil_hole(&hole);
+                    self.needs_frame = true;
+                }
+                Some(None) => {
+                    self.reveal = None;
+                    canvas.veil_end();
+                }
+                None => {}
+            }
             canvas.render(
                 gpu,
                 &mut self.doc,
@@ -145,8 +165,10 @@ impl State {
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet
             let busy = canvas.busy();
-            if animating || canvas.wants_render() {
+            if canvas.wants_render() {
                 self.needs_frame = true;
+            } else if animating {
+                self.frame_due = Some(self.stripes_due());
             }
             // counted only when the canvas was drawn, so a first frame means the artwork shows
             if !busy {

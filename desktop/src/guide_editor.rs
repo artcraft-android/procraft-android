@@ -9,7 +9,7 @@ use procraft_core::{CanvasSession, GuideInfo, GuideType, GuideUnit, SymmetryType
 
 use crate::adjust_panels::{kinds_switch, option_slider, options_choices, options_menu, panel, panel_rect, shown};
 use crate::icons;
-use crate::look::{Look, Themed, Weight, argb, text};
+use crate::look::{Look, Shade, Themed, Weight, argb, text};
 
 const TOP: Themed = Themed(0xFF1F1F1F, 0xFFE1E1E3);
 const BUTTON: Themed = Themed(0xFF1C1C1C, 0xFFF5F8F9);
@@ -25,8 +25,9 @@ const NODE_TURN: u32 = 0xFF30D158;
 const CHIP: Themed = Themed(0xFF2A2A2A, 0xFFFFFFFF);
 const CHIP_INK: Themed = Themed(0xFFEDEDED, 0xFF363636);
 /// The grid size's keypad, frosted as measured: the sheet and its keys let a little of what is
-/// under them through (dark over the dark editor: the sheet #1B1B1B, the side keys #2B2B2B, the
-/// digits #525252; over the white canvas #2E2E30, #38383A, #59595B). Light, as Custom Canvas's.
+/// under them through, blurred (dark over the dark editor: the sheet #1B1B1B, the side keys
+/// #2B2B2B, the digits #525252; over the white canvas #2E2E30, #38383A, #59595B). Light, as Custom
+/// Canvas's, and opaque.
 const SHEET: Themed = Themed(0xE91A1A1A, 0xFFD1D3D8);
 const SHEET_KEY: Themed = Themed(0x514E4E4E, 0xFFABB2BB);
 const SHEET_DIGIT: Themed = Themed(0x9A757575, 0xFFFFFFFF);
@@ -43,6 +44,7 @@ const KEY_GROUPS: f32 = 30.0;
 const KEYS_TOP: f32 = 51.0;
 const KEYS_FOOT: f32 = 38.0;
 const SHEET_HEIGHT: f32 = KEYS_TOP + KEY_H * 4.0 + KEY_GAP * 3.0 + KEYS_FOOT;
+const SHEET_CORNER: u8 = 30;
 const KEYPAD_UNITS: [(GuideUnit, &str); 4] = [
     (GuideUnit::Millimeters, "Millimeters"),
     (GuideUnit::Centimeters, "Centimeters"),
@@ -126,11 +128,18 @@ impl SizeKeypad {
         session.set_guide_length(String::new(), unit);
     }
 
-    /// Shows it over the editor's foot, the whole width; returns true once Done (or the keyboard's
-    /// Enter or Escape) puts it away. The keyboard types into it too.
-    fn show(&mut self, ctx: &egui::Context, session: &CanvasSession) -> bool {
+    /// Shows it over the editor's foot, the whole width, its frost added to `glass`; returns true
+    /// once Done (or the keyboard's Enter or Escape) puts it away. The keyboard types into it too.
+    fn show(&mut self, ctx: &egui::Context, session: &CanvasSession, glass: &mut Vec<f32>) -> bool {
         let screen = ctx.content_rect();
         let sheet = Rect::from_min_max(pos2(screen.left(), screen.bottom() - SHEET_HEIGHT), screen.max);
+        // the canvas under it blurred, as under the bars, while it lets any through; its glass goes
+        // past the window's foot, so that only its top corners are rounded
+        if SHEET.value() >> 24 < 0xFF {
+            let corner = f32::from(SHEET_CORNER);
+            let past = Rect::from_min_max(sheet.min, sheet.max + vec2(0.0, corner));
+            crate::chrome::frost(glass, past, corner, ctx.pixels_per_point());
+        }
         let mut done = crate::ui::escape(ctx);
         let mut keys = Vec::new();
         ctx.input(|i| {
@@ -149,7 +158,7 @@ impl SizeKeypad {
         egui::Area::new(Id::unique("guide size keypad")).fixed_pos(sheet.min).order(Order::Tooltip).show(ctx, |ui| {
             // the sheet takes its own presses
             ui.allocate_rect(sheet, Sense::click());
-            let corners = egui::CornerRadius { nw: 30, ne: 30, sw: 0, se: 0 };
+            let corners = egui::CornerRadius { nw: SHEET_CORNER, ne: SHEET_CORNER, sw: 0, se: 0 };
             ui.painter().rect_filled(sheet, corners, argb(SHEET));
             let ink = argb(SHEET_INK);
             // "Length" 16 into a 250 wide title centred over the sheet, the size from 144 on
@@ -246,8 +255,15 @@ impl GuideEditor {
         }
     }
 
-    /// Shows the editor while it is open; returns true when it ends.
-    pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, session: &CanvasSession) -> bool {
+    /// Shows the editor while it is open, the frost of what it shows added to `glass`; returns true
+    /// when it ends.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        glass: &mut Vec<f32>,
+    ) -> bool {
         if !self.open {
             return false;
         }
@@ -351,7 +367,7 @@ impl GuideEditor {
             self.keypad = None;
         }
         if let Some(keypad) = self.keypad.as_mut()
-            && keypad.show(ctx, session)
+            && keypad.show(ctx, session, glass)
         {
             self.keypad = None;
         }

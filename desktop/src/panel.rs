@@ -32,6 +32,12 @@ pub fn side_bar_at(ctx: &egui::Context, shown: bool, right: bool) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("side bar place"), SideBarPlace { shown, right }));
 }
 
+/// Where the side bar is this frame, if it shows.
+pub fn side_bar_shown_at(ctx: &egui::Context) -> Option<Rect> {
+    let side = ctx.data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place")))?;
+    side.shown.then(|| crate::chrome::side_bar_rect(ctx.content_rect(), side.right))
+}
+
 /// Where a panel `width` wide goes in the window, hanging from a button centred at `button_x`:
 /// its left edge and its arrow's tip from that edge. It is centred on the button (the tip
 /// `ARROW_SHIFT` right of the button's centre) and kept inside the window, clear of the side bar
@@ -73,8 +79,13 @@ pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: 
     let size = rect.size();
     look.shape(ui, slot, (arrow_x * 100.0).round() as i32, rect, |pixmap, t| {
         let mut pb = tiny_skia::PathBuilder::new();
-        round_rect(&mut pb, Rect::from_min_max(pos2(0.0, ARROW_HEIGHT), size.to_pos2()), [POPOVER_CORNER; 4]);
         let (half, tip) = (ARROW_HEIGHT, 2.0);
+        // a corner the arrow comes near is rounded less, so that the arrow rises from a straight
+        // edge rather than hanging over the curve (at a small interface size, or a button near
+        // the window's edge)
+        let near = |from: f32| (from - half - tip).clamp(0.0, POPOVER_CORNER);
+        let corners = [near(arrow_x), near(size.x - arrow_x), POPOVER_CORNER, POPOVER_CORNER];
+        round_rect(&mut pb, Rect::from_min_max(pos2(0.0, ARROW_HEIGHT), size.to_pos2()), corners);
         pb.move_to(arrow_x - half - tip, ARROW_HEIGHT + 0.5);
         pb.line_to(arrow_x - tip, tip);
         pb.quad_to(arrow_x, 0.0, arrow_x + tip, tip);

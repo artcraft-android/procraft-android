@@ -152,25 +152,50 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     // every touch is the shared touches' (crates/core touch.rs): painting, picking, the snapped shape,
     // the gestures and every tool's touch, the same in every app
 
+    /** Contacts too big for a fingertip (a palm, on a screen that says how big a touch is): the shared touches never see them, and one that grows that big is taken back. */
+    private val palms = mutableSetOf<Int>()
+
+    /** Whether pointer [i] of [e] is a finger's contact [PALM_MM] or more across. */
+    private fun palmSized(e: MotionEvent, i: Int): Boolean {
+        if (e.getToolType(i) != MotionEvent.TOOL_TYPE_FINGER) return false
+        val dpi = resources.displayMetrics.xdpi.takeIf { it > 0f } ?: return false
+        return e.getTouchMajor(i) / dpi * 25.4f >= PALM_MM
+    }
+
     /** Hands [e] to the shared touches and does what they ask. */
     private fun route(e: MotionEvent, s: CanvasSession) {
         val out = when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val i = e.actionIndex
-                if (e.actionMasked == MotionEvent.ACTION_DOWN) strokePointer = e.getPointerId(i)
-                s.touchDown(e.getPointerId(i).toULong(), kindOf(e, i), samples(e, i))
-            }
-            MotionEvent.ACTION_MOVE -> s.touchMoves((0 until e.pointerCount).map { i -> TouchMove(e.getPointerId(i).toULong(), samples(e, i)) })
-            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
-                val i = e.actionIndex
-                // the system took the pointer back (a palm): what it did is undone, not ended
-                if (e.flags and MotionEvent.FLAG_CANCELED != 0) {
-                    s.touchCancelOne(e.getPointerId(i).toULong())
+                if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+                    strokePointer = e.getPointerId(i)
+                    palms.clear()
+                }
+                if (palmSized(e, i)) {
+                    palms += e.getPointerId(i)
+                    emptyList()
                 } else {
-                    s.touchUp(e.getPointerId(i).toULong(), samples(e, i))
+                    s.touchDown(e.getPointerId(i).toULong(), kindOf(e, i), samples(e, i))
                 }
             }
-            MotionEvent.ACTION_CANCEL -> s.touchCancel()
+            MotionEvent.ACTION_MOVE -> {
+                val grown = (0 until e.pointerCount).filter { i -> e.getPointerId(i) !in palms && palmSized(e, i) }
+                val back = grown.flatMap { i -> palms += e.getPointerId(i); s.touchCancelOne(e.getPointerId(i).toULong()) }
+                back + s.touchMoves((0 until e.pointerCount).filter { i -> e.getPointerId(i) !in palms }.map { i -> TouchMove(e.getPointerId(i).toULong(), samples(e, i)) })
+            }
+            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
+                val i = e.actionIndex
+                when {
+                    palms.remove(e.getPointerId(i)) -> emptyList()
+                    // the system took the pointer back (a palm): what it did is undone, not ended
+                    e.flags and MotionEvent.FLAG_CANCELED != 0 -> s.touchCancelOne(e.getPointerId(i).toULong())
+                    else -> s.touchUp(e.getPointerId(i).toULong(), samples(e, i))
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                palms.clear()
+                s.touchCancel()
+            }
             else -> emptyList()
         }
         if (e.actionMasked == MotionEvent.ACTION_MOVE) predict(s)
@@ -300,6 +325,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             )
         }
         if (skipping) return true
+        // Liquify's brush shows as a ring of its reach where the touch presses, until it lifts
+        if (vm.adjustment == Adjustment.LIQUIFY) {
+            val lifted = e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL
+            vm.showLiquifyRing(if (lifted || e.pointerCount > 1) null else Offset(e.x, e.y))
+        }
         route(e, s)
         // Layer opacity: the shared touches drag it; the band shows it as they go
         if (vm.opacityLayer != null) vm.layerOpacityTouched(e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL)
@@ -365,15 +395,20 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return super.onHoverEvent(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
-                // (told each time: a session opened meanwhile knows it too)
-                session?.setTouchPenHovering(true)
+                // (told each time: a session opened meanwhile knows it too); a hand already down is set aside
+                session?.setTouchPenHovering(true)?.let(::obey)
+                // a spray can's sound (a plugin's) rattles shaken above the canvas
+                session?.soundHover(e.x, e.y)
                 penHovering = true
                 if (painting()) vm.showCursor(Offset(e.x, e.y), hovering = true)
+                // and Liquify's ring where the pen hovers
+                if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(Offset(e.x, e.y))
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
-                session?.setTouchPenHovering(false)
+                session?.setTouchPenHovering(false)?.let(::obey)
                 penHovering = false
                 vm.showCursor(null)
+                vm.showLiquifyRing(null)
             }
         }
         return true
@@ -429,5 +464,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         const val PREDICTION_LASTS_MS = 40L
 
         const val PEN_BUTTONS = MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY
+
+        /** A finger's contact this far across (mm) or more is a palm: a fingertip is 8 to 15, a flat thumb under 20. */
+        const val PALM_MM = 25f
     }
 }

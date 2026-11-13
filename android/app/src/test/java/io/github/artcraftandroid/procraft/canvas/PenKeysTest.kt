@@ -14,6 +14,16 @@ class PenKeysTest {
     private val noLetters = InputDevice.KEYBOARD_TYPE_NON_ALPHABETIC
 
     @Test
+    fun aDoubleTapGivenTwiceCountsOnce() {
+        val taps = PenDoubleTaps()
+        assertEquals(true, taps.isNew(1_000))
+        assertEquals(false, taps.isNew(1_020))
+        // the next one, soon after, measured from the first of the pair
+        assertEquals(true, taps.isNew(1_320))
+        assertEquals(false, taps.isNew(1_340))
+    }
+
+    @Test
     fun aPensPageKeysAreItsFirstAndSecondButton() {
         val pen = keyboard or InputDevice.SOURCE_STYLUS
         assertEquals(false, penKeyButton(up, pen, noLetters, "touch"))

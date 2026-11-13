@@ -135,6 +135,10 @@ It can't be brought back."
             if let Some(shot) = session.time_lapse_frame(side) {
                 lapse.record(shot.rgba, shot.width, shot.height);
             }
+            // one that couldn't be kept is told once, from the window's thread
+            if let Some(text) = lapse.take_problem() {
+                crate::files::tell_later("Can't keep the time-lapse", &text);
+            }
             let _ = tx.send(());
         });
         self.recording = Some(rx);
@@ -564,61 +568,55 @@ impl Replay {
         if let Some(lapse) = lapse {
             self.fetch(ctx, lapse);
         }
-        egui::Area::new(Id::unique("time-lapse replay")).fixed_pos(screen.min).order(Order::Foreground).show(
-            ctx,
-            |ui| {
-                let response = ui.allocate_rect(screen, Sense::click_and_drag());
-                ui.painter().rect_filled(screen, 0, argb(REPLAY_FILL));
-                surround_grid(ui, screen);
-                if let Some((_, t)) = &self.shown {
-                    // edge to edge, under the header
-                    let [w, h] = t.size().map(|v| v.max(1) as f32);
-                    let k = (screen.width() / w).min(screen.height() / h);
-                    let picture = Rect::from_center_size(screen.center(), vec2(w * k, h * k));
-                    ui.painter().image(
-                        t.id(),
-                        picture,
-                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                }
-                if self.count == 0 {
-                    let ink = argb(EMPTY_INK);
-                    text(
-                        ui.painter(),
-                        screen.center(),
-                        Align2::CENTER_CENTER,
-                        "Nothing recorded yet",
-                        17.0,
-                        Weight::Regular,
-                        ink,
-                    );
-                }
-                if response.drag_started()
-                    && let Some(p) = response.interact_pointer_pos()
-                {
-                    self.scrub = Some((p.x, self.index));
-                }
-                if let (Some((start, from)), Some(p)) = (self.scrub, response.interact_pointer_pos())
-                    && response.dragged()
-                {
-                    let moved = (p.x - start) / screen.width();
-                    let to = from as f32 + (moved * self.count as f32).trunc();
-                    self.index = to.clamp(0.0, self.count.saturating_sub(1) as f32) as u32;
-                }
-                if response.drag_stopped() {
-                    self.scrub = None;
-                    self.stepped = Instant::now();
-                }
-                // how far it has played
-                let f = if self.count > 1 { self.index as f32 / (self.count - 1) as f32 } else { 1.0 };
-                let bar = Rect::from_min_size(
-                    pos2(screen.left(), screen.top() + tool_header::HEIGHT),
-                    vec2(screen.width() * f.clamp(0.0, 1.0), 4.0),
+        // (under the bar with its Done, in the Foreground: in one layer order, a press on the picture
+        // would raise it over the bar)
+        egui::Area::new(Id::unique("time-lapse replay")).fixed_pos(screen.min).order(Order::Middle).show(ctx, |ui| {
+            let response = ui.allocate_rect(screen, Sense::click_and_drag());
+            ui.painter().rect_filled(screen, 0, argb(REPLAY_FILL));
+            surround_grid(ui, screen);
+            if let Some((_, t)) = &self.shown {
+                // edge to edge, under the header
+                let [w, h] = t.size().map(|v| v.max(1) as f32);
+                let k = (screen.width() / w).min(screen.height() / h);
+                let picture = Rect::from_center_size(screen.center(), vec2(w * k, h * k));
+                ui.painter().image(t.id(), picture, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            if self.count == 0 {
+                let ink = argb(EMPTY_INK);
+                text(
+                    ui.painter(),
+                    screen.center(),
+                    Align2::CENTER_CENTER,
+                    "Nothing recorded yet",
+                    17.0,
+                    Weight::Regular,
+                    ink,
                 );
-                ui.painter().rect_filled(bar, 0, argb(PROGRESS));
-            },
-        );
+            }
+            if response.drag_started()
+                && let Some(p) = response.interact_pointer_pos()
+            {
+                self.scrub = Some((p.x, self.index));
+            }
+            if let (Some((start, from)), Some(p)) = (self.scrub, response.interact_pointer_pos())
+                && response.dragged()
+            {
+                let moved = (p.x - start) / screen.width();
+                let to = from as f32 + (moved * self.count as f32).trunc();
+                self.index = to.clamp(0.0, self.count.saturating_sub(1) as f32) as u32;
+            }
+            if response.drag_stopped() {
+                self.scrub = None;
+                self.stepped = Instant::now();
+            }
+            // how far it has played
+            let f = if self.count > 1 { self.index as f32 / (self.count - 1) as f32 } else { 1.0 };
+            let bar = Rect::from_min_size(
+                pos2(screen.left(), screen.top() + tool_header::HEIGHT),
+                vec2(screen.width() * f.clamp(0.0, 1.0), 4.0),
+            );
+            ui.painter().rect_filled(bar, 0, argb(PROGRESS));
+        });
         // the time into the replay, in frames past the second
         let seconds = self.index / TIME_LAPSE_FPS;
         let time = format!(

@@ -110,6 +110,16 @@ struct Section {
     controls: &'static [Control],
 }
 
+/// A plugin's row, as the spacing goes by it (its words are its own).
+static PLUGIN_ROW: Control = Control::Choice("", &[]);
+
+/// The rows the plugins that are on add to the brush studio's Properties, kept with each brush:
+/// each one's label, key and choices.
+pub fn plugin_rows(plugins: &procraft_core::Plugins) -> Vec<(String, String, Vec<String>)> {
+    let on = plugins.plugins().into_iter().filter(|p| p.on && p.problem.is_none());
+    on.flat_map(|p| p.brush_controls).map(|c| (c.label, c.key, c.choices)).collect()
+}
+
 /// A page: its name, its icon (shown this wide) and its sections.
 struct Page {
     name: &'static str,
@@ -689,6 +699,8 @@ pub enum Asked {
 #[derive(Default)]
 pub struct Studio {
     pub open: bool,
+    /// The rows plugins add to Properties: each one's label, key and choices.
+    pub plugin_rows: Vec<(String, String, Vec<String>)>,
     tab: usize,
     name: String,
     /// The name as typed in its field on the About page, and whether the field has been focused.
@@ -707,6 +719,8 @@ pub struct Studio {
     /// The pen painting on the pad, if one is: its pointer and pressure as last given.
     pad_pen: Option<(u64, f32)>,
     pad_menu: bool,
+    /// A plugin's Randomise was tapped: the brush is set at random once the frame is drawn.
+    randomise_tapped: bool,
     /// The frame the pad menu opened in (the press that opened it doesn't close it).
     pad_menu_frame: u64,
     /// The brush's sample stroke, and when it is drawn again.
@@ -739,6 +753,11 @@ pub struct Studio {
     started: Option<Instant>,
     /// A source's editor, while open.
     source_editor: Option<crate::source_editor::SourceEditor>,
+    /// The About page asking before a new reset point (true) or a reset (false).
+    reset_alert: crate::alert::Alert,
+    reset_asked: Option<bool>,
+    /// A dual brush's Uncombine, asking first.
+    uncombine_alert: crate::alert::Alert,
 }
 
 impl Studio {
@@ -764,7 +783,8 @@ impl Studio {
     }
 
     fn read(&mut self, ctx: &egui::Context, session: &CanvasSession) {
-        let keys = studio_keys();
+        let mut keys = studio_keys();
+        keys.extend(self.plugin_rows.iter().map(|(_, key, _)| key.clone()));
         let values = session.studio_settings(keys.clone());
         self.values = keys.into_iter().zip(values).collect();
         self.read_sources(ctx, session);
@@ -860,7 +880,10 @@ impl Studio {
         let row_top = at.y + PART_CARD.y + PART_CARD_GAP;
         let row = Rect::from_min_size(pos2(at.x, row_top), vec2(PART_CARD.x, COMBINE_ROW));
         let below = pos2(at.x, row.bottom() + PART_CARD_GAP);
-        let whole = Rect::from_min_size(at, vec2(PART_CARD.x, below.y + PART_CARD.y - at.y));
+        // Uncombine under them
+        let parting =
+            Rect::from_min_size(pos2(at.x, below.y + PART_CARD.y + PART_CARD_GAP), vec2(PART_CARD.x, COMBINE_ROW));
+        let whole = Rect::from_min_size(at, vec2(PART_CARD.x, parting.bottom() - at.y));
         egui::Area::new(Id::unique("studio parts")).fixed_pos(at).order(Order::Foreground).show(ctx, |ui| {
             ui.allocate_rect(whole, Sense::click());
             ui.painter().rect_filled(whole, 12, argb(TABS_FILL));
@@ -889,6 +912,21 @@ impl Studio {
             look.icon(ui, &icons::CHEVRON_RIGHT, pos2(row.right() - 18.0, row.center().y), 24.0, argb(DIM));
             if ui.interact(row, ui.scope_id().with("combine mode"), Sense::click()).clicked() {
                 self.blend_list = Some((COMBINE_MODE, row.center().y, true));
+            }
+            let left = pos2(parting.left() + 11.0, parting.center().y);
+            text(ui.painter(), left, Align2::LEFT_CENTER, "Uncombine", 17.0, Weight::Regular, argb(pc::ACCENT));
+            if ui.interact(parting, ui.scope_id().with("uncombine"), Sense::click()).clicked() {
+                self.part_cards = None;
+                self.uncombine_alert.ask(crate::alert::Asking {
+                    title: "Uncombine these brushes?".into(),
+                    message: "The pair becomes two brushes again, side by side in the set. It can't be undone.".into(),
+                    action: "Uncombine".into(),
+                    icon: None,
+                    destructive: false,
+                    extra: None,
+                    first: None,
+                    alone: false,
+                });
             }
         });
         let outside =
@@ -959,6 +997,7 @@ impl Studio {
         if !self.open {
             return None;
         }
+        self.plugin_rows = plugin_rows(&prefs.plugins);
         if self.preview_due.is_some_and(|due| Instant::now() >= due) {
             self.preview_due = None;
             self.preview = brush_preview(ctx, session);
@@ -977,6 +1016,21 @@ impl Studio {
         {
             pad.show_sphere(sphere);
             self.sphere = Some(sphere);
+        }
+        // the About page's question, answered
+        if self.reset_alert.show(ctx, look) == Some(crate::alert::Answer::Action) {
+            match self.reset_asked.take() {
+                Some(true) => {
+                    session.studio_new_reset_point();
+                    self.about = Some(AboutShown::read(ctx, session));
+                }
+                Some(false) => {
+                    session.studio_reset();
+                    self.read(ctx, session);
+                    self.sync_pad(session);
+                }
+                None => {}
+            }
         }
         let mut asked = None;
         egui::Area::new(Id::unique("brush studio")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
@@ -1014,11 +1068,16 @@ impl Studio {
                 self.rail(ui, look, pages);
             }
             self.settings(ui, look, session, settings);
-            if let Some(done) = self.pad_view(ui, look, pad) {
+            let randomises = prefs.plugins.randomises_brushes();
+            if let Some(done) = self.pad_view(ui, look, pad, randomises) {
                 self.close(session, done);
                 asked = Some(Asked::Closed);
             }
         });
+        if std::mem::take(&mut self.randomise_tapped) && session.studio_randomise() {
+            self.read(ctx, session);
+            self.sync_pad(session);
+        }
         if self.pad_menu {
             self.pad_menu(ctx, session, prefs);
         }
@@ -1029,6 +1088,13 @@ impl Studio {
         }
         self.read_part_previews(ctx, session);
         self.part_cards_view(ctx, look, session);
+        // uncombined: the studio closes keeping its edits, then the pair parts in the library
+        if self.uncombine_alert.show(ctx, look) == Some(crate::alert::Answer::Action) {
+            let brush = session.current_brush();
+            self.close(session, true);
+            session.uncombine_brush(brush.set, brush.index);
+            asked = Some(Asked::Closed);
+        }
         self.blend_list_view(ctx, look, session);
         let mut curve = std::mem::take(&mut self.curve_points);
         if self.curve.menu(ctx, &mut curve) {
@@ -1137,6 +1203,19 @@ impl Studio {
                             above = Edge::Control(control);
                         }
                     }
+                    // the rows plugins that are on add to Properties, each under its own label
+                    if page.name == "Properties" {
+                        for (label, key, choices) in self.plugin_rows.clone() {
+                            ui.add_space(gap(above, None));
+                            let (row, _) = ui.allocate_exact_size(vec2(width, 23.0), Sense::hover());
+                            let at = pos2(row.left() + 8.0, row.center().y);
+                            text(ui.painter(), at, Align2::LEFT_CENTER, &label, 21.0, Weight::Bold, argb(HEADER));
+                            ui.add_space(gap(Edge::Title, Some(&PLUGIN_ROW)));
+                            let options: Vec<&str> = choices.iter().map(String::as_str).collect();
+                            self.choice_rows(ui, look, session, &key, &options, width);
+                            above = Edge::Control(&PLUGIN_ROW);
+                        }
+                    }
                     ui.add_space(77.0);
                 });
         });
@@ -1183,6 +1262,60 @@ impl Studio {
         by.is_none_or(|(key, choice)| self.value(key).round() as i32 == choice)
     }
 
+    /// A choice as a list of rows, the chosen one lit with a tick: `key` set to the row's place.
+    fn choice_rows(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &Arc<CanvasSession>,
+        key: &str,
+        options: &[&str],
+        width: f32,
+    ) {
+        let chosen = self.value(key).round() as i32;
+        let height = 44.0 * options.len() as f32 + options.len().saturating_sub(1) as f32;
+        let (group, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+        ui.painter().rect_filled(group, 22, argb(LIST));
+        let mut y = group.top();
+        for (i, label) in options.iter().enumerate() {
+            if i > 0 {
+                ui.painter().rect_filled(
+                    Rect::from_min_size(pos2(group.left(), y), vec2(width, 1.0)),
+                    0,
+                    argb(LIST_LINE),
+                );
+                y += 1.0;
+            }
+            let row = Rect::from_min_size(pos2(group.left(), y), vec2(width, 44.0));
+            let on = i as i32 == chosen;
+            if on {
+                let corner = |at: bool| if at { 22 } else { 0 };
+                let corners = egui::CornerRadius {
+                    nw: corner(i == 0),
+                    ne: corner(i == 0),
+                    sw: corner(i + 1 == options.len()),
+                    se: corner(i + 1 == options.len()),
+                };
+                ui.painter().rect_filled(row, corners, argb(pc::ACCENT));
+                look.icon(ui, &icons::MENU_TICK, pos2(row.right() - 14.0 - 17.0, row.center().y), 34.0, Color32::WHITE);
+            }
+            let ink = if on { Color32::WHITE } else { argb(DIM) };
+            text(
+                ui.painter(),
+                pos2(row.left() + 16.0, row.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                17.0,
+                Weight::Regular,
+                ink,
+            );
+            if ui.interact(row, ui.scope_id().with(("choice", key, i)), Sense::click()).clicked() {
+                self.set(session, key, i as f32);
+            }
+            y += 44.0;
+        }
+    }
+
     fn control(&mut self, ui: &mut Ui, look: &mut Look, session: &Arc<CanvasSession>, c: &'static Control, width: f32) {
         match c {
             Control::Slider(key, label, how, by) => {
@@ -1226,56 +1359,7 @@ impl Studio {
                     ui.painter().rect_filled(knob, 12, argb(SWITCH_FIXED_KNOB));
                 }
             }
-            Control::Choice(key, options) => {
-                let chosen = self.value(key).round() as i32;
-                let height = 44.0 * options.len() as f32 + options.len().saturating_sub(1) as f32;
-                let (group, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-                ui.painter().rect_filled(group, 22, argb(LIST));
-                let mut y = group.top();
-                for (i, label) in options.iter().enumerate() {
-                    if i > 0 {
-                        ui.painter().rect_filled(
-                            Rect::from_min_size(pos2(group.left(), y), vec2(width, 1.0)),
-                            0,
-                            argb(LIST_LINE),
-                        );
-                        y += 1.0;
-                    }
-                    let row = Rect::from_min_size(pos2(group.left(), y), vec2(width, 44.0));
-                    let on = i as i32 == chosen;
-                    if on {
-                        let corner = |at: bool| if at { 22 } else { 0 };
-                        let corners = egui::CornerRadius {
-                            nw: corner(i == 0),
-                            ne: corner(i == 0),
-                            sw: corner(i + 1 == options.len()),
-                            se: corner(i + 1 == options.len()),
-                        };
-                        ui.painter().rect_filled(row, corners, argb(pc::ACCENT));
-                        look.icon(
-                            ui,
-                            &icons::MENU_TICK,
-                            pos2(row.right() - 14.0 - 17.0, row.center().y),
-                            34.0,
-                            Color32::WHITE,
-                        );
-                    }
-                    let ink = if on { Color32::WHITE } else { argb(DIM) };
-                    text(
-                        ui.painter(),
-                        pos2(row.left() + 16.0, row.center().y),
-                        Align2::LEFT_CENTER,
-                        label,
-                        17.0,
-                        Weight::Regular,
-                        ink,
-                    );
-                    if ui.interact(row, ui.scope_id().with(("choice", key, i)), Sense::click()).clicked() {
-                        self.set(session, key, i as f32);
-                    }
-                    y += 44.0;
-                }
-            }
+            Control::Choice(key, options) => self.choice_rows(ui, look, session, key, options, width),
             Control::Kinds(key, options) => {
                 let chosen = self.value(key).round() as i32;
                 let (band, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
@@ -1496,9 +1580,9 @@ impl Studio {
         }
     }
 
-    /// The drawing pad with its buttons: Drawing Pad (its menu), Cancel and Done. Returns whether
-    /// Done (true) or Cancel (false) was tapped.
-    fn pad_view(&mut self, ui: &mut Ui, look: &mut Look, area: Rect) -> Option<bool> {
+    /// The drawing pad with its buttons: Drawing Pad (its menu), Cancel and Done, and a plugin's
+    /// Randomise where `randomises`. Returns whether Done (true) or Cancel (false) was tapped.
+    fn pad_view(&mut self, ui: &mut Ui, look: &mut Look, area: Rect, randomises: bool) -> Option<bool> {
         self.pad_rect = Some(area);
         ui.painter().rect_filled(area, 0, argb(BACK));
         if let Some(id) = self.pad_texture {
@@ -1541,6 +1625,19 @@ impl Studio {
         ui.painter().rect_filled(cancel, 21.5, argb(BUTTON));
         ui.painter().rect_stroke(cancel, 21.5, Stroke::new(1.0, argb(BUTTON_EDGE)), egui::StrokeKind::Inside);
         text(ui.painter(), cancel.center(), Align2::CENTER_CENTER, "Cancel", 17.0, Weight::Regular, argb(BUTTON_INK));
+        // a plugin's: the brush set at random
+        if randomises {
+            let galley =
+                ui.painter().layout_no_wrap("Randomise".to_owned(), Weight::Regular.font(17.0), argb(BUTTON_INK));
+            let width = galley.size().x + 32.0;
+            let button = Rect::from_min_size(pos2(cancel.left() - 13.0 - width, cancel.top()), vec2(width, 43.0));
+            ui.painter().rect_filled(button, 21.5, argb(BUTTON));
+            ui.painter().rect_stroke(button, 21.5, Stroke::new(1.0, argb(BUTTON_EDGE)), egui::StrokeKind::Inside);
+            ui.painter().galley(button.center() - galley.size() / 2.0, galley, argb(BUTTON_INK));
+            if ui.interact(button, ui.scope_id().with("randomise"), Sense::click()).clicked() {
+                self.randomise_tapped = true;
+            }
+        }
         ui.painter().circle_filled(done.center(), 22.0, argb(DONE));
         look.icon(ui, &icons::DONE_TICK, done.center(), 40.0, Color32::WHITE);
         if ui.interact(cancel, ui.scope_id().with("cancel"), Sense::click()).clicked() {
@@ -1747,7 +1844,7 @@ impl Studio {
 
     /// The brush's About page: a card with its maker's picture, name and signature, then making a
     /// new reset point and resetting to it, with when it was made.
-    fn about_view(&mut self, ui: &mut Ui, look: &mut Look, session: &Arc<CanvasSession>, width: f32) {
+    fn about_view(&mut self, ui: &mut Ui, look: &mut Look, _session: &Arc<CanvasSession>, width: f32) {
         let Some(about) = &self.about else { return };
         let (card, _) = ui.allocate_exact_size(vec2(width, 295.0), Sense::hover());
         ui.painter().rect_filled(card, 20, argb(ABOUT_CARD));
@@ -1816,14 +1913,34 @@ impl Studio {
             text(ui.painter(), at, Align2::LEFT_CENTER, "Reset brush", 17.0, Weight::Regular, argb(ABOUT_ROW_INK));
         }
         let reset = response.clicked();
+        // each asks first: neither can be undone
+        let asking = |title: &str, message: &str, action: &str, destructive: bool| crate::alert::Asking {
+            title: title.into(),
+            message: message.into(),
+            action: action.into(),
+            icon: None,
+            destructive,
+            extra: None,
+            first: None,
+            alone: false,
+        };
         if new_point {
-            session.studio_new_reset_point();
-            self.about = Some(AboutShown::read(ui.ctx(), session));
+            self.reset_asked = Some(true);
+            self.reset_alert.ask(asking(
+                "New reset point?",
+                "Resetting the brush will bring it back to how it is now. It can't be undone.",
+                "Make",
+                false,
+            ));
         }
         if reset {
-            session.studio_reset();
-            self.read(ui.ctx(), session);
-            self.sync_pad(session);
+            self.reset_asked = Some(false);
+            self.reset_alert.ask(asking(
+                "Reset this brush?",
+                "It goes back to its last reset point, or to how it came. It can't be undone.",
+                "Reset",
+                true,
+            ));
         }
     }
 }
@@ -2605,4 +2722,88 @@ fn circle_image(ui: &Ui, texture: TextureId, centre: Pos2, r: f32) {
         }
     }
     ui.painter().add(mesh);
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, PointerButton, RawInput};
+
+    use super::*;
+
+    /// The studio open on a wide window, frame by frame.
+    struct Open {
+        ctx: egui::Context,
+        look: Look,
+        prefs: crate::prefs::Prefs,
+        studio: Studio,
+        session: Arc<CanvasSession>,
+        time: f64,
+    }
+
+    impl Open {
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 700.0))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Open { ctx, look, prefs, studio, session, .. } = self;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                studio.show(ui.ctx(), look, session, prefs);
+            });
+            output.textures_delta.clear();
+        }
+
+        fn click(&mut self, at: Pos2) {
+            let button = |pressed| Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            self.frame(vec![Event::PointerMoved(at), button(true)]);
+            self.frame(vec![button(false)]);
+        }
+    }
+
+    #[test]
+    fn a_brush_is_renamed_by_clicking_its_name_on_its_about_page_and_typing() {
+        let session = CanvasSession::new(64, 64);
+        let mut open = Open {
+            ctx: egui::Context::default(),
+            look: Look::default(),
+            prefs: crate::prefs::Prefs::default(),
+            studio: Studio::default(),
+            session,
+            time: 0.0,
+        };
+        open.studio.begin(&open.ctx.clone(), &open.session, None);
+        let before = open.studio.name.clone();
+        assert!(!before.is_empty());
+        open.studio.tab = PAGES.len() - 1;
+        open.frame(Vec::new());
+        open.frame(Vec::new());
+        // the name heads the page: its column 20 points in from the settings beside the pages'
+        // card, its row 25 down
+        let name_at = pos2(330.0 + 20.0 + 8.0 + 12.0, 25.0 + 11.5);
+        open.click(name_at);
+        assert!(open.studio.renaming.is_some(), "clicking the name opens it for typing");
+        open.frame(Vec::new());
+        // typed over: the whole name was chosen
+        open.frame(vec![Event::Text("Mine".to_owned())]);
+        assert_eq!(open.studio.name, "Mine");
+        open.frame(vec![Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        open.frame(Vec::new());
+        assert!(open.studio.renaming.is_none(), "Return ends the typing");
+        open.studio.close(&open.session, true);
+        assert_eq!(open.session.current_brush().name, "Mine", "kept with Done (it was {before})");
+    }
 }

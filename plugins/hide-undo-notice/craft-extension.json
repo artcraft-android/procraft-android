@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.hide-undo-notice",
+  "name": "Hide undo notices",
+  "version": "1.2.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Undo and redo go by without the notice at the top that names what they took back.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["hide_undo_notice"]
+}

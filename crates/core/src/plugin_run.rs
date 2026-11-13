@@ -1,6 +1,8 @@
 //! A plugin's code: a WebAssembly module, interpreted under caps on its time and memory. It gets no
-//! imports at all, no files, network or layers, so all it ever sees is the numbers a hook hands it
-//! and all it can do is hand some back.
+//! files, network or clock: at a hook all it ever sees is the numbers the hook hands it, and all it
+//! can do is hand some back. The only imports it may have are the app's functions its permissions
+//! give (`plugin_commands.rs`, interface 2), which answer only while one of its actions runs:
+//! `procraft_action(index: i32) -> i32`, called when its action at `index` is tapped (returns 0).
 //!
 //! What a module exports, interface 1, in plain numbers:
 //! - `procraft_position(x: f32, y: f32) -> i64`: for the hook `position`, where a sample in window
@@ -22,16 +24,83 @@
 //!   out (not 0: something comes out), and `procraft_fill_out(y: i32)` puts each row of what comes
 //!   out there. All it can do is take away: what isn't in the fill stays out of it, and the seed
 //!   stays in.
+//! - `procraft_fill_all_layers() -> i32`: for the hook `fill_all_layers`, whether ColorDrop fills
+//!   by every layer seen (not 0) rather than by the current layer alone.
+//! - `procraft_radial_segments() -> i32`: for the hook `radial_segments`, how many parts radial
+//!   symmetry makes, 2 to 64.
+//! - `procraft_hide_undo_notice() -> i32`: for the hook `hide_undo_notice`, whether undo and redo go
+//!   by without their notice (not 0).
+//! - `procraft_interface_colour(role: i32) -> i32`: for the hook `interface_colour`, the colour
+//!   (0xRRGGBB) the interface draws `role` in (0: the accent, the blue of what is chosen and
+//!   switched on), or -1 to leave it as it is.
+//! - `procraft_pin_panels() -> i32`: for the hook `pin_panels`, whether a touch on the canvas with
+//!   a panel open paints at once and leaves the panel up (not 0).
+//! - `procraft_opacity_together() -> i32`: for the hook `opacity_together`, whether a layer's
+//!   opacity changed while it is one of several picked sets every picked layer's (not 0).
+//! - `procraft_randomise(setting: i32, seed: i32) -> f32`: for the hook `randomise_brush`, where
+//!   a brush setting (by its place in [`crate::studio::RANDOMISED`]) goes, as a share of its range
+//!   (0 to 1), or below 0 to leave it; `seed` is the same for every setting of one press.
+//! - `procraft_colour_triangle() -> i32`: for the hook `colour_triangle`, whether the colour
+//!   panel's Classic shows a triangle in place of its square (not 0).
+//! - For the hook `picker` (interface 2; the colour panel's Classic square drawn the plugin's way,
+//!   its picture the plugin's `picture.wgsl`): `procraft_picker_pick(x: f32, y: f32) -> i64` gives
+//!   the saturation and brightness at a point of the square (0..1, y down) and
+//!   `procraft_picker_point(s: f32, v: f32) -> i64` where they sit, each pair packed as `position`'s.
+//! - For the hook `quickshape_curve` (a curve QuickShape may snap to, the plugin's):
+//!   `procraft_curve_begin(count: i32, best: i32) -> i32` gives where the stroke's `count` points go
+//!   (x and y each, 32-bit floats, window pixels), `best` the kind QuickShape found first (its place
+//!   among line, polyline, arc, curve, ellipse, circle, triangle, equilateral triangle,
+//!   quadrilateral, rectangle, square; -1 when a curve is asked for by name); then
+//!   `procraft_curve_run() -> i32` answers how many nodes the curve has (0: none; an anchor, then
+//!   two controls and an anchor for each span), and `procraft_curve_nodes() -> i32` where they are.
+//! - For the hook `stroke_sound` (a sound as you draw, the plugin's): `procraft_stroke_sound(frames:
+//!   i32, rate: i32, speed: f32, pressure: f32, since_ms: f32, state: i32, hover_x: f32, hover_y:
+//!   f32, height: f32) -> i32` gives where the next `frames` samples (32-bit floats, -1 to 1, at
+//!   `rate` a second) are, for the stroke moving at `speed` (window heights a second) with
+//!   `pressure`, its last input `since_ms` ago (below 0: no stroke open), `state` saying (bits) 1 a
+//!   stroke is open, 2 the pen hovers (at `hover_x`, `hover_y`, window pixels, in a window `height`
+//!   tall), 4 the tool erases. Called on the sound's own thread, every few milliseconds. Before the
+//!   first at a rate, `procraft_sound_prepare(rate: i32) -> i32`, if it has one, as a long call.
+//! - What a plugin is told if it listens: the current brush, before a sound when it changed (its
+//!   name and its set's, UTF-8, into `procraft_text_buffer(len: i32) -> i32`, then
+//!   `procraft_brush(name_len: i32, set_len: i32)`; its rows in the brush studio, each by its place,
+//!   through `procraft_brush_control(index: i32, value: f32)`); and the file picked for a file
+//!   control (into `procraft_file_buffer(index: i32, len: i32) -> i32`, then `procraft_file(index:
+//!   i32, len: i32)`, `len` 0 when let go), as a long call.
+//! - For the hook `inbetween` (Animation Assist's In-between draws a frame between a frame and the
+//!   next, the plugin's way): `procraft_between_begin(width: i32, height: i32) -> i32` starts one
+//!   of that many pixels and gives where a row of them goes (`width` × 4 bytes, premultiplied
+//!   RGBA8); `procraft_between_row(frame: i32, y: i32)` says row `y` of `frame` (0 this frame, 1 the
+//!   next) is there; `procraft_between_run() -> i32` draws the frame between (0: none);
+//!   `procraft_between_out(y: i32)` puts its row `y` there. A long call, on fuel by the area.
+//! - For the hook `key_shortcut` (a hardware keyboard's presses taken as others, the plugin's): a
+//!   press is written as text, its modifiers then its key ("command+shift+z", "space", see
+//!   [`crate::KeyCombo`]), into `procraft_key_buffer(len: i32) -> i32`; then
+//!   `procraft_key_shortcut(len: i32) -> i64` says what the press is taken as, and
+//!   `procraft_key_shortcut_keys(len: i32) -> i64` which presses now do what this one does by
+//!   default, for the shortcuts' list. Each answers 0 for as it is, below 0 for none, else where its
+//!   text is in its `memory` (low half) and how long (high half): one press, or presses with a
+//!   space between. `procraft_key_shortcuts(len: i32)`, if it has one, is told the app's shortcuts
+//!   as it starts (lines of the group, what it does, its presses and 1 if the app keeps its keys,
+//!   tab between: [`crate::keys::shortcuts_told`]).
+//! - `procraft_panel_key(len: i32) -> i32`: while its panel asks for a key press, the next one,
+//!   written as above into `procraft_key_buffer`; it acts as a touch on the panel does.
+//! - What a plugin keeps (interface 2, at most [`MOST_KEPT`] bytes, with its other files): after an
+//!   action, a touch on its panel or a key press its panel asked for, `procraft_keep() -> i64`, if it
+//!   has one, says what to keep from now on, packed as a key answer's text (below 0: nothing new).
+//!   Each copy of its code is told what it keeps as it starts, and whenever another copy keeps
+//!   something new: into `procraft_kept_buffer(len: i32) -> i32`, then `procraft_kept(len: i32)`.
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
+use crate::plugin_commands::{Host, PluginPermission};
 use wasmi::errors::ErrorKind;
 use wasmi::{
-    Config, EnforcedLimits, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode,
-    TypedFunc, TypedResumableCall, ValType, WasmParams, WasmResults,
+    Config, EnforcedLimits, Engine, Linker, Memory, Module, Store, StoreLimitsBuilder, TrapCode, TypedFunc,
+    TypedResumableCall, ValType, WasmParams, WasmResults,
 };
 
 /// The module's name in a plugin's folder.
@@ -42,6 +111,20 @@ const MOST_MEMORY: usize = 16 << 20;
 /// What a plugin on the fill hook may ask for: a few planes of a bit a pixel, for the fills
 /// [`MOST_FILL`] lets through.
 const MOST_FILL_MEMORY: usize = 64 << 20;
+/// What a plugin on the sound hook may ask for: its sounds' loops and the recordings picked.
+const MOST_SOUND_MEMORY: usize = 128 << 20;
+/// What a sound may spend (a few milliseconds of it), readying the sounds at a rate, and taking a
+/// file in.
+const SOUND_FUEL: u64 = 20_000_000;
+const SOUND_FRAME_FUEL: u64 = 4_000;
+const PREPARE_FUEL: u64 = 4_000_000_000;
+const FILE_FUEL: u64 = 2_000_000_000;
+/// What a plugin on the in-between hook may ask for: the two frames and the one between, and room
+/// to work.
+pub(crate) const MOST_BETWEEN_MEMORY: usize = 256 << 20;
+/// What an in-between may spend, to start with and by the pixel.
+const BETWEEN_FUEL: u64 = 20_000_000;
+const BETWEEN_PIXEL_FUEL: u64 = 4096;
 const MOST_TABLE: usize = 10_000;
 const MOST_CALLS_DEEP: usize = 256;
 /// What it may spend, in roughly one a step: to start up, and on one sample or control. A sample
@@ -78,8 +161,74 @@ const FILL_BEGIN: &str = "procraft_fill_begin";
 const FILL_ROW: &str = "procraft_fill_row";
 const FILL_RUN: &str = "procraft_fill_run";
 const FILL_OUT: &str = "procraft_fill_out";
+const FILL_ALL_LAYERS: &str = "procraft_fill_all_layers";
+const RADIAL_SEGMENTS: &str = "procraft_radial_segments";
+const HIDE_UNDO_NOTICE: &str = "procraft_hide_undo_notice";
+const INTERFACE_COLOUR: &str = "procraft_interface_colour";
+const PIN_PANELS: &str = "procraft_pin_panels";
+const OPACITY_TOGETHER: &str = "procraft_opacity_together";
+const RANDOMISE: &str = "procraft_randomise";
+const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
+const PICKER_PICK: &str = "procraft_picker_pick";
+const PICKER_POINT: &str = "procraft_picker_point";
+const CURVE_BEGIN: &str = "procraft_curve_begin";
+const CURVE_RUN: &str = "procraft_curve_run";
+const CURVE_NODES: &str = "procraft_curve_nodes";
+/// What a curve may spend, to start with and by the stroke's point, and the most nodes it may have.
+const CURVE_FUEL: u64 = 5_000_000;
+const CURVE_POINT_FUEL: u64 = 20_000;
+const MOST_CURVE_NODES: usize = 3 * 4_096 + 1;
+const STROKE_SOUND: &str = "procraft_stroke_sound";
+const SOUND_PREPARE: &str = "procraft_sound_prepare";
+const TEXT_BUFFER: &str = "procraft_text_buffer";
+const BRUSH: &str = "procraft_brush";
+const BRUSH_CONTROL: &str = "procraft_brush_control";
+const FILE_BUFFER: &str = "procraft_file_buffer";
+const FILE: &str = "procraft_file";
+const BETWEEN_BEGIN: &str = "procraft_between_begin";
+const BETWEEN_ROW: &str = "procraft_between_row";
+const BETWEEN_RUN: &str = "procraft_between_run";
+const BETWEEN_OUT: &str = "procraft_between_out";
+/// How many parts radial symmetry may be asked to make.
+const RADIAL_PARTS: std::ops::RangeInclusive<i32> = 2..=64;
 const MEMORY: &str = "memory";
 const CONTROL: &str = "procraft_control";
+const ACTION: &str = "procraft_action";
+/// What a plugin on the `stroke_kept` or `layer_added` hook is told through (1 a stroke kept, 2 a
+/// layer added).
+const EVENT: &str = "procraft_event";
+const PANEL_EVENT: &str = "procraft_panel_event";
+const CANVAS_NEW: &str = "procraft_canvas_new";
+const CANVAS_TOUCH: &str = "procraft_canvas_touch";
+const CANVAS_DRAW: &str = "procraft_canvas_draw";
+const CANVAS_OUT: &str = "procraft_canvas_out";
+const CANVAS_SAVE: &str = "procraft_canvas_save";
+const CANVAS_IN: &str = "procraft_canvas_in";
+const CANVAS_LOAD: &str = "procraft_canvas_load";
+const CANVAS_TOOL: &str = "procraft_canvas_tool";
+/// What a call on a plugin's own artwork may spend (its drawing, its saving), and how long; a touch,
+/// which comes with each sample while the canvas waits, far less.
+const CANVAS_FUEL: u64 = 800_000_000;
+const MOST_CANVAS_TIME: Duration = Duration::from_secs(5);
+const TOUCH_FUEL: u64 = 20_000_000;
+const MOST_TOUCH_TIME: Duration = Duration::from_millis(250);
+/// What an action may spend and how long it may take: it does the plugin's work on the artwork.
+const ACTION_FUEL: u64 = 4_000_000_000;
+const MOST_ACTION_TIME: Duration = Duration::from_secs(20);
+pub(crate) const KEY_BUFFER: &str = "procraft_key_buffer";
+const KEY_SHORTCUT: &str = "procraft_key_shortcut";
+const KEY_SHORTCUT_KEYS: &str = "procraft_key_shortcut_keys";
+const KEY_SHORTCUTS: &str = "procraft_key_shortcuts";
+pub(crate) const PANEL_KEY: &str = "procraft_panel_key";
+const KEPT_BUFFER: &str = "procraft_kept_buffer";
+const KEPT: &str = "procraft_kept";
+const KEEP: &str = "procraft_keep";
+/// The most bytes a plugin keeps, and of the presses a key answer writes.
+pub(crate) const MOST_KEPT: usize = 64 << 10;
+const MOST_KEY_TEXT: usize = 4 << 10;
+/// What being told what it keeps, or the app's shortcuts, may spend, and how long it may take.
+const TOLD_FUEL: u64 = 20_000_000;
+const MOST_TOLD_TIME: Duration = Duration::from_secs(2);
 
 /// What a plugin may step into, by the name a manifest gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +238,24 @@ pub(crate) enum Hook {
     InterfaceScale,
     PasteMask,
     FillMask,
+    FillAllLayers,
+    RadialSegments,
+    HideUndoNotice,
+    InterfaceColour,
+    PinPanels,
+    OpacityTogether,
+    RandomiseBrush,
+    ColourTriangle,
+    QuickshapeCurve,
+    StrokeSound,
+    Inbetween,
+    Picker,
+    /// Told each time a stroke is kept, acting on the artwork as an action does.
+    StrokeKept,
+    /// Told each time a layer is added from the Layers panel, acting as an action does.
+    LayerAdded,
+    /// A hardware keyboard's presses taken as others before the app's shortcuts see them.
+    KeyShortcut,
 }
 
 impl Hook {
@@ -99,6 +266,21 @@ impl Hook {
             "interface_scale" => Some(Hook::InterfaceScale),
             "paste_mask" => Some(Hook::PasteMask),
             "fill_mask" => Some(Hook::FillMask),
+            "fill_all_layers" => Some(Hook::FillAllLayers),
+            "radial_segments" => Some(Hook::RadialSegments),
+            "hide_undo_notice" => Some(Hook::HideUndoNotice),
+            "interface_colour" => Some(Hook::InterfaceColour),
+            "pin_panels" => Some(Hook::PinPanels),
+            "opacity_together" => Some(Hook::OpacityTogether),
+            "randomise_brush" => Some(Hook::RandomiseBrush),
+            "colour_triangle" => Some(Hook::ColourTriangle),
+            "quickshape_curve" => Some(Hook::QuickshapeCurve),
+            "stroke_sound" => Some(Hook::StrokeSound),
+            "inbetween" => Some(Hook::Inbetween),
+            "picker" => Some(Hook::Picker),
+            "stroke_kept" => Some(Hook::StrokeKept),
+            "layer_added" => Some(Hook::LayerAdded),
+            "key_shortcut" => Some(Hook::KeyShortcut),
             _ => None,
         }
     }
@@ -111,6 +293,21 @@ impl Hook {
             Hook::InterfaceScale => "This plugin can make the interface bigger or smaller.",
             Hook::PasteMask => "This plugin can put what you paste into the current mask.",
             Hook::FillMask => "This plugin can take parts out of a ColorDrop fill.",
+            Hook::FillAllLayers => "This plugin can make ColorDrop fill by every layer you see.",
+            Hook::RadialSegments => "This plugin can change how many parts radial symmetry makes.",
+            Hook::HideUndoNotice => "This plugin can hide the notice undo and redo show.",
+            Hook::InterfaceColour => "This plugin can change the interface's colours.",
+            Hook::PinPanels => "This plugin can keep panels open while you paint.",
+            Hook::OpacityTogether => "This plugin can change the opacity of all the layers you've picked at once.",
+            Hook::RandomiseBrush => "This plugin can set a brush's settings at random in the brush studio.",
+            Hook::ColourTriangle => "This plugin can change how the colour panel's Classic picker looks.",
+            Hook::QuickshapeCurve => "This plugin can make QuickShape snap strokes to curves.",
+            Hook::StrokeSound => "This plugin can play a sound as you draw.",
+            Hook::Inbetween => "This plugin can draw frames between your animation's frames.",
+            Hook::Picker => "This plugin can draw the colour panel's Classic picker its own way.",
+            Hook::StrokeKept => "This plugin can act on your artwork each time you finish a stroke.",
+            Hook::LayerAdded => "This plugin can act on your artwork each time you add a layer.",
+            Hook::KeyShortcut => "This plugin can change what your keyboard's keys do.",
         }
     }
 
@@ -124,6 +321,43 @@ impl Hook {
         match self {
             Hook::Position => exports(module, POSITION, &[ValType::F32, ValType::F32], &[ValType::I64]),
             Hook::PickLayer => exports(module, PICK_LAYER, &[], &[ValType::I32]),
+            Hook::FillAllLayers => exports(module, FILL_ALL_LAYERS, &[], &[ValType::I32]),
+            Hook::RadialSegments => exports(module, RADIAL_SEGMENTS, &[], &[ValType::I32]),
+            Hook::HideUndoNotice => exports(module, HIDE_UNDO_NOTICE, &[], &[ValType::I32]),
+            Hook::InterfaceColour => exports(module, INTERFACE_COLOUR, &[ValType::I32], &[ValType::I32]),
+            Hook::PinPanels => exports(module, PIN_PANELS, &[], &[ValType::I32]),
+            Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
+            Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
+            Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
+            Hook::StrokeKept | Hook::LayerAdded => exports(module, EVENT, &[ValType::I32], &[ValType::I32]),
+            Hook::KeyShortcut => {
+                exports(module, KEY_BUFFER, &[ValType::I32], &[ValType::I32])
+                    && exports(module, KEY_SHORTCUT, &[ValType::I32], &[ValType::I64])
+                    && exports(module, KEY_SHORTCUT_KEYS, &[ValType::I32], &[ValType::I64])
+                    && has_memory(module)
+            }
+            Hook::Picker => {
+                exports(module, PICKER_PICK, &[ValType::F32, ValType::F32], &[ValType::I64])
+                    && exports(module, PICKER_POINT, &[ValType::F32, ValType::F32], &[ValType::I64])
+            }
+            Hook::QuickshapeCurve => {
+                exports(module, CURVE_BEGIN, &[ValType::I32, ValType::I32], &[ValType::I32])
+                    && exports(module, CURVE_RUN, &[], &[ValType::I32])
+                    && exports(module, CURVE_NODES, &[], &[ValType::I32])
+                    && has_memory(module)
+            }
+            Hook::StrokeSound => {
+                use ValType::{F32, I32};
+                exports(module, STROKE_SOUND, &[I32, I32, F32, F32, F32, I32, F32, F32, F32], &[I32])
+                    && has_memory(module)
+            }
+            Hook::Inbetween => {
+                exports(module, BETWEEN_BEGIN, &[ValType::I32, ValType::I32], &[ValType::I32])
+                    && exports(module, BETWEEN_ROW, &[ValType::I32, ValType::I32], &[])
+                    && exports(module, BETWEEN_RUN, &[], &[ValType::I32])
+                    && exports(module, BETWEEN_OUT, &[ValType::I32], &[])
+                    && has_memory(module)
+            }
             Hook::InterfaceScale => exports(module, INTERFACE_SCALE, &[ValType::F32, ValType::F32], &[ValType::F32]),
             Hook::PasteMask => {
                 exports(module, PASTE_MASK, &[], &[ValType::I32])
@@ -141,6 +375,22 @@ impl Hook {
             }
         }
     }
+}
+
+/// Two numbers `func` answers for `asked`, packed as the position hook's are, each put in 0..1; a
+/// number that isn't one stops it.
+fn picker_pair(
+    store: &mut Store<Host>,
+    func: &TypedFunc<(f32, f32), i64>,
+    asked: (f32, f32),
+) -> Result<(f32, f32), Stop> {
+    let packed = guarded(|| {
+        store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+        func.call(&mut *store, asked).map_err(|e| stop_of(&e))
+    })?;
+    let bits = packed as u64;
+    let (a, b) = (f32::from_bits(bits as u32), f32::from_bits((bits >> 32) as u32));
+    if a.is_finite() && b.is_finite() { Ok((a.clamp(0.0, 1.0), b.clamp(0.0, 1.0))) } else { Err(Stop::Nonsense) }
 }
 
 /// Why a plugin stopped, or never ran. Each stays on its card, in plain words.
@@ -168,7 +418,7 @@ impl Stop {
 fn stop_of(error: &wasmi::Error) -> Stop {
     match (error.as_trap_code(), error.kind()) {
         (Some(TrapCode::OutOfFuel), _) => Stop::TooSlow,
-        // with no imports, all that can keep one from starting is the caps
+        // its imports checked before, all that can keep one from starting is the caps
         (Some(TrapCode::GrowthOperationLimited), _) | (_, ErrorKind::Instantiation(_)) => Stop::Memory,
         _ => Stop::Crashed,
     }
@@ -228,22 +478,84 @@ fn has_memory(module: &Module) -> bool {
     module.exports().any(|export| export.name() == MEMORY && export.ty().memory().is_some())
 }
 
-/// Whether `bytes` is a module a plugin on `hooks` can be: valid, wanting nothing from outside, and
-/// exporting what it must (`controls`: it has some). Nothing in it runs.
+/// [`can_act`] for a plugin with no actions that may reach nothing.
+#[cfg(test)]
 pub(crate) fn can_run(bytes: &[u8], hooks: &[Hook], controls: bool) -> bool {
+    can_act(bytes, hooks, controls, false, &[], false)
+}
+
+/// Whether `bytes` is a module a plugin on `hooks` can be: valid, wanting from outside only the
+/// app's functions its `permissions` give, and exporting what it must (`controls`: it has some;
+/// `actions`: it has some). Nothing in it runs.
+pub(crate) fn can_act(
+    bytes: &[u8],
+    hooks: &[Hook],
+    controls: bool,
+    actions: bool,
+    permissions: &[PluginPermission],
+    kinds: bool,
+) -> bool {
     if bytes.len() > MOST_MODULE || !code_counts_hold(bytes) {
         return false;
     }
     let fits = guarded(|| {
         let module = Module::new(&engine(), bytes).map_err(|_| Stop::Damaged)?;
-        Ok(module.imports().next().is_none()
+        Ok(crate::plugin_commands::imports_fit(&module, permissions)
             && hooks.iter().all(|hook| hook.fits(&module))
-            && (!controls || exports(&module, CONTROL, &[ValType::I32, ValType::F32], &[])))
+            && (!controls || exports(&module, CONTROL, &[ValType::I32, ValType::F32], &[]))
+            && (!actions || exports(&module, ACTION, &[ValType::I32], &[ValType::I32]))
+            && (!permissions.contains(&PluginPermission::Panel)
+                || exports(&module, PANEL_EVENT, &[ValType::I32, ValType::F32], &[ValType::I32]))
+            && (!kinds || has_canvas(&module)))
     });
     fits.unwrap_or(false)
 }
 
 /// What the fill hook calls.
+/// The sound hook's call: frames, rate, speed, pressure, since, state, hover x and y, height.
+type SoundCall = TypedFunc<(i32, i32, f32, f32, f32, i32, f32, f32, f32), i32>;
+
+/// The curve hook's calls.
+struct CurveCalls {
+    begin: TypedFunc<(i32, i32), i32>,
+    run: TypedFunc<(), i32>,
+    nodes: TypedFunc<(), i32>,
+}
+
+/// The in-between hook's calls.
+struct BetweenCalls {
+    begin: TypedFunc<(i32, i32), i32>,
+    row: TypedFunc<(i32, i32), ()>,
+    run: TypedFunc<(), i32>,
+    out: TypedFunc<i32, ()>,
+}
+
+/// What a plugin's own artwork is reached through (`plugin_canvas.rs`).
+struct CanvasCalls {
+    new: TypedFunc<(i32, i32), i32>,
+    touch: TypedFunc<(i32, f32, f32, f32), i32>,
+    draw: TypedFunc<(), i32>,
+    out: TypedFunc<(), i32>,
+    save: TypedFunc<(), i32>,
+    input: TypedFunc<i32, i32>,
+    load: TypedFunc<(), i32>,
+    /// Told the tool, colour, size and opacity as a stroke starts, if it asks to be.
+    tool: Option<TypedFunc<(i32, i32, f32, f32), ()>>,
+}
+
+/// Whether `module` exports what a plugin's own artwork is reached through.
+fn has_canvas(module: &Module) -> bool {
+    use ValType::{F32, I32};
+    exports(module, CANVAS_NEW, &[I32, I32], &[I32])
+        && exports(module, CANVAS_TOUCH, &[I32, F32, F32, F32], &[I32])
+        && exports(module, CANVAS_DRAW, &[], &[I32])
+        && exports(module, CANVAS_OUT, &[], &[I32])
+        && exports(module, CANVAS_SAVE, &[], &[I32])
+        && exports(module, CANVAS_IN, &[I32], &[I32])
+        && exports(module, CANVAS_LOAD, &[], &[I32])
+        && has_memory(module)
+}
+
 struct FillCalls {
     mask: TypedFunc<(), i32>,
     begin: TypedFunc<(i32, i32, i32, i32), i32>,
@@ -254,7 +566,7 @@ struct FillCalls {
 
 /// `func` called on what is `left` of a long call's fuel, in slices, until `until`.
 fn long_call<P: WasmParams, R: WasmResults>(
-    store: &mut Store<StoreLimits>,
+    store: &mut Store<Host>,
     func: &TypedFunc<P, R>,
     params: P,
     left: &mut u64,
@@ -288,7 +600,7 @@ fn long_call<P: WasmParams, R: WasmResults>(
 
 /// A plugin's module, instantiated, with what it has of ours to call.
 pub(crate) struct Running {
-    store: Store<StoreLimits>,
+    store: Store<Host>,
     position: Option<TypedFunc<(f32, f32), i64>>,
     pick_layer: Option<TypedFunc<(), i32>>,
     interface_scale: Option<TypedFunc<(f32, f32), f32>>,
@@ -296,21 +608,95 @@ pub(crate) struct Running {
     row_buffer: Option<TypedFunc<i32, i32>>,
     paste_row: Option<TypedFunc<(i32, i32), ()>>,
     fill: Option<FillCalls>,
+    fill_all_layers: Option<TypedFunc<(), i32>>,
+    radial_segments: Option<TypedFunc<(), i32>>,
+    hide_undo_notice: Option<TypedFunc<(), i32>>,
+    interface_colour: Option<TypedFunc<i32, i32>>,
+    pin_panels: Option<TypedFunc<(), i32>>,
+    opacity_together: Option<TypedFunc<(), i32>>,
+    randomise: Option<TypedFunc<(i32, i32), f32>>,
+    colour_triangle: Option<TypedFunc<(), i32>>,
+    picker_pick: Option<TypedFunc<(f32, f32), i64>>,
+    picker_point: Option<TypedFunc<(f32, f32), i64>>,
+    curve: Option<CurveCalls>,
+    stroke_sound: Option<SoundCall>,
+    sound_prepare: Option<TypedFunc<i32, i32>>,
+    text_buffer: Option<TypedFunc<i32, i32>>,
+    brush: Option<TypedFunc<(i32, i32), ()>>,
+    brush_control: Option<TypedFunc<(i32, f32), ()>>,
+    file_buffer: Option<TypedFunc<(i32, i32), i32>>,
+    file: Option<TypedFunc<(i32, i32), ()>>,
+    /// The rate its sounds are readied for, and the brush it was last told (as a number).
+    sound_rate: Option<i32>,
+    told_brush: Option<u64>,
+    between: Option<BetweenCalls>,
     memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
+    action: Option<TypedFunc<i32, i32>>,
+    panel_event: Option<TypedFunc<(i32, f32), i32>>,
+    event: Option<TypedFunc<i32, i32>>,
+    canvas: Option<CanvasCalls>,
+    key_buffer: Option<TypedFunc<i32, i32>>,
+    key_shortcut: Option<TypedFunc<i32, i64>>,
+    key_shortcut_keys: Option<TypedFunc<i32, i64>>,
+    key_shortcuts: Option<TypedFunc<i32, ()>>,
+    panel_key: Option<TypedFunc<i32, i32>>,
+    kept_buffer: Option<TypedFunc<i32, i32>>,
+    kept: Option<TypedFunc<i32, ()>>,
+    keep: Option<TypedFunc<(), i64>>,
+}
+
+/// Where a key answer's text is and how long, or what it says without one: as it is (none), or
+/// no press (an empty list).
+fn key_answer(store: &Store<Host>, memory: &Memory, packed: i64) -> Result<Option<Vec<u8>>, Stop> {
+    if packed == 0 {
+        return Ok(None);
+    }
+    if packed < 0 {
+        return Ok(Some(Vec::new()));
+    }
+    let (at, len) = (packed as u64 as u32 as usize, (packed as u64 >> 32) as usize);
+    if len > MOST_KEPT {
+        return Err(Stop::Nonsense);
+    }
+    let mut bytes = vec![0_u8; len];
+    memory.read(store, at, &mut bytes).map_err(|_| Stop::Nonsense)?;
+    Ok(Some(bytes))
+}
+
+/// The presses a key answer's text writes; one that writes none that hold up stops the plugin.
+fn presses(text: &[u8]) -> Result<Vec<crate::KeyCombo>, Stop> {
+    let text = std::str::from_utf8(text).map_err(|_| Stop::Nonsense)?;
+    if text.len() > MOST_KEY_TEXT {
+        return Err(Stop::Nonsense);
+    }
+    crate::KeyCombo::read_all(text).ok_or(Stop::Nonsense)
 }
 
 impl Running {
     /// `bytes` started, under the caps of a plugin on `hooks`, and told `controls`.
-    pub(crate) fn start_on(bytes: &[u8], controls: &[f32], hooks: &[Hook]) -> Result<Running, Stop> {
-        let most_memory = if hooks.contains(&Hook::FillMask) { MOST_FILL_MEMORY } else { MOST_MEMORY };
-        Running::start_within(bytes, controls, most_memory)
+    pub(crate) fn start_on(
+        bytes: &[u8],
+        controls: &[f32],
+        hooks: &[Hook],
+        permissions: &[PluginPermission],
+    ) -> Result<Running, Stop> {
+        let most_memory = if hooks.contains(&Hook::Inbetween) {
+            MOST_BETWEEN_MEMORY
+        } else if hooks.contains(&Hook::StrokeSound) {
+            MOST_SOUND_MEMORY
+        } else if hooks.contains(&Hook::FillMask) {
+            MOST_FILL_MEMORY
+        } else {
+            MOST_MEMORY
+        };
+        Running::start_within(bytes, controls, most_memory, permissions)
     }
 
     /// `bytes` started, under its caps, and told `controls`.
     #[cfg(test)]
     pub(crate) fn start(bytes: &[u8], controls: &[f32]) -> Result<Running, Stop> {
-        Running::start_within(bytes, controls, MOST_MEMORY)
+        Running::start_within(bytes, controls, MOST_MEMORY, &[])
     }
 
     /// How much memory it has come to ask for, bytes.
@@ -319,7 +705,12 @@ impl Running {
         self.memory.as_ref().map_or(0, |memory| memory.data(&self.store).len())
     }
 
-    fn start_within(bytes: &[u8], controls: &[f32], most_memory: usize) -> Result<Running, Stop> {
+    fn start_within(
+        bytes: &[u8],
+        controls: &[f32],
+        most_memory: usize,
+        permissions: &[PluginPermission],
+    ) -> Result<Running, Stop> {
         let mut running = guarded(|| {
             let engine = engine();
             let module = Module::new(&engine, bytes).map_err(|_| Stop::Damaged)?;
@@ -331,10 +722,12 @@ impl Running {
                 .tables(1)
                 .trap_on_grow_failure(true)
                 .build();
-            let mut store = Store::new(&engine, limits);
-            store.limiter(|limits| limits);
+            let mut store = Store::new(&engine, Host::new(limits));
+            store.limiter(|host| &mut host.limits);
             store.set_fuel(START_FUEL).map_err(|_| Stop::Damaged)?;
-            let linker = Linker::new(&engine);
+            // the app's functions its permissions give, and nothing else
+            let mut linker = Linker::new(&engine);
+            crate::plugin_commands::link(&mut linker, permissions).map_err(|_| Stop::Damaged)?;
             let instance = linker.instantiate_and_start(&mut store, &module).map_err(|e| stop_of(&e))?;
             let position = instance.get_typed_func(&store, POSITION).ok();
             let pick_layer = instance.get_typed_func(&store, PICK_LAYER).ok();
@@ -351,8 +744,63 @@ impl Running {
                     out: instance.get_typed_func(&store, FILL_OUT).ok()?,
                 })
             })();
+            let fill_all_layers = instance.get_typed_func(&store, FILL_ALL_LAYERS).ok();
+            let radial_segments = instance.get_typed_func(&store, RADIAL_SEGMENTS).ok();
+            let hide_undo_notice = instance.get_typed_func(&store, HIDE_UNDO_NOTICE).ok();
+            let interface_colour = instance.get_typed_func(&store, INTERFACE_COLOUR).ok();
+            let pin_panels = instance.get_typed_func(&store, PIN_PANELS).ok();
+            let opacity_together = instance.get_typed_func(&store, OPACITY_TOGETHER).ok();
+            let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
+            let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
+            let picker_pick = instance.get_typed_func(&store, PICKER_PICK).ok();
+            let picker_point = instance.get_typed_func(&store, PICKER_POINT).ok();
+            let curve = (|| {
+                Some(CurveCalls {
+                    begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
+                    run: instance.get_typed_func(&store, CURVE_RUN).ok()?,
+                    nodes: instance.get_typed_func(&store, CURVE_NODES).ok()?,
+                })
+            })();
+            let stroke_sound = instance.get_typed_func(&store, STROKE_SOUND).ok();
+            let sound_prepare = instance.get_typed_func(&store, SOUND_PREPARE).ok();
+            let text_buffer = instance.get_typed_func(&store, TEXT_BUFFER).ok();
+            let brush = instance.get_typed_func(&store, BRUSH).ok();
+            let brush_control = instance.get_typed_func(&store, BRUSH_CONTROL).ok();
+            let file_buffer = instance.get_typed_func(&store, FILE_BUFFER).ok();
+            let file = instance.get_typed_func(&store, FILE).ok();
+            let between = (|| {
+                Some(BetweenCalls {
+                    begin: instance.get_typed_func(&store, BETWEEN_BEGIN).ok()?,
+                    row: instance.get_typed_func(&store, BETWEEN_ROW).ok()?,
+                    run: instance.get_typed_func(&store, BETWEEN_RUN).ok()?,
+                    out: instance.get_typed_func(&store, BETWEEN_OUT).ok()?,
+                })
+            })();
             let memory = instance.get_memory(&store, MEMORY);
             let control = instance.get_typed_func(&store, CONTROL).ok();
+            let action = instance.get_typed_func(&store, ACTION).ok();
+            let panel_event = instance.get_typed_func(&store, PANEL_EVENT).ok();
+            let event = instance.get_typed_func(&store, EVENT).ok();
+            let canvas = (|| {
+                Some(CanvasCalls {
+                    new: instance.get_typed_func(&store, CANVAS_NEW).ok()?,
+                    touch: instance.get_typed_func(&store, CANVAS_TOUCH).ok()?,
+                    draw: instance.get_typed_func(&store, CANVAS_DRAW).ok()?,
+                    out: instance.get_typed_func(&store, CANVAS_OUT).ok()?,
+                    save: instance.get_typed_func(&store, CANVAS_SAVE).ok()?,
+                    input: instance.get_typed_func(&store, CANVAS_IN).ok()?,
+                    load: instance.get_typed_func(&store, CANVAS_LOAD).ok()?,
+                    tool: instance.get_typed_func(&store, CANVAS_TOOL).ok(),
+                })
+            })();
+            let key_buffer = instance.get_typed_func(&store, KEY_BUFFER).ok();
+            let key_shortcut = instance.get_typed_func(&store, KEY_SHORTCUT).ok();
+            let key_shortcut_keys = instance.get_typed_func(&store, KEY_SHORTCUT_KEYS).ok();
+            let key_shortcuts = instance.get_typed_func(&store, KEY_SHORTCUTS).ok();
+            let panel_key = instance.get_typed_func(&store, PANEL_KEY).ok();
+            let kept_buffer = instance.get_typed_func(&store, KEPT_BUFFER).ok();
+            let kept = instance.get_typed_func(&store, KEPT).ok();
+            let keep = instance.get_typed_func(&store, KEEP).ok();
             Ok(Running {
                 store,
                 position,
@@ -362,14 +810,304 @@ impl Running {
                 row_buffer,
                 paste_row,
                 fill,
+                fill_all_layers,
+                radial_segments,
+                hide_undo_notice,
+                interface_colour,
+                pin_panels,
+                opacity_together,
+                randomise,
+                colour_triangle,
+                picker_pick,
+                picker_point,
+                curve,
+                stroke_sound,
+                sound_prepare,
+                text_buffer,
+                brush,
+                brush_control,
+                file_buffer,
+                file,
+                sound_rate: None,
+                told_brush: None,
+                between,
                 memory,
                 control,
+                action,
+                panel_event,
+                event,
+                canvas,
+                key_buffer,
+                key_shortcut,
+                key_shortcut_keys,
+                key_shortcuts,
+                panel_key,
+                kept_buffer,
+                kept,
+                keep,
             })
         })?;
         for (index, value) in controls.iter().enumerate() {
             running.control(index, *value)?;
         }
         Ok(running)
+    }
+
+    /// `bytes` started as [`Running::start_on`] does, told `controls`, what it `kept` (if it keeps
+    /// anything), and on the key hook the app's shortcuts.
+    pub(crate) fn start_told(
+        bytes: &[u8],
+        controls: &[f32],
+        hooks: &[Hook],
+        permissions: &[PluginPermission],
+        kept: Option<&[u8]>,
+    ) -> Result<Running, Stop> {
+        let mut running = Running::start_on(bytes, controls, hooks, permissions)?;
+        if let Some(kept) = kept {
+            running.give_kept(kept)?;
+        }
+        if hooks.contains(&Hook::KeyShortcut) {
+            running.tell_shortcuts(&crate::keys::shortcuts_told(crate::keys::DESKTOP))?;
+        }
+        Ok(running)
+    }
+
+    /// `text` written where its key buffer says, for a call that follows: its length.
+    fn hand_key_text(&mut self, text: &str) -> Result<i32, Stop> {
+        let Running { store, key_buffer, memory, .. } = self;
+        let (Some(buffer), Some(memory)) = (key_buffer.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let len = i32::try_from(text.len()).map_err(|_| Stop::Nonsense)?;
+        guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            let at = buffer.call(&mut *store, len).map_err(|e| stop_of(&e))?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, place, text.as_bytes()).map_err(|_| Stop::Nonsense)?;
+            Ok(len)
+        })
+    }
+
+    /// What the key hook answers for `press` (`keys`: which presses now do what it does by default,
+    /// else what it is taken as): none for as it is, else the presses.
+    fn key_call(&mut self, keys: bool, press: &crate::KeyCombo) -> Result<Option<Vec<crate::KeyCombo>>, Stop> {
+        let func = if keys { self.key_shortcut_keys } else { self.key_shortcut };
+        let (Some(func), Some(memory)) = (func, self.memory) else { return Ok(None) };
+        let len = self.hand_key_text(&press.text())?;
+        let store = &mut self.store;
+        let packed = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            func.call(&mut *store, len).map_err(|e| stop_of(&e))
+        })?;
+        key_answer(store, &memory, packed)?.map(|text| presses(&text)).transpose()
+    }
+
+    /// What it says `press` is taken as: as it is (none), another press, or no press at all (an
+    /// empty list). More than one press makes no sense.
+    pub(crate) fn key_shortcut(&mut self, press: &crate::KeyCombo) -> Result<Option<Vec<crate::KeyCombo>>, Stop> {
+        let taken = self.key_call(false, press)?;
+        if taken.as_ref().is_some_and(|presses| presses.len() > 1) {
+            return Err(Stop::Nonsense);
+        }
+        Ok(taken)
+    }
+
+    /// The presses it says now do what `press` does by default: as it is (none), or these (perhaps
+    /// none).
+    pub(crate) fn key_shortcut_keys(&mut self, press: &crate::KeyCombo) -> Result<Option<Vec<crate::KeyCombo>>, Stop> {
+        self.key_call(true, press)
+    }
+
+    /// Tells it the app's shortcuts (`told`, as [`crate::keys::shortcuts_told`] writes them), if it
+    /// listens.
+    fn tell_shortcuts(&mut self, told: &str) -> Result<(), Stop> {
+        if self.key_shortcuts.is_none() || self.key_buffer.is_none() || self.memory.is_none() {
+            return Ok(());
+        }
+        let len = self.hand_key_text(told)?;
+        let Running { store, key_shortcuts, .. } = self;
+        let Some(call) = key_shortcuts.as_ref() else { return Ok(()) };
+        let (mut left, until) = (TOLD_FUEL, Instant::now() + MOST_TOLD_TIME);
+        guarded(|| long_call(store, call, len, &mut left, until))
+    }
+
+    /// Whether its panel can be handed a key press: it exports what one goes through.
+    pub(crate) fn takes_keys(&self) -> bool {
+        self.panel_key.is_some() && self.key_buffer.is_some() && self.memory.is_some()
+    }
+
+    /// Tells it the key `press` its panel asked for, on the artwork `session`, as a long call (as a
+    /// touch on its panel is).
+    pub(crate) fn panel_key(
+        &mut self,
+        press: &crate::KeyCombo,
+        session: std::sync::Arc<crate::CanvasSession>,
+    ) -> Result<(), Stop> {
+        if !self.takes_keys() {
+            return Ok(());
+        }
+        let len = self.hand_key_text(&press.text())?;
+        let Running { store, panel_key, .. } = self;
+        let Some(panel_key) = panel_key.as_ref() else { return Ok(()) };
+        store.data_mut().session = Some(session as std::sync::Arc<dyn std::any::Any + Send + Sync>);
+        let (mut left, until) = (ACTION_FUEL, Instant::now() + MOST_ACTION_TIME);
+        let ran = guarded(|| long_call(store, panel_key, len, &mut left, until).map(|_| ()));
+        store.data_mut().session = None;
+        ran
+    }
+
+    /// Hands it what it keeps, if it listens.
+    pub(crate) fn give_kept(&mut self, data: &[u8]) -> Result<(), Stop> {
+        let Running { store, kept_buffer, kept, memory, .. } = self;
+        let (Some(buffer), Some(kept), Some(memory)) = (kept_buffer.as_ref(), kept.as_ref(), memory.as_ref()) else {
+            return Ok(());
+        };
+        let len = i32::try_from(data.len()).map_err(|_| Stop::Nonsense)?;
+        let (mut left, until) = (TOLD_FUEL, Instant::now() + MOST_TOLD_TIME);
+        guarded(|| {
+            let at = long_call(store, buffer, len, &mut left, until)?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, place, data).map_err(|_| Stop::Nonsense)?;
+            long_call(store, kept, len, &mut left, until)
+        })
+    }
+
+    /// What it says to keep from now on, if it has anything new to keep.
+    pub(crate) fn take_keep(&mut self) -> Result<Option<Vec<u8>>, Stop> {
+        let Running { store, keep, memory, .. } = self;
+        let (Some(keep), Some(memory)) = (keep.as_ref(), memory.as_ref()) else { return Ok(None) };
+        let (mut left, until) = (TOLD_FUEL, Instant::now() + MOST_TOLD_TIME);
+        let packed = guarded(|| long_call(store, keep, (), &mut left, until))?;
+        // (nothing new reads as "no press": an empty list)
+        if packed < 0 {
+            return Ok(None);
+        }
+        Ok(Some(key_answer(store, memory, packed)?.unwrap_or_default()))
+    }
+
+    /// Runs its action `index` on the artwork `session` (what its permissions give it to reach), as a
+    /// long call.
+    pub(crate) fn action(&mut self, index: usize, session: std::sync::Arc<crate::CanvasSession>) -> Result<(), Stop> {
+        let Running { store, action, .. } = self;
+        let Some(action) = action.as_ref() else { return Ok(()) };
+        let index = i32::try_from(index).map_err(|_| Stop::Nonsense)?;
+        store.data_mut().session = Some(session as std::sync::Arc<dyn std::any::Any + Send + Sync>);
+        let (mut left, until) = (ACTION_FUEL, Instant::now() + MOST_ACTION_TIME);
+        let ran = guarded(|| long_call(store, action, index, &mut left, until).map(|_| ()));
+        store.data_mut().session = None;
+        ran
+    }
+
+    /// Tells it event `kind` happened (1 a stroke kept, 2 a layer added), on the artwork `session`,
+    /// to act on as an action does, on a touch's budget: the canvas waits for it.
+    pub(crate) fn event(&mut self, kind: i32, session: std::sync::Arc<crate::CanvasSession>) -> Result<(), Stop> {
+        let Running { store, event, .. } = self;
+        let Some(event) = event.as_ref() else { return Ok(()) };
+        store.data_mut().session = Some(session as std::sync::Arc<dyn std::any::Any + Send + Sync>);
+        let (mut left, until) = (TOUCH_FUEL, Instant::now() + MOST_TOUCH_TIME);
+        let ran = guarded(|| long_call(store, event, kind, &mut left, until).map(|_| ()));
+        store.data_mut().session = None;
+        // an event shows no panel: one it began is dropped whole
+        let host = store.data_mut();
+        host.panel = None;
+        host.close_panel = false;
+        ran
+    }
+
+    /// Tells it its panel's row `row` was touched with `value`, on the artwork `session`, as a long
+    /// call (as an action is).
+    pub(crate) fn panel_event(
+        &mut self,
+        row: usize,
+        value: f32,
+        session: std::sync::Arc<crate::CanvasSession>,
+    ) -> Result<(), Stop> {
+        let Running { store, panel_event, .. } = self;
+        let Some(panel_event) = panel_event.as_ref() else { return Ok(()) };
+        let row = i32::try_from(row).map_err(|_| Stop::Nonsense)?;
+        store.data_mut().session = Some(session as std::sync::Arc<dyn std::any::Any + Send + Sync>);
+        let (mut left, until) = (ACTION_FUEL, Instant::now() + MOST_ACTION_TIME);
+        let ran = guarded(|| long_call(store, panel_event, (row, value), &mut left, until).map(|_| ()));
+        store.data_mut().session = None;
+        ran
+    }
+
+    /// A new artwork of its own, `width` × `height`: whether it made one (false with no canvas).
+    pub(crate) fn canvas_new(&mut self, width: u32, height: u32) -> Result<bool, Stop> {
+        let Running { store, canvas, .. } = self;
+        let Some(calls) = canvas.as_ref() else { return Ok(false) };
+        let size =
+            (i32::try_from(width).map_err(|_| Stop::Nonsense)?, i32::try_from(height).map_err(|_| Stop::Nonsense)?);
+        let (mut left, until) = (CANVAS_FUEL, Instant::now() + MOST_CANVAS_TIME);
+        Ok(guarded(|| long_call(store, &calls.new, size, &mut left, until))? == 0)
+    }
+
+    /// A touch on its artwork: whether what it draws changed.
+    pub(crate) fn canvas_touch(&mut self, phase: u32, x: f32, y: f32, pressure: f32) -> Result<bool, Stop> {
+        let Running { store, canvas, .. } = self;
+        let Some(calls) = canvas.as_ref() else { return Ok(false) };
+        let (mut left, until) = (TOUCH_FUEL, Instant::now() + MOST_TOUCH_TIME);
+        let said = guarded(|| long_call(store, &calls.touch, (phase as i32, x, y, pressure), &mut left, until))?;
+        Ok(said != 0)
+    }
+
+    /// Tells its artwork the tool (0 paint, 1 erase, 2 smudge), the colour (0xRRGGBBAA), the size
+    /// (the brush's width, canvas pixels) and the opacity a stroke starts with.
+    pub(crate) fn canvas_tool(&mut self, tool: u32, rgba: u32, size: f32, opacity: f32) -> Result<(), Stop> {
+        let Running { store, canvas, .. } = self;
+        let Some(call) = canvas.as_ref().and_then(|c| c.tool.as_ref()) else { return Ok(()) };
+        guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            call.call(&mut *store, (tool as i32, rgba as i32, size, opacity)).map_err(|e| stop_of(&e))
+        })
+    }
+
+    /// What it draws now, as its draw list's bytes.
+    pub(crate) fn canvas_draw(&mut self) -> Result<Vec<u8>, Stop> {
+        self.canvas_out(|calls| &calls.draw, crate::plugin_canvas::MOST_DATA)
+    }
+
+    /// Its artwork as its own data.
+    pub(crate) fn canvas_save(&mut self) -> Result<Vec<u8>, Stop> {
+        self.canvas_out(|calls| &calls.save, crate::plugin_canvas::MOST_DATA)
+    }
+
+    /// What `call` leaves at `procraft_canvas_out()`, as long as it says (at most `most` bytes).
+    fn canvas_out(&mut self, call: fn(&CanvasCalls) -> &TypedFunc<(), i32>, most: usize) -> Result<Vec<u8>, Stop> {
+        let Running { store, canvas, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (canvas.as_ref(), memory.as_ref()) else { return Ok(Vec::new()) };
+        let (mut left, until) = (CANVAS_FUEL, Instant::now() + MOST_CANVAS_TIME);
+        guarded(|| {
+            let len =
+                usize::try_from(long_call(store, call(calls), (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            if len > most {
+                return Err(Stop::Nonsense);
+            }
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut bytes = vec![0_u8; len];
+            memory.read(&*store, at, &mut bytes).map_err(|_| Stop::Nonsense)?;
+            Ok(bytes)
+        })
+    }
+
+    /// `data` handed to it as its artwork: whether it took it.
+    pub(crate) fn canvas_load(&mut self, data: &[u8]) -> Result<bool, Stop> {
+        let Running { store, canvas, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (canvas.as_ref(), memory.as_ref()) else { return Ok(false) };
+        let len = i32::try_from(data.len()).map_err(|_| Stop::Nonsense)?;
+        let (mut left, until) = (CANVAS_FUEL, Instant::now() + MOST_CANVAS_TIME);
+        guarded(|| {
+            let at =
+                usize::try_from(long_call(store, &calls.input, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, at, data).map_err(|_| Stop::Nonsense)?;
+            Ok(long_call(store, &calls.load, (), &mut left, until)? == 0)
+        })
+    }
+
+    /// The panel it asked to show since last asked (none if it didn't), and whether it asked to
+    /// close it.
+    pub(crate) fn take_panel(&mut self) -> (Option<crate::PluginPanel>, bool) {
+        let host = self.store.data_mut();
+        (host.panel.take(), std::mem::take(&mut host.close_panel))
     }
 
     /// Tells it control `index` has `value`.
@@ -391,6 +1129,298 @@ impl Running {
             pick_layer.call(&mut *store, ()).map_err(|e| stop_of(&e))
         })?;
         Ok(said != 0)
+    }
+
+    /// Whether it says ColorDrop fills by every visible layer.
+    pub(crate) fn fill_all_layers(&mut self) -> Result<bool, Stop> {
+        let Running { store, fill_all_layers, .. } = self;
+        let Some(fill_all_layers) = fill_all_layers else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            fill_all_layers.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// The colour (0xRRGGBB) it says the interface draws `role` in; none if it leaves it be (-1).
+    pub(crate) fn interface_colour(&mut self, role: i32) -> Result<Option<u32>, Stop> {
+        let Running { store, interface_colour, .. } = self;
+        let Some(interface_colour) = interface_colour else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            interface_colour.call(&mut *store, role).map_err(|e| stop_of(&e))
+        })?;
+        match said {
+            -1 => Ok(None),
+            0..=0xFF_FFFF => Ok(u32::try_from(said).ok()),
+            _ => Err(Stop::Nonsense),
+        }
+    }
+
+    /// The frame between `this` and `next` (each `width` × `height`, premultiplied RGBA8), as it
+    /// draws it: a long call, on fuel by the area. None without the hook, or if it draws none.
+    pub(crate) fn inbetween(
+        &mut self,
+        this: &[u8],
+        next: &[u8],
+        width: usize,
+        height: usize,
+    ) -> Result<Option<Vec<u8>>, Stop> {
+        let Running { store, between, memory, .. } = self;
+        let (Some(between), Some(memory)) = (between.as_ref(), memory.as_ref()) else { return Ok(None) };
+        let row = width * 4;
+        if row == 0 || height == 0 || this.len() != row * height || next.len() != row * height {
+            return Ok(None);
+        }
+        let until = Instant::now() + MOST_FILL_TIME;
+        let mut left = BETWEEN_FUEL + BETWEEN_PIXEL_FUEL * (width * height) as u64;
+        guarded(|| {
+            let size =
+                (i32::try_from(width).map_err(|_| Stop::Nonsense)?, i32::try_from(height).map_err(|_| Stop::Nonsense)?);
+            let at = long_call(store, &between.begin, size, &mut left, until)?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            for (frame, pixels) in [this, next].into_iter().enumerate() {
+                for (y, line) in pixels.chunks_exact(row).enumerate() {
+                    memory.write(&mut *store, place, line).map_err(|_| Stop::Nonsense)?;
+                    long_call(store, &between.row, (frame as i32, y as i32), &mut left, until)?;
+                }
+            }
+            if long_call(store, &between.run, (), &mut left, until)? == 0 {
+                return Ok(None);
+            }
+            let mut out = vec![0_u8; row * height];
+            for (y, line) in out.chunks_exact_mut(row).enumerate() {
+                long_call(store, &between.out, y as i32, &mut left, until)?;
+                memory.read(&*store, place, line).map_err(|_| Stop::Nonsense)?;
+            }
+            Ok(Some(out))
+        })
+    }
+
+    /// The sound of the stroke as `motion` has it: `frames` samples at `rate` a second, as it makes
+    /// them, readied for the rate first (a long call, the first time at it) and told `brush` when
+    /// that changed. None without the hook.
+    pub(crate) fn stroke_sound(
+        &mut self,
+        frames: usize,
+        rate: u32,
+        motion: &crate::stroke_sound::SoundMotion,
+        brush: &crate::stroke_sound::SoundBrush,
+    ) -> Result<Option<Vec<f32>>, Stop> {
+        if self.stroke_sound.is_none() || self.memory.is_none() {
+            return Ok(None);
+        }
+        let rate = i32::try_from(rate).map_err(|_| Stop::Nonsense)?;
+        if self.sound_rate != Some(rate) {
+            self.sound_prepare(rate)?;
+            self.sound_rate = Some(rate);
+        }
+        if self.told_brush != Some(brush.key) {
+            self.tell_brush(brush)?;
+            self.told_brush = Some(brush.key);
+        }
+        let Running { store, stroke_sound, memory, .. } = self;
+        let (Some(call), Some(memory)) = (stroke_sound.as_ref(), memory.as_ref()) else { return Ok(None) };
+        let count = i32::try_from(frames).map_err(|_| Stop::Nonsense)?;
+        let m = motion;
+        let args = (count, rate, m.speed, m.pressure, m.since_ms, m.state, m.hover.0, m.hover.1, m.height);
+        let at = guarded(|| {
+            store.set_fuel(SOUND_FUEL + SOUND_FRAME_FUEL * frames as u64).map_err(|_| Stop::Damaged)?;
+            call.call(&mut *store, args).map_err(|e| stop_of(&e))
+        })?;
+        let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+        let mut bytes = vec![0_u8; frames * 4];
+        memory.read(&*store, place, &mut bytes).map_err(|_| Stop::Nonsense)?;
+        let sample = |b: &[u8; 4]| {
+            let s = f32::from_le_bytes(*b);
+            if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 }
+        };
+        Ok(Some(bytes.as_chunks::<4>().0.iter().map(sample).collect()))
+    }
+
+    /// Readies its sounds for `rate`, if it asks to be: a long call.
+    fn sound_prepare(&mut self, rate: i32) -> Result<(), Stop> {
+        let Running { store, sound_prepare, .. } = self;
+        let Some(prepare) = sound_prepare.as_ref() else { return Ok(()) };
+        let (mut left, until) = (PREPARE_FUEL, Instant::now() + MOST_FILL_TIME);
+        guarded(|| long_call(store, prepare, rate, &mut left, until).map(|_| ()))
+    }
+
+    /// Tells it the current brush, if it listens: its name and set, and its rows in the brush studio.
+    fn tell_brush(&mut self, brush: &crate::stroke_sound::SoundBrush) -> Result<(), Stop> {
+        let Running { store, text_buffer, brush: named, brush_control, memory, .. } = self;
+        if let (Some(text_buffer), Some(named), Some(memory)) = (text_buffer.as_ref(), named.as_ref(), memory.as_ref())
+        {
+            let text = [brush.name.as_bytes(), brush.set.as_bytes()].concat();
+            let length = |n: usize| i32::try_from(n).map_err(|_| Stop::Nonsense);
+            guarded(|| {
+                store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+                let at = text_buffer.call(&mut *store, length(text.len())?).map_err(|e| stop_of(&e))?;
+                let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+                memory.write(&mut *store, place, &text).map_err(|_| Stop::Nonsense)?;
+                store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+                named.call(&mut *store, (length(brush.name.len())?, length(brush.set.len())?)).map_err(|e| stop_of(&e))
+            })?;
+        }
+        if let Some(brush_control) = brush_control.as_ref() {
+            for (index, value) in brush.controls.iter().enumerate() {
+                let index = i32::try_from(index).map_err(|_| Stop::Nonsense)?;
+                guarded(|| {
+                    store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+                    brush_control.call(&mut *store, (index, *value)).map_err(|e| stop_of(&e))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Hands it the file picked for its control `index` (none: let go), if it takes them: a long
+    /// call.
+    pub(crate) fn give_file(&mut self, index: usize, bytes: Option<&[u8]>) -> Result<(), Stop> {
+        let Running { store, file_buffer, file, memory, .. } = self;
+        let (Some(file), Some(memory)) = (file.as_ref(), memory.as_ref()) else { return Ok(()) };
+        let data = bytes.unwrap_or(&[]);
+        let index = i32::try_from(index).map_err(|_| Stop::Nonsense)?;
+        let len = i32::try_from(data.len()).map_err(|_| Stop::Nonsense)?;
+        let (mut left, until) = (FILE_FUEL, Instant::now() + MOST_FILL_TIME);
+        guarded(|| {
+            if !data.is_empty() {
+                let Some(file_buffer) = file_buffer.as_ref() else { return Ok(()) };
+                let at = long_call(store, file_buffer, (index, len), &mut left, until)?;
+                let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+                memory.write(&mut *store, place, data).map_err(|_| Stop::Nonsense)?;
+            }
+            long_call(store, file, (index, len), &mut left, until)
+        })
+    }
+
+    /// The curve it offers for a snapping stroke of `points` (window pixels), QuickShape having
+    /// found `best` first (-1: a curve asked for): its nodes, an anchor then two controls and an
+    /// anchor for each span. None without the hook, or if it offers none.
+    pub(crate) fn quickshape_curve(
+        &mut self,
+        points: &[(f32, f32)],
+        best: i32,
+    ) -> Result<Option<Vec<(f32, f32)>>, Stop> {
+        let Running { store, curve, memory, .. } = self;
+        let (Some(curve), Some(memory)) = (curve.as_ref(), memory.as_ref()) else { return Ok(None) };
+        let count = i32::try_from(points.len()).map_err(|_| Stop::Nonsense)?;
+        let until = Instant::now() + Duration::from_secs(2);
+        let mut left = CURVE_FUEL + CURVE_POINT_FUEL * points.len() as u64;
+        guarded(|| {
+            let at = long_call(store, &curve.begin, (count, best), &mut left, until)?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            let bytes: Vec<u8> =
+                points.iter().flat_map(|(x, y)| [x.to_le_bytes(), y.to_le_bytes()]).flatten().collect();
+            memory.write(&mut *store, place, &bytes).map_err(|_| Stop::Nonsense)?;
+            let n = usize::try_from(long_call(store, &curve.run, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            if n < 4 || n % 3 != 1 || n > MOST_CURVE_NODES {
+                return Err(Stop::Nonsense);
+            }
+            let at = long_call(store, &curve.nodes, (), &mut left, until)?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            let mut bytes = vec![0_u8; n * 8];
+            memory.read(&*store, place, &mut bytes).map_err(|_| Stop::Nonsense)?;
+            let nodes: Vec<(f32, f32)> = bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|b| (f32::from_le_bytes([b[0], b[1], b[2], b[3]]), f32::from_le_bytes([b[4], b[5], b[6], b[7]])))
+                .collect();
+            let near = |v: f32| v.is_finite() && v.abs() <= MOST_MOVE * 4.0;
+            if nodes.iter().all(|(x, y)| near(*x) && near(*y)) { Ok(Some(nodes)) } else { Err(Stop::Nonsense) }
+        })
+    }
+
+    /// Whether it says Classic shows a triangle.
+    pub(crate) fn colour_triangle(&mut self) -> Result<bool, Stop> {
+        let Running { store, colour_triangle, .. } = self;
+        let Some(colour_triangle) = colour_triangle else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            colour_triangle.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// The saturation and brightness it says the point (`x`, `y`) of its picker (0..1 each way, y
+    /// down) picks; none if it has no picker.
+    pub(crate) fn picker_pick(&mut self, x: f32, y: f32) -> Result<Option<(f32, f32)>, Stop> {
+        let Running { store, picker_pick, .. } = self;
+        let Some(pick) = picker_pick else { return Ok(None) };
+        picker_pair(store, pick, (x, y)).map(Some)
+    }
+
+    /// Where it says saturation `s` and brightness `v` sit on its picker (0..1 each way, y down);
+    /// none if it has no picker.
+    pub(crate) fn picker_point(&mut self, s: f32, v: f32) -> Result<Option<(f32, f32)>, Stop> {
+        let Running { store, picker_point, .. } = self;
+        let Some(point) = picker_point else { return Ok(None) };
+        picker_pair(store, point, (s, v)).map(Some)
+    }
+
+    /// Where it says brush setting `setting` goes, as a share of its range (none: left as it is).
+    pub(crate) fn randomise(&mut self, setting: i32, seed: i32) -> Result<Option<f32>, Stop> {
+        let Running { store, randomise, .. } = self;
+        let Some(randomise) = randomise else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            randomise.call(&mut *store, (setting, seed)).map_err(|e| stop_of(&e))
+        })?;
+        if said.is_nan() || said > 1.0 {
+            Err(Stop::Nonsense)
+        } else if said < 0.0 {
+            Ok(None)
+        } else {
+            Ok(Some(said))
+        }
+    }
+
+    /// Whether it says picked layers' opacity changes together.
+    pub(crate) fn opacity_together(&mut self) -> Result<bool, Stop> {
+        let Running { store, opacity_together, .. } = self;
+        let Some(opacity_together) = opacity_together else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            opacity_together.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says panels stay open while the canvas is painted.
+    pub(crate) fn pin_panels(&mut self) -> Result<bool, Stop> {
+        let Running { store, pin_panels, .. } = self;
+        let Some(pin_panels) = pin_panels else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            pin_panels.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says undo and redo go by without their notice.
+    pub(crate) fn hide_undo_notice(&mut self) -> Result<bool, Stop> {
+        let Running { store, hide_undo_notice, .. } = self;
+        let Some(hide_undo_notice) = hide_undo_notice else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            hide_undo_notice.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// How many parts it says radial symmetry makes (none if it has no say).
+    pub(crate) fn radial_segments(&mut self) -> Result<Option<u32>, Stop> {
+        let Running { store, radial_segments, .. } = self;
+        let Some(radial_segments) = radial_segments else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            radial_segments.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        if RADIAL_PARTS.contains(&said) { Ok(u32::try_from(said).ok()) } else { Err(Stop::Nonsense) }
     }
 
     /// How big it says the interface shows in a window `width` × `height` points at 1.
@@ -509,6 +1539,115 @@ impl Running {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// [`can_act`] for code that makes no artworks of its own.
+    fn acts(bytes: &[u8], hooks: &[Hook], controls: bool, actions: bool, permissions: &[PluginPermission]) -> bool {
+        can_act(bytes, hooks, controls, actions, permissions, false)
+    }
+
+    /// A picker that flips each answer upside down: a point (x, y) picks (x, 1 - y), and (s, v) sits at
+    /// (s, 1 - v).
+    pub(crate) const PICKS: &str = r#"(module
+        (func $flip (param f32 f32) (result i64)
+            (i64.or
+                (i64.extend_i32_u (i32.reinterpret_f32 (local.get 0)))
+                (i64.shl (i64.extend_i32_u (i32.reinterpret_f32 (f32.sub (f32.const 1) (local.get 1)))) (i64.const 32))))
+        (func (export "procraft_picker_pick") (param f32 f32) (result i64) (call $flip (local.get 0) (local.get 1)))
+        (func (export "procraft_picker_point") (param f32 f32) (result i64) (call $flip (local.get 0) (local.get 1))))"#;
+
+    /// An artwork of its own: a dot where it was last touched, drawn as a red square 10 a side; it
+    /// saves the dot's place (8 bytes).
+    pub(crate) const DOTS: &str = r#"(module
+        (memory (export "memory") 1)
+        (func (export "procraft_canvas_new") (param i32 i32) (result i32)
+            (f32.store (i32.const 0) (f32.const -100)) (f32.store (i32.const 4) (f32.const -100)) (i32.const 0))
+        (func (export "procraft_canvas_touch") (param i32 f32 f32 f32) (result i32)
+            (f32.store (i32.const 0) (local.get 1)) (f32.store (i32.const 4) (local.get 2)) (i32.const 1))
+        (func $word (param $at i32) (param $w i32) (i32.store (local.get $at) (local.get $w)))
+        (func $num (param $at i32) (param $n f32) (f32.store (local.get $at) (local.get $n)))
+        (func (export "procraft_canvas_draw") (result i32)
+            (local $x f32) (local $y f32)
+            (local.set $x (f32.load (i32.const 0))) (local.set $y (f32.load (i32.const 4)))
+            (call $word (i32.const 1024) (i32.const 1))
+            (call $word (i32.const 1028) (i32.const 0xFF0000FF))
+            (call $word (i32.const 1032) (i32.const 0))
+            (call $num (i32.const 1036) (f32.const 0))
+            (call $word (i32.const 1040) (i32.const 0))
+            (call $word (i32.const 1044) (i32.const 2))
+            (call $num (i32.const 1048) (f32.sub (local.get $x) (f32.const 5)))
+            (call $num (i32.const 1052) (f32.sub (local.get $y) (f32.const 5)))
+            (call $word (i32.const 1056) (i32.const 3))
+            (call $num (i32.const 1060) (f32.add (local.get $x) (f32.const 5)))
+            (call $num (i32.const 1064) (f32.sub (local.get $y) (f32.const 5)))
+            (call $word (i32.const 1068) (i32.const 3))
+            (call $num (i32.const 1072) (f32.add (local.get $x) (f32.const 5)))
+            (call $num (i32.const 1076) (f32.add (local.get $y) (f32.const 5)))
+            (call $word (i32.const 1080) (i32.const 3))
+            (call $num (i32.const 1084) (f32.sub (local.get $x) (f32.const 5)))
+            (call $num (i32.const 1088) (f32.add (local.get $y) (f32.const 5)))
+            (call $word (i32.const 1092) (i32.const 5))
+            (i32.const 72))
+        (func (export "procraft_canvas_out") (result i32) (i32.const 1024))
+        (func (export "procraft_canvas_save") (result i32)
+            (i64.store (i32.const 1024) (i64.load (i32.const 0))) (i32.const 8))
+        (func (export "procraft_canvas_in") (param i32) (result i32) (i32.const 2048))
+        (func (export "procraft_canvas_load") (result i32)
+            (i64.store (i32.const 0) (i64.load (i32.const 2048))) (i32.const 0)))"#;
+
+    /// A picture: red across, green down, the hue in blue.
+    pub(crate) const PICTURE: &str =
+        "fn picture(at: vec2<f32>) -> vec4<f32> { return vec4<f32>(at.x, at.y, hue(), 1.0); }";
+
+    /// An action that adds a layer named "Grid" and paints a 10 x 10 red square at (20, 30) on it.
+    pub(crate) const ACTS: &str = r#"(module
+        (import "procraft" "add_layer" (func $add (result i64)))
+        (import "procraft" "write_pixels" (func $write (param i64 i32 i32 i32 i32 i32) (result i32)))
+        (import "procraft" "set_layer_name" (func $name (param i64 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "Grid")
+        (func (export "procraft_action") (param i32) (result i32)
+            (local $layer i64) (local $p i32)
+            (local.set $layer (call $add))
+            (drop (call $name (local.get $layer) (i32.const 0) (i32.const 4)))
+            (local.set $p (i32.const 1024))
+            (loop $fill
+                (i32.store (local.get $p) (i32.const 0xFF0000FF))
+                (local.set $p (i32.add (local.get $p) (i32.const 4)))
+                (br_if $fill (i32.lt_u (local.get $p) (i32.const 1424))))
+            (drop (call $write (local.get $layer) (i32.const 20) (i32.const 30) (i32.const 10) (i32.const 10) (i32.const 1024)))
+            (i32.const 0)))"#;
+
+    #[test]
+    fn a_plugin_imports_only_what_its_permissions_give() {
+        let bytes = wat::parse_str(ACTS).unwrap();
+        let write = [PluginPermission::ArtworkWrite];
+        assert!(acts(&bytes, &[], false, true, &write));
+        // without the permission it can't run, nor with only others
+        assert!(!can_run(&bytes, &[], false));
+        assert!(!acts(&bytes, &[], false, true, &[PluginPermission::ArtworkRead, PluginPermission::Brush]));
+        // nor what it imports from elsewhere, or with other types
+        let importing = |import: &str| {
+            let text = format!(
+                r#"(module {import} (func (export "procraft_action") (param i32) (result i32) (i32.const 0)))"#
+            );
+            wat::parse_str(text).unwrap()
+        };
+        assert!(acts(&importing(r#"(import "procraft" "add_layer" (func (result i64)))"#), &[], false, true, &write));
+        assert!(!acts(&importing(r#"(import "env" "add_layer" (func (result i64)))"#), &[], false, true, &write));
+        assert!(!acts(&importing(r#"(import "procraft" "add_layer" (func (result i32)))"#), &[], false, true, &write));
+        assert!(!acts(&importing(r#"(import "procraft" "memory" (memory 1))"#), &[], false, true, &write));
+        // a panel needs its touches' export
+        let panel = [PluginPermission::Panel];
+        let shows = r#"(import "procraft" "show_panel" (func (param i32 i32) (result i32)))"#;
+        assert!(!acts(&importing(shows), &[], false, true, &panel));
+        let touches =
+            format!(r#"{shows} (func (export "procraft_panel_event") (param i32 f32) (result i32) (i32.const 0))"#);
+        assert!(acts(&importing(&touches), &[], false, true, &panel));
+        // actions need theirs exported
+        let none = position_module("", "(i64.const 0)");
+        assert!(acts(&none, &[Hook::Position], false, false, &write));
+        assert!(!acts(&none, &[Hook::Position], false, true, &write));
+    }
 
     /// Moves a sample by its two controls, as a plugin of real use does.
     pub(crate) const OFFSET: &str = r#"(module
@@ -799,7 +1938,7 @@ pub(crate) mod tests {
         let over = MOST_FILL_MEMORY / 65536;
         let run = |bytes: &[u8], hooks: &[Hook]| {
             let mut rows = vec![!0_u64];
-            Running::start_on(bytes, &[], hooks).unwrap().fill(&mut rows, 64, 1, (0, 0))
+            Running::start_on(bytes, &[], hooks, &[]).unwrap().fill(&mut rows, 64, 1, (0, 0))
         };
         assert_eq!(run(&grows(fits), &[Hook::FillMask]), Ok(false));
         assert_eq!(run(&grows(over), &[Hook::FillMask]), Err(Stop::Memory));

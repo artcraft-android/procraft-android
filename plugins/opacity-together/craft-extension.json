@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.opacity-together",
+  "name": "Opacity of picked layers",
+  "version": "1.2.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Changing the opacity of one of several picked layers changes them all to match.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["opacity_together"]
+}

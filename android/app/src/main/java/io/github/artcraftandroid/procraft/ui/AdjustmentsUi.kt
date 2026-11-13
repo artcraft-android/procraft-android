@@ -96,11 +96,13 @@ private fun MenuRow(label: String, onTap: () -> Unit) {
 
 /**
  * The adjustments menu hanging from its button, in groups: colour, blurs, effects, painting. With a
- * filter imported, a group more: a row that turns the menu to the filters. With none, it isn't there.
+ * filter imported, or a plugin's action listed there, a group more: a row that turns the menu to
+ * them (the filters, then the actions). With none, it isn't there.
  */
 @Composable
 fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
     val filters = remember { vm.plugins.filters() }
+    val actions = remember { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.ADJUSTMENTS) }
     var showFilters by remember { mutableStateOf(false) }
     androidx.activity.compose.BackHandler(enabled = showFilters) { showFilters = false }
     Popover(330.dp, arrowX, modifier) {
@@ -124,12 +126,13 @@ fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modif
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (showFilters) {
-                MenuGroup(filters) { filter -> MenuRow(filter.name) { vm.startPluginFilter(filter) } }
+                if (filters.isNotEmpty()) MenuGroup(filters) { filter -> MenuRow(filter.name) { vm.startPluginFilter(filter) } }
+                if (actions.isNotEmpty()) MenuGroup(actions) { action -> MenuRow(action.label) { vm.runPluginAction(action.key) } }
             } else {
                 for (group in Adjustment.groups) {
                     MenuGroup(group) { a -> MenuRow(a.label) { vm.startAdjustment(a) } }
                 }
-                if (filters.isNotEmpty()) {
+                if (filters.isNotEmpty() || actions.isNotEmpty()) {
                     MenuGroup(listOf("Plugins")) { label -> MenuRow(label) { showFilters = true } }
                 }
             }
@@ -259,15 +262,37 @@ private fun Adjustment.icon() = when (this) {
     Adjustment.PLUGIN -> PcIcons.Adjustments
 }
 
-/**
- * Whether the adjustment toolbars lay their sliders side by side: on a screen wider than tall, as
- * measured in landscape (upright they stack).
- */
+/** The window's width, which the adjustment toolbars and the animation bar lay themselves out by (not its shape). */
 @Composable
-private fun widePanels(): Boolean {
-    val screen = androidx.compose.ui.platform.LocalConfiguration.current
-    return screen.screenWidthDp > screen.screenHeightDp
-}
+internal fun windowWidth(): Dp =
+    with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width.toDp() }
+
+/**
+ * Where each toolbar lays its sliders side by side (as measured in landscape; upright, stacked): the
+ * window less 8 each side at least this. Liquify's whole row: the window itself at least this.
+ */
+private val HsbSideBySide = 800.dp
+private val BalanceSideBySide = 820.dp
+private val GlitchSideBySide = 820.dp
+private val NoiseSideBySide = 904.dp
+private val BloomSideBySide = 800.dp
+private val GradientSideBySide = 800.dp
+private val LiquifyFullFrom = 1000.dp
+
+/** Whether a toolbar lays its sliders side by side in a window [window] wide, from [from]. */
+internal fun sideBySide(window: Dp, from: Dp): Boolean = window - 16.dp >= from
+
+/** A toolbar [natural] wide where there is room, in a window [window] wide: no wider than the window less 8 each side. */
+internal fun toolbarWidth(natural: Dp, window: Dp): Dp = minOf(natural, window - 16.dp).coerceAtLeast(0.dp)
+
+/** Each of [count] sliders [natural] wide in a toolbar [full] wide, now the toolbar is [width] wide: what it gave up shared among them. */
+internal fun squeezed(natural: Dp, count: Int, full: Dp, width: Dp): Dp = natural - (full - width) / count
+
+/**
+ * Liquify's whole row in a window [window] wide: its four sliders a quarter of the window less 108
+ * (at most 300 each), the row 40 less than the window (1093 on a 1133 window, as measured).
+ */
+internal fun liquifyFullWidth(window: Dp): Dp = minOf(window - 40.dp, 1268.dp)
 
 /** The floating panel of hue, saturation and brightness, each 0..100% with 50% leaving the layer as it was. */
 @Composable
@@ -278,10 +303,11 @@ fun HsbPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
         HsbRow("Saturation", s, Brush.horizontalGradient(listOf(Color(0xFF808080), Color(0xFFFF0000))), { lerp(Color(0xFF808080), Color.Red, it) }, m) { vm.setHsb(h, it, b) }
         HsbRow("Brightness", b, Brush.horizontalGradient(listOf(Color.Black, Color.White)), { lerp(Color.Black, Color.White, it) }, m) { vm.setHsb(h, s, it) }
     }
-    if (widePanels()) {
-        // side by side, 301 wide and 13 apart
+    val window = windowWidth()
+    if (sideBySide(window, HsbSideBySide)) {
+        // side by side, 301 wide and 13 apart (narrower where the window is)
         Row(
-            modifier.offset(y = (-25).dp).size(961.dp, 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
+            modifier.offset(y = (-25).dp).size(toolbarWidth(961.dp, window), 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(13.dp),
         ) { rows(Modifier.weight(1f)) }
     } else {
@@ -347,13 +373,15 @@ private val BALANCE_TONES = listOf("Shadows", "Midtones", "Highlights")
 @Composable
 fun ColorBalancePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     val tone = vm.balanceTone
-    if (widePanels()) {
+    val window = windowWidth()
+    if (sideBySide(window, BalanceSideBySide)) {
+        val width = toolbarWidth(903.dp, window)
         Row(
-            modifier.offset(y = (-25).dp).size(903.dp, 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, top = 24.dp, bottom = 16.dp),
+            modifier.offset(y = (-25).dp).size(width, 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, top = 24.dp, bottom = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(19.dp),
         ) {
             BALANCE_PAIRS.forEachIndexed { k, (left, right, colours) ->
-                BalanceRow(left, right, vm.balance[tone * 3 + k], Brush.horizontalGradient(colours), Modifier.width(251.dp)) { vm.setBalance(k, it) }
+                BalanceRow(left, right, vm.balance[tone * 3 + k], Brush.horizontalGradient(colours), Modifier.width(squeezed(251.dp, 3, 903.dp, width))) { vm.setBalance(k, it) }
             }
             MoreButton("Color Balance") {
                 OptionsGroup {
@@ -520,8 +548,9 @@ private val CurveMenuFill get() = if (Pc.light) Color(0xFFF0F0F0) else Color(0xF
 @Composable
 fun GradientMapPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     val editing = vm.gradientEditing
-    // wider on a wide screen, showing more of the library
-    val width = if (widePanels()) 835.dp else 544.dp
+    // wider in a wide window, showing more of the library
+    val window = windowWidth()
+    val width = if (sideBySide(window, GradientSideBySide)) toolbarWidth(835.dp, window) else 544.dp
     Column(modifier.offset(y = (-25).dp).size(width, 159.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(horizontal = 14.dp, vertical = 12.dp)) {
         Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (editing != null) "Gradient Map" else "Gradient Library", color = MenuText, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f).padding(start = 14.dp))
@@ -711,7 +740,7 @@ private fun GradientEditor(vm: CanvasViewModel, index: Int) {
 }
 
 private val GradientBand get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF535353)
-private val GradientDone = Color(0xFF0190FF)
+private val GradientDone get() = Pc.tinted(Color(0xFF0190FF))
 private val PlusDisc get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1B1B1B)
 private val PlusRim get() = if (Pc.light) Color(0xFFE1E1E1) else Color(0xFF373737)
 private val PlusGlyph get() = if (Pc.light) Color(0xFF595959) else Color(0xFFAAAAAA)
@@ -787,9 +816,10 @@ fun LiquifyPanel(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifie
 
 @Composable
 private fun LiquifyPanelAndMenus(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifier: Modifier) {
-    // upright too where the wide panel's 1093 won't fit, a big interface size leaving that little room
-    val wide = widePanels() && androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 1093
-    if (wide) LiquifyWide(vm, modifier) else LiquifyUpright(vm, modifier)
+    // the whole row in a window wide enough for it
+    val wide = screenWidth >= LiquifyFullFrom
+    val full = liquifyFullWidth(screenWidth)
+    if (wide) LiquifyWide(vm, full, modifier) else LiquifyUpright(vm, modifier)
     // the way's list and the adjust slider open over the panel's buttons
     val panelLeft = (screenWidth - 654.dp) / 2
     val buttonsTop = if (wide) screenHeight - 25.dp - 162.dp + 28.dp else screenHeight - 25.dp - 16.dp - 40.dp
@@ -816,8 +846,8 @@ private fun LiquifyPanelAndMenus(vm: CanvasViewModel, screenWidth: Dp, screenHei
             }
         }
         2 -> {
-            // over the Adjust button: the middle one upright, the ninth of the row when wide
-            val centre = if (wide) (screenWidth - 1093.dp) / 2 + 86.dp + 94.dp * 8 + 37.5.dp else screenWidth / 2
+            // over the Adjust button: the middle one upright, the ninth of the row (921 wide, centred) when wide
+            val centre = if (wide) (screenWidth - full) / 2 + (full - 921.dp) / 2 + 94.dp * 8 + 37.5.dp else screenWidth / 2
             val left = (centre - 130.dp).coerceIn(0.dp, screenWidth - 260.dp)
             MenuPopover(centre - left, left, buttonsTop) {
                 MenuTitle("Strength")
@@ -846,14 +876,15 @@ private val LiquifyLabel get() = if (Pc.light) Color(0xFF414141) else Color(0xFF
 private val LiquifyDim get() = if (Pc.light) Color(0xFF989898) else Color(0xFF575757)
 
 /**
- * Liquify on a wide screen (1093 x 162): its ways, Adjust and Reset as a row of icon buttons (75
- * wide, 94 apart; the chosen way's icon blue), and the four sliders side by side under them.
+ * Liquify in a wide window ([width] x 162: 1093 on a 1133 window): its ways, Adjust and Reset as a
+ * row of icon buttons (75 wide, 94 apart; the chosen way's icon blue), and the four sliders side by
+ * side under them.
  */
 @Composable
-private fun LiquifyWide(vm: CanvasViewModel, modifier: Modifier) {
+private fun LiquifyWide(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
     val percent = { v: Float, none: String? -> if (v >= 1f) "Max" else if (v <= 0f && none != null) none else "${(v * 100).roundToInt()}%" }
     Column(
-        modifier.offset(y = (-25).dp).size(1093.dp, 162.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 28.dp),
+        modifier.offset(y = (-25).dp).size(width, 162.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         val canAdjust = vm.liquified
@@ -1084,9 +1115,11 @@ private val GLITCH_KINDS = listOf(
 /** The glitch toolbar: its four kinds above the kind's sliders, two to a row. */
 @Composable
 fun GlitchPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
-    val wide = widePanels()
+    val window = windowWidth()
+    val wide = sideBySide(window, GlitchSideBySide)
+    val width = if (wide) toolbarWidth(973.dp, window) else 640.dp
     Column(
-        modifier.offset(y = (-25).dp).size(if (wide) 973.dp else 640.dp, if (wide) 120.dp else 167.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(top = 8.dp),
+        modifier.offset(y = (-25).dp).size(width, if (wide) 120.dp else 167.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(top = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         KindsSwitch(466.dp, GLITCH_KINDS.map { (kind, label, width) -> Kind(kind.icon(), label, width) }, GLITCH_KINDS.indexOfFirst { it.first == vm.glitchKind }) {
@@ -1099,10 +1132,11 @@ fun GlitchPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
         }
         val values = vm.glitchValues[vm.glitchKind].orEmpty()
         Spacer(Modifier.height(12.dp))
-        // on a wide screen all in one row, 19 apart
+        // in a wide window all in one row, 19 apart
         if (wide) {
-            val each = (941.dp - 19.dp * (names.size - 1)) / names.size
-            Row(Modifier.width(941.dp).height(54.dp), horizontalArrangement = Arrangement.spacedBy(19.dp)) {
+            val inner = width - 32.dp
+            val each = (inner - 19.dp * (names.size - 1)) / names.size
+            Row(Modifier.width(inner).height(54.dp), horizontalArrangement = Arrangement.spacedBy(19.dp)) {
                 for (k in names.indices) {
                     val both = vm.glitchKind == GlitchKind.DIVERGE && k < 3
                     val v = values.getOrElse(k) { 0f }
@@ -1241,7 +1275,7 @@ fun NoisePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
             vm.chooseNoiseKind(kinds[it])
         }
     }
-    if (widePanels()) {
+    if (sideBySide(windowWidth(), NoiseSideBySide)) {
         // the sliders side by side, single or multi channel and additive in the "•••" menu
         OptionsPanel(903.dp, 113.dp, modifier, 8.dp) {
             switch()
@@ -1301,13 +1335,16 @@ private val NoiseButton get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF1
 /** The bloom toolbar: transition, size and burn. */
 @Composable
 fun BloomPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
-    if (widePanels()) {
-        // side by side, 301 wide and 39 apart
-        OptionsPanel(1013.dp, 95.dp, modifier, 24.dp) {
-            Row(Modifier.width(981.dp), horizontalArrangement = Arrangement.spacedBy(39.dp)) {
-                OptionSlider("Transition", vm.bloomTransition, shown(vm.bloomTransition, max = true), 301.dp) { vm.setBloomValue(0, it) }
-                OptionSlider("Size", vm.bloomSize, shown(vm.bloomSize, max = true), 301.dp) { vm.setBloomValue(1, it) }
-                OptionSlider("Burn", vm.bloomBurn, shown(vm.bloomBurn, max = true), 301.dp) { vm.setBloomValue(2, it) }
+    val window = windowWidth()
+    if (sideBySide(window, BloomSideBySide)) {
+        // side by side, 301 wide and 39 apart (narrower where the window is)
+        val width = toolbarWidth(1013.dp, window)
+        val slider = squeezed(301.dp, 3, 1013.dp, width)
+        OptionsPanel(width, 95.dp, modifier, 24.dp) {
+            Row(Modifier.width(width - 32.dp), horizontalArrangement = Arrangement.spacedBy(39.dp)) {
+                OptionSlider("Transition", vm.bloomTransition, shown(vm.bloomTransition, max = true), slider) { vm.setBloomValue(0, it) }
+                OptionSlider("Size", vm.bloomSize, shown(vm.bloomSize, max = true), slider) { vm.setBloomValue(1, it) }
+                OptionSlider("Burn", vm.bloomBurn, shown(vm.bloomBurn, max = true), slider) { vm.setBloomValue(2, it) }
             }
         }
         return
@@ -1348,6 +1385,8 @@ fun PluginFilterPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                         Text(control.control.label, color = HsbLabel, fontSize = 16.sp, maxLines = 1)
                         Box(Modifier.tap { vm.setPluginFilterSwitch(control.control.key, !control.control.on) }) { Switch(control.control.on, enabled = true) }
                     }
+                    // (a filter has none)
+                    is PluginControl.File -> {}
                 }
             }
         }
@@ -1469,6 +1508,7 @@ private fun QuickShapeKind.label() = when (this) {
     QuickShapeKind.LINE -> "Line"
     QuickShapeKind.POLYLINE -> "Polyline"
     QuickShapeKind.ARC -> "Arc"
+    QuickShapeKind.CURVE -> "Curve"
     QuickShapeKind.ELLIPSE -> "Ellipse"
     QuickShapeKind.CIRCLE -> "Circle"
     QuickShapeKind.TRIANGLE -> "Triangle"
@@ -1482,6 +1522,7 @@ private fun QuickShapeKind.icon() = when (this) {
     QuickShapeKind.LINE -> PcIcons.ShapeLine
     QuickShapeKind.POLYLINE -> PcIcons.ShapePolyline
     QuickShapeKind.ARC -> PcIcons.ShapeArc
+    QuickShapeKind.CURVE -> PcIcons.ShapeArc
     QuickShapeKind.ELLIPSE -> PcIcons.ShapeEllipse
     QuickShapeKind.CIRCLE -> PcIcons.ShapeCircle
     QuickShapeKind.TRIANGLE -> PcIcons.ShapeTriangle
@@ -1550,10 +1591,45 @@ fun QuickShapeHandles(vm: CanvasViewModel) {
     if (!vm.quickShapeEditing) return
     androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
         val h = info.handles
-        for (i in 0 until h.size / 2) {
-            val at = Offset(h[i * 2], h[i * 2 + 1])
-            drawCircle(Color.White, 6.5.dp.toPx(), at)
-            drawCircle(Pc.Accent, 5.dp.toPx(), at)
+        val points = List(h.size / 2) { i -> Offset(h[i * 2], h[i * 2 + 1]) }
+        // a curve's (a plugin's): each control on a line to its anchor, each anchor as it sits
+        // (round smooth, a triangle free, a square a corner, whose controls aren't shown)
+        val curve = info.kind == io.github.artcraftandroid.procraft.core.QuickShapeKind.CURVE
+        val control = Color(0xFF60E078)
+        fun owner(i: Int): Int? = when (i % 3) { 1 -> i - 1; 2 -> i + 1; else -> null }
+        fun folded(i: Int) = curve && owner(i)?.let { info.anchors.getOrNull(it / 3) == io.github.artcraftandroid.procraft.core.QuickShapeAnchor.CORNER } == true
+        if (curve) {
+            points.forEachIndexed { i, at ->
+                val anchor = owner(i)?.takeIf { !folded(i) }?.let { points.getOrNull(it) } ?: return@forEachIndexed
+                drawLine(control, anchor, at, 1.5.dp.toPx())
+            }
+        }
+        points.forEachIndexed { i, at ->
+            if (folded(i)) return@forEachIndexed
+            val ink = if (curve && i % 3 != 0) control else Pc.Accent
+            when (if (curve && i % 3 == 0) info.anchors.getOrNull(i / 3) else null) {
+                io.github.artcraftandroid.procraft.core.QuickShapeAnchor.BROKEN -> {
+                    val r = 7.5.dp.toPx()
+                    val tri = androidx.compose.ui.graphics.Path().apply {
+                        moveTo(at.x, at.y - r)
+                        lineTo(at.x - r * 0.87f, at.y + r * 0.5f)
+                        lineTo(at.x + r * 0.87f, at.y + r * 0.5f)
+                        close()
+                    }
+                    drawPath(tri, ink)
+                    drawPath(tri, Color.White, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx()))
+                }
+                io.github.artcraftandroid.procraft.core.QuickShapeAnchor.CORNER -> {
+                    val outer = 13.dp.toPx()
+                    val inner = 10.dp.toPx()
+                    drawRect(Color.White, Offset(at.x - outer / 2, at.y - outer / 2), androidx.compose.ui.geometry.Size(outer, outer))
+                    drawRect(ink, Offset(at.x - inner / 2, at.y - inner / 2), androidx.compose.ui.geometry.Size(inner, inner))
+                }
+                else -> {
+                    drawCircle(Color.White, 6.5.dp.toPx(), at)
+                    drawCircle(ink, 5.dp.toPx(), at)
+                }
+            }
         }
     }
 }

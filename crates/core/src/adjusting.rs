@@ -522,6 +522,10 @@ impl CanvasSession {
     /// can't be adjusted. The amount starts at none (a gradient map's at all of it), HSB, colour
     /// balance and curves as they were; the other adjustments keep their settings.
     pub fn adjustment_start(&self, adjustment: Adjustment) -> bool {
+        // Liquify leaves an alpha locked layer alone
+        if self.why_not_adjusted(adjustment) == Some(crate::layers::Blocked::AlphaLocked) {
+            return false;
+        }
         self.adjustment_end(true);
         let begun = match adjustment {
             Adjustment::Liquify => self.liquify_begin(),

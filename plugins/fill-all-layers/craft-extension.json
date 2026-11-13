@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.fill-all-layers",
+  "name": "ColorDrop fills by all layers",
+  "version": "1.2.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "ColorDrop fills up to the lines on every layer you see, not only the current one.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["fill_all_layers"]
+}

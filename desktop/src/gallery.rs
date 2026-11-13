@@ -120,6 +120,8 @@ pub enum Asked {
     New(CanvasPreset, Option<String>),
     /// A new artwork the screen's size, in this folder.
     ScreenSize(Option<String>),
+    /// A new artwork of a plugin's kind (`<id>.<key>`), the screen's size, in this folder.
+    PluginKind(String, Option<String>),
     Import(Option<String>),
     Photo(Option<String>),
     /// These artworks written as this format, where the user picks.
@@ -201,6 +203,8 @@ pub struct Gallery {
     duplicating: Vec<std::sync::mpsc::Receiver<()>>,
     new_open: bool,
     presets: Vec<CanvasPreset>,
+    /// The kinds of artwork the plugins on make: the New canvas list's last rows.
+    pub kinds: Vec<procraft_core::PluginKind>,
     /// The screen's size, pixels: Screen Size's canvas.
     pub screen_px: (u32, u32),
     /// Select: on, the artworks picked (by folder), More's list open, the picked artworks shown
@@ -345,6 +349,7 @@ impl Gallery {
             duplicating: Vec::new(),
             new_open: false,
             presets,
+            kinds: Vec::new(),
             screen_px: (1920, 1080),
             selecting: false,
             picked: Vec::new(),
@@ -1841,7 +1846,9 @@ impl Gallery {
         let left = screen.right() - 2.0 - NEW_WIDTH;
         let arrow = screen.right() - 49.0 - left;
         let list_height = (45.0 + 45.0 * self.presets.len().saturating_sub(1) as f32).min(PRESETS_MOST);
-        let height = panel::ARROW_HEIGHT + NEW_HEADER + 38.0 + 9.5 + list_height + 30.0;
+        // a row more for each kind of artwork a plugin makes
+        let kinds_height = self.kinds.len() as f32 * (9.5 + 38.0);
+        let height = panel::ARROW_HEIGHT + NEW_HEADER + 38.0 + 9.5 + list_height + kinds_height + 30.0;
         let rect = Rect::from_min_size(pos2(left, screen.top() + 56.5), vec2(NEW_WIDTH, height));
         let mut asked = None;
         let mut close = false;
@@ -1881,6 +1888,16 @@ impl Gallery {
             }
             let list = Rect::from_min_size(pos2(row.left(), row.bottom() + 9.5), vec2(row.width(), list_height));
             ui.painter().rect_filled(list, 24.0, argb(LIGHT_ROW));
+            // the plugins' kinds of artwork under the presets, each the screen's size
+            for (k, kind) in self.kinds.iter().enumerate() {
+                let at = list.bottom() + 9.5 + k as f32 * (9.5 + 38.0);
+                let line = Rect::from_min_size(pos2(row.left(), at), vec2(row.width(), 38.0));
+                ui.painter().rect_filled(line, 19.0, argb(LIGHT_ROW_STRONG));
+                preset_row(ui, line, &kind.label, &format!("{sw} \u{d7} {sh}px"), P3);
+                if ui.interact(line, ui.scope_id().with(("plugin kind", k)), Sense::click()).clicked() {
+                    asked = Some(Asked::PluginKind(kind.key.clone(), self.folder()));
+                }
+            }
             let presets = self.presets.clone();
             ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
                 ui.set_clip_rect(list);

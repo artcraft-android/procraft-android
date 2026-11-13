@@ -298,7 +298,7 @@ impl Brush {
             "scatter" => self.shape.scatter = unit * 2.0,
             "count" => self.shape.count = 1 + (unit * (MAX_COUNT - 1) as f32).round() as u32,
             "randomized" => self.shape.randomise = on,
-            "roundness" => self.shape.roundness = unit.max(0.05),
+            "roundness" => self.shape.roundness = unit.max(crate::stroke::LEAST_ROUNDNESS),
             "shape_angle" => self.shape.rotation = value.rem_euclid(1.0) * std::f32::consts::TAU,
             "grain_behavior" => self.grain.mode = if on { GrainMode::Texturized } else { GrainMode::Moving },
             "grain_scale" => self.grain.scale = (unit * MAX_GRAIN_SCALE).max(LEAST_GRAIN_SCALE),
@@ -345,6 +345,10 @@ impl Brush {
             // choices of three, kept by their place in the list
             "shape_filtering" | "grain_filtering" | "cursor_outline" | "hover_fill" | "relative_to_stroke" => {
                 self.extra.insert(key.to_owned(), value.round().clamp(0.0, 2.0));
+            }
+            // a plugin's row: a choice, by its place
+            _ if key.starts_with("plugin:") => {
+                self.extra.insert(key.to_owned(), value.round().clamp(0.0, 255.0));
             }
             _ => {
                 self.extra.insert(key.to_owned(), both);

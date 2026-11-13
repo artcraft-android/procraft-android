@@ -115,7 +115,6 @@ pub enum Picked {
 enum Mode {
     Canvas,
     Image,
-    Face,
     /// The model, turned by a finger or the mouse.
     Model,
 }
@@ -195,9 +194,9 @@ impl Reference {
         *self = Reference {
             on: w.shown,
             mode: match w.shows {
-                ReferenceShows::Canvas => Mode::Canvas,
                 ReferenceShows::Image => Mode::Image,
-                ReferenceShows::Face => Mode::Face,
+                // a face needs face tracking, which this app doesn't have: the canvas shows
+                ReferenceShows::Canvas | ReferenceShows::Face => Mode::Canvas,
                 ReferenceShows::Model => Mode::Model,
             },
             at: w.placed.then(|| pos2(w.x, w.y)),
@@ -218,7 +217,6 @@ impl Reference {
             shows: match self.mode {
                 Mode::Canvas => ReferenceShows::Canvas,
                 Mode::Image => ReferenceShows::Image,
-                Mode::Face => ReferenceShows::Face,
                 Mode::Model => ReferenceShows::Model,
             },
             sized: self.size != START,
@@ -367,11 +365,12 @@ impl Reference {
             let shown = match self.mode {
                 Mode::Canvas | Mode::Model => self.canvas.as_ref(),
                 Mode::Image => self.image.as_ref(),
-                Mode::Face => None,
             };
             // and how it sits there, for the bars' glass
             let mut placed = None;
-            let touched = ui.interact(area, ui.scope_id().with("picture"), Sense::click_and_drag());
+            // (all but the window's top, where the grab line's strip moves the window)
+            let held = area.intersect(Rect::everything_below(window.top() + GRAB));
+            let touched = ui.interact(held, ui.scope_id().with("picture"), Sense::click_and_drag());
             if let Some(t) = shown {
                 let [w, h] = t.size().map(|v| v.max(1) as f32);
                 let sizes = ReferenceSizes {
@@ -408,23 +407,13 @@ impl Reference {
                     argb(MUTED),
                 );
                 import |= ui.interact(button, ui.scope_id().with("import image"), Sense::click()).clicked();
-            } else if self.mode == Mode::Face {
-                text(
-                    ui.painter(),
-                    area.center(),
-                    Align2::CENTER_CENTER,
-                    "Not available on this device",
-                    14.0,
-                    Weight::Regular,
-                    argb(MUTED),
-                );
             }
             // (letting go of the eyedropper is no click)
             if picked.is_none() {
                 self.clicks(ui, &touched);
             }
             let glass = if self.mode == Mode::Image { self.image_glass.clone() } else { self.canvas_glass.clone() };
-            let glass = placed.zip(glass.filter(|_| self.mode != Mode::Face));
+            let glass = placed.zip(glass);
             // what a bar has behind it: the window, and the picture blurred
             let over_picture = |ui: &egui::Ui, bar: Rect, corners: egui::CornerRadius| {
                 ui.painter().rect_filled(bar, corners, argb(PICTURE));
@@ -460,7 +449,10 @@ impl Reference {
                     argb(TITLE),
                 );
                 // what's on a bar takes its touches, and the rest of it holds them off the picture
-                ui.interact(bar.intersect(window), ui.scope_id().with("top bar"), Sense::click_and_drag());
+                // (all but its top, where the grab line's strip moves the window: a press there is the
+                // strip's, not the bar's)
+                let held = bar.intersect(window).intersect(Rect::everything_below(window.top() + GRAB));
+                ui.interact(held, ui.scope_id().with("top bar"), Sense::click_and_drag());
                 let x_button =
                     Rect::from_center_size(pos2(bar.right() - 10.0 - 21.5, bar.center().y), vec2(43.0, 43.0));
                 painter.circle_filled(x_button.center(), 21.5, argb(CLOSE));
@@ -493,18 +485,20 @@ impl Reference {
                         right = shown.left() - 12.0;
                     }
                 }
-                // the bottom bar: Canvas, Image and Face
+                // the bottom bar: Canvas and Image, and on a model the model itself (no Face without
+                // face tracking)
                 let corners = egui::CornerRadius { nw: 0, ne: 0, sw: CORNER as u8, se: CORNER as u8 };
                 over_picture(ui, bottom, corners);
                 ui.interact(bottom.intersect(window), ui.scope_id().with("bottom bar"), Sense::click_and_drag());
                 let track = Rect::from_center_size(bottom.center(), vec2(270.0, 35.0));
                 ui.painter().rect_filled(track, 17.5, argb(SEGMENT_TRACK));
-                let item = (track.width() - 4.0 - 22.0) / 3.0;
-                // on a model the third is the model itself
-                let third = if session.model_info().is_some() { (Mode::Model, "3D") } else { (Mode::Face, "Face") };
-                for (i, (mode, label)) in
-                    [(Mode::Canvas, "Canvas"), (Mode::Image, "Image"), third].into_iter().enumerate()
-                {
+                let mut kinds = vec![(Mode::Canvas, "Canvas"), (Mode::Image, "Image")];
+                if session.model_info().is_some() {
+                    kinds.push((Mode::Model, "3D"));
+                }
+                let gaps = 11.0 * (kinds.len() - 1) as f32;
+                let item = (track.width() - 4.0 - gaps) / kinds.len() as f32;
+                for (i, (mode, label)) in kinds.into_iter().enumerate() {
                     let cell =
                         Rect::from_min_size(track.min + vec2(2.0 + (item + 11.0) * i as f32, 2.0), vec2(item, 31.0));
                     let on = self.mode == mode;
@@ -707,6 +701,56 @@ const SCROLL_ZOOM: f32 = 0.005;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where the window is after a drag by the mouse from `grab` (points from its top left) by `by`.
+    fn dragged_by(grab: Vec2, by: Vec2) -> Option<(Pos2, Pos2)> {
+        use egui::{Event, Modifiers, PointerButton, RawInput};
+        let session = CanvasSession::new(64, 64);
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let mut reference = Reference { on: true, ..Reference::default() };
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0));
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let mut started = None;
+        for step in 0..30 {
+            let from = reference.at.unwrap_or(Pos2::ZERO);
+            let events = match step {
+                5 => {
+                    started = reference.at;
+                    vec![Event::PointerMoved(from + grab)]
+                }
+                6 => vec![press(from + grab, true)],
+                7..=15 => {
+                    let start = started.unwrap_or(from) + grab;
+                    vec![Event::PointerMoved(start + by * (step - 6) as f32 / 9.0)]
+                }
+                16 => vec![press(started.unwrap_or(from) + grab + by, false)],
+                _ => Vec::new(),
+            };
+            let raw = RawInput {
+                screen_rect: Some(screen),
+                time: Some(f64::from(step) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                reference.show(ui.ctx(), &mut look, &session, Duration::ZERO);
+            });
+            output.textures_delta.clear();
+        }
+        Some((started?, reference.at?))
+    }
+
+    #[test]
+    fn the_window_moves_by_its_grab_line() {
+        let Some((from, to)) = dragged_by(vec2(100.0, 6.0), vec2(-200.0, -100.0)) else { return };
+        assert_eq!(to - from, vec2(-200.0, -100.0));
+    }
 
     #[test]
     fn the_window_shows_on_a_short_screen_whole_and_where_its_handles_reach() {

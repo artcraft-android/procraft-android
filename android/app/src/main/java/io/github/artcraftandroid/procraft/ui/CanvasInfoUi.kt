@@ -82,7 +82,7 @@ private val Placeholder get() = if (Pc.light) Color(0xFFB8B8BC) else Color(0xFF6
 private val SignLine get() = if (Pc.light) Color(0xFF9A9A9A) else Color(0xFF494949)
 private val CapsuleFill get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1A1A1A)
 private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF373737)
-private val DoneBlue = Color(0xFF0190FF)
+private val DoneBlue get() = Pc.tinted(Color(0xFF0190FF))
 private val CardCorner = 25.dp
 
 /** Where a wide screen's page starts and ends, beside the pages' card. */

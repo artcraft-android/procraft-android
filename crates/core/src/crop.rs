@@ -266,7 +266,10 @@ impl CanvasSession {
         st.selection = None;
         st.view = Some(st.fitted_view());
         st.reconfigure = true;
+        // the files saved are the other canvas's, at its size: every layer is saved again
+        let ids: Vec<_> = st.doc.pixel_layer_ids().collect();
         if let Some(c) = st.canvas.as_mut() {
+            c.mark_changed(ids);
             c.invalidate();
         }
         st.revision += 1;

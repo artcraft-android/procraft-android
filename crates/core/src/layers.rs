@@ -396,7 +396,28 @@ impl CanvasSession {
     /// A new empty layer above the current one, made current; 0 when the canvas has no room for
     /// another (see [`Document::layer_cap`]).
     pub fn add_layer(&self) -> u64 {
-        self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
+        let id = self.add_layer_quietly();
+        // a layer added by hand: plugins told
+        if id != 0 {
+            self.tell_plugins(crate::plugin_run::Hook::LayerAdded);
+        }
+        id
+    }
+
+    /// Add Frame (New Page with Page Assist): a new empty layer above the current one, as
+    /// [`Self::add_layer`], named "Frame N" ("Page N") by the frames there are with it.
+    pub fn add_frame(&self) -> u64 {
+        self.change("new layer", |d| {
+            if !d.has_room(1) {
+                return None;
+            }
+            let pages = d.animation.as_ref().is_some_and(|a| a.pages);
+            let id = d.add_layer();
+            let n = procraft_engine::animation::frames(d).len();
+            d.rename(id, &format!("{} {n}", if pages { "Page" } else { "Frame" }));
+            Some(id.0)
+        })
+        .unwrap_or(0)
     }
 
     /// Makes `id` the layer painting goes to, and the only one chosen (no picks): an undo step,
@@ -609,6 +630,15 @@ impl CanvasSession {
         }
     }
 
+    /// Why `adjustment` can't start on the current layer, if it can't: as [`Self::why_blocked`],
+    /// and Liquify turns away a layer whose alpha is locked.
+    pub fn why_not_adjusted(&self, adjustment: crate::adjust_menu::Adjustment) -> Option<Blocked> {
+        self.why_blocked().or_else(|| {
+            let liquify = adjustment == crate::adjust_menu::Adjustment::Liquify;
+            (liquify && self.layers().iter().any(|l| l.current && l.alpha_lock)).then_some(Blocked::AlphaLocked)
+        })
+    }
+
     /// Why a change to the current layer would go unseen, if it would (what a hidden alert
     /// says, [`Blocked::Hidden`] and [`Blocked::GroupHidden`]).
     pub fn hidden_by(&self) -> Option<HiddenBy> {
@@ -718,20 +748,14 @@ impl CanvasSession {
     }
 
     /// Shows layer `id` alone, the others left out of the picture (solo visibility), or with
-    /// none every layer as it is set again. Not an undo step; false if `id` isn't a layer.
+    /// none every layer as it is set again: an undo step, as the reference's is. False if `id`
+    /// isn't a layer.
     pub fn set_solo(&self, id: Option<u64>) -> bool {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
         let solo = id.map(LayerId);
-        if solo.is_some_and(|s| st.doc.layer(s).is_none()) {
+        if solo.is_some_and(|s| self.shared.lock().doc.layer(s).is_none()) {
             return false;
         }
-        st.doc.solo = solo;
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.invalidate();
-        }
-        st.revision += 1;
-        self.shared.frame(st);
+        self.change("Solo visibility", |d| (d.solo != solo).then(|| d.solo = solo));
         true
     }
 
@@ -762,7 +786,18 @@ impl CanvasSession {
 
     /// Opacity 0..1; `done` ends the drag (one undo step for the whole drag).
     pub fn set_layer_opacity(&self, id: u64, opacity: f32, done: bool) -> bool {
-        self.change_live("layer opacity", done, |d| d.set_opacity(LayerId(id), opacity))
+        // a plugin moving picked layers together: each of them, if this is one
+        let hooks = self.shared.lock().hooks.clone();
+        let together = hooks.is_some_and(|hooks| hooks.opacity_together());
+        self.change_live("layer opacity", done, |d| {
+            let chosen = d.chosen();
+            if !(together && chosen.len() > 1 && chosen.contains(&LayerId(id))) {
+                return d.set_opacity(LayerId(id), opacity);
+            }
+            let layers: Vec<LayerId> =
+                chosen.into_iter().filter(|&c| d.layer(c).is_some_and(|l| l.kind != LayerKind::Mask)).collect();
+            layers.into_iter().fold(false, |any, c| d.set_opacity(c, opacity) | any)
+        })
     }
 
     /// `blend` is a blend mode id (see [`blend_modes`]).
@@ -856,11 +891,16 @@ impl CanvasSession {
     /// [`Self::canvas_thumbnail`], but without the private layers, so a private insert or paste
     /// never shows in the replay or its video. None before the canvas exists.
     pub fn time_lapse_frame(&self, max_side: u32) -> Option<ThumbnailImage> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
-        let private = st.doc.private_layers();
-        let t = canvas.composite_thumbnail_without(gpu, &mut st.doc, max_side, &private).ok()?;
+        // the copy started under the lock, waited for once it is let go: touches and frames go
+        // on while the GPU copies it
+        let pending = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
+            let private = st.doc.private_layers();
+            canvas.start_composite_thumbnail_without(gpu, &mut st.doc, max_side, &private)
+        };
+        let t = pending.pixels().ok()?;
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
@@ -881,10 +921,30 @@ impl CanvasSession {
 
     /// The layer scaled to fit `max_side` pixels, or none before the canvas exists.
     pub fn layer_thumbnail(&self, id: u64, max_side: u32) -> Option<ThumbnailImage> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
-        match canvas.layer_thumbnail(gpu, &mut st.doc, LayerId(id), max_side) {
+        // each read started under the lock and waited for once it is let go, so touches and
+        // frames go on meanwhile (thumbnails are read after every change while Layers is open)
+        let id = LayerId(id);
+        let no_canvas = || procraft_gpu::GpuError::Readback("no canvas".into());
+        let read = || -> Result<procraft_gpu::Thumbnail, procraft_gpu::GpuError> {
+            let first = {
+                let mut guard = self.shared.lock();
+                let st = &mut *guard;
+                let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Err(no_canvas()) };
+                canvas.start_layer_thumbnail(gpu, &mut st.doc, id, max_side)?
+            };
+            let (coarse, mask) = match first {
+                procraft_gpu::LayerThumbnailStep::Ready(t) => return Ok(t),
+                procraft_gpu::LayerThumbnailStep::Coarse { pending, mask } => (pending.pixels()?, mask),
+            };
+            let fine = {
+                let mut guard = self.shared.lock();
+                let st = &mut *guard;
+                let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Err(no_canvas()) };
+                canvas.start_layer_thumbnail_fine(gpu, id, &coarse, mask, max_side)?
+            };
+            fine.pixels()
+        };
+        match read() {
             Ok(t) => Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba }),
             Err(e) => {
                 log::warn!("thumbnail: {e}");
@@ -1064,6 +1124,8 @@ pub enum Blocked {
     /// A group is current where a stroke or a fill takes a layer
     /// ([`CanvasSession::why_unpainted`]).
     Group,
+    /// Liquify on a layer whose alpha is locked ([`CanvasSession::why_not_adjusted`]).
+    AlphaLocked,
 }
 
 /// Why a change to the current layer would go unseen (see [`CanvasSession::hidden_by`]).
@@ -1124,6 +1186,15 @@ fn unit_of(layers: &[LayerInfo], l: &LayerInfo) -> std::collections::HashSet<u64
         })
         .map(|o| o.id)
         .collect()
+}
+
+impl CanvasSession {
+    /// A new empty layer above the current one, as [`CanvasSession::add_layer`] adds, telling no
+    /// plugin: for the core's own work that makes one (a picture of a model, a selection copied to a
+    /// layer, a plugin's own).
+    pub(crate) fn add_layer_quietly(&self) -> u64 {
+        self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

@@ -56,11 +56,13 @@ mod shortcuts;
 mod sound;
 mod source_editor;
 mod startup;
+mod stroke_sound;
 mod studio;
 mod system_clipboard;
 mod text;
 mod timelapse;
 mod tool_header;
+mod touch_keyboard;
 mod transform;
 mod transform_numeric;
 mod ui;
@@ -129,8 +131,35 @@ impl Importing {
     }
 }
 
-/// What the layers' textures may take on the GPU, bytes: as much as the layers may (2 GiB).
+/// What the layers' textures may take on the GPU, bytes: past it, the layers not worked on are kept
+/// compressed in memory until needed.
 const LAYERS_ON_GPU: u64 = 2 << 30;
+
+/// The computer's memory, bytes; none if the system doesn't say.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn memory_total() -> Option<u64> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    // SAFETY: `status` is a MEMORYSTATUSEX with its length set, as the call asks
+    unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+    Some(status.ullTotalPhys).filter(|&b| b > 0)
+}
+
+/// The computer's memory, bytes; none if the system doesn't say.
+#[cfg(target_os = "macos")]
+fn memory_total() -> Option<u64> {
+    Some(objc2_foundation::NSProcessInfo::processInfo().physicalMemory()).filter(|&b| b > 0)
+}
+
+/// The computer's memory, bytes; none if the system doesn't say.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn memory_total() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find_map(|l| l.strip_prefix("MemTotal:"))?;
+    let kb: u64 = line.trim().strip_suffix("kB")?.trim().parse().ok()?;
+    Some(kb * 1024).filter(|&b| b > 0)
+}
 
 /// How long an artwork opens before it says so, as the tablet's.
 const SLOW_OPENING: Duration = Duration::from_millis(500);
@@ -171,17 +200,47 @@ fn veil(ctx: &egui::Context, what: &str) {
     });
 }
 
+/// How long the canvases' pipelines are made before the window says so (on a slow GPU's shader
+/// compiler they take a minute or more, and a canvas opened meanwhile waits for them).
+const CANVASES_SLOW: Duration = Duration::from_secs(2);
+/// What the window says meanwhile.
+const GETTING_READY: &str = "Getting the canvas ready…";
+
+/// What a canvas's veil says while it opens: while the pipelines it waits for are still being
+/// made (`waiting`), that.
+fn opening_words(waiting: bool) -> &'static str {
+    if waiting { GETTING_READY } else { "Opening…" }
+}
+
+/// At the gallery's foot while the canvases' pipelines are still being made: a note saying so,
+/// over the gallery, which takes its presses as ever.
+fn getting_ready_note(ctx: &egui::Context) {
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("getting ready")));
+    let ink = look::argb(look::pc::TEXT);
+    let wide = painter.layout_no_wrap(GETTING_READY.to_owned(), look::Weight::Regular.font(15.0), ink).size().x;
+    let note = egui::Rect::from_center_size(
+        egui::pos2(screen.center().x, screen.bottom() - 24.0 - 18.0),
+        egui::vec2(wide + 36.0, 36.0),
+    );
+    painter.rect_filled(note, 18.0, look::argb(look::pc::BAR));
+    look::text(&painter, note.center(), egui::Align2::CENTER_CENTER, GETTING_READY, 15.0, look::Weight::Regular, ink);
+}
+
 fn main() {
     // the log, to the app folder's file too, and a crash's message into it
     startup::init();
-    // the layers' textures may take what the layers themselves may (the engine's budget): none is
-    // ever kept off the GPU, but the composite is made around the layers not being worked on, so
-    // a frame composites only those (as the tablet's)
+    // the layers may take half the computer's memory, as on the tablet (so how many a canvas holds
+    // grows with it), their textures up to 2 GiB of it; the composite is made around the layers
+    // not being worked on, so a frame composites only those
+    if let Some(total) = memory_total() {
+        procraft_core::set_layer_budget(total / 2);
+    }
     procraft_core::set_resident_budget(LAYERS_ON_GPU);
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
         Err(e) => {
-            log::error!("no event loop: {e}");
+            startup::stopped(&format!("it couldn't make its window's event loop: {e}"));
             return;
         }
     };
@@ -197,6 +256,7 @@ fn main() {
         last_frame: Instant::now(),
         again: None,
         finishing_since: None,
+        stroke_sound: stroke_sound::StrokeSound::default(),
         opening: None,
         importing: None,
         reading_artwork: None,
@@ -216,18 +276,19 @@ fn main() {
         // the gallery does
         dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
+        interface_touches: input::InterfaceTouches::default(),
         closed: false,
     };
     // a panic on the window's thread ends the app: said, rather than the window just vanishing
     // (its message and place are in the log already)
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| event_loop.run_app(&mut app))) {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => log::error!("event loop: {e}"),
+        Ok(Err(e)) => startup::stopped(&format!("its window's event loop stopped: {e}")),
         Err(panic) => {
             if let Some(screen) = &app.screen {
                 screen.window.set_visible(false);
             }
-            startup::say_stopped(procraft_gpu::panic_message(panic.as_ref()));
+            startup::stopped(procraft_gpu::panic_message(panic.as_ref()));
             // what the app held is let go by the system: a driver that panicked may not take it back
             std::process::exit(101);
         }
@@ -244,6 +305,8 @@ struct App {
     again: Option<Instant>,
     /// Since when a plugin has been finishing a fill.
     finishing_since: Option<Instant>,
+    /// The strokes' sound, played while a plugin makes it.
+    stroke_sound: stroke_sound::StrokeSound,
     /// An artwork's canvas being made on a thread of its own as it opens, and since when.
     opening: Option<(Instant, std::thread::JoinHandle<()>)>,
     /// Artworks being brought in, read on a thread of their own one after another.
@@ -276,6 +339,8 @@ struct App {
     dropped: Vec<std::path::PathBuf>,
     /// Tap Assistance: a lone finger's touch, where it landed and when, while it is held there.
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
+    /// Which touch the interface follows: a finger on it beside a hand resting on the canvas.
+    interface_touches: input::InterfaceTouches,
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
     closed: bool,
 }
@@ -316,18 +381,29 @@ impl ApplicationHandler for App {
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                log::error!("no window: {e}");
+                startup::stopped(&format!("it couldn't open its window: {e}"));
                 event_loop.exit();
                 return;
             }
         };
         // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
         pen::watch(&window, self.wake.clone());
-        // from the backend the last run used, or the next if that run never ended
-        let from = startup::gpu_start(procraft_gpu::Gpu::backend_count());
+        // the brushes read while the gallery shows, so the first artwork opens without reading them
+        let read = std::thread::Builder::new().name("procraft-read-brushes".to_owned());
+        if let Err(e) = read.spawn(|| procraft_core::prepare_brushes(files::brushes_dir())) {
+            log::warn!("reading the brushes ahead: {e}");
+        }
+        // in this machine's order, from the backend the last run used, or the next if that one
+        // was at risk when it stopped
+        let order = startup::backend_order();
+        let from = startup::gpu_start(order);
+        // the canvases' pipelines kept between runs, where the GPU can
+        procraft_gpu::keep_pipelines_in(files::app_dir());
+        // what the start waits for logged while it does
+        startup::watch_start(self.wake.clone());
         let tried = startup::gpu_tried();
         let display = event_loop.owned_display_handle();
-        let screen = match Screen::new(window, &display, from, tried, startup::gpu_trying, self.wake.clone()) {
+        let screen = match Screen::new(window, &display, order, from, tried, startup::gpu_trying, self.wake.clone()) {
             Ok((s, backend)) => {
                 startup::gpu_made(backend);
                 s
@@ -361,31 +437,65 @@ impl ApplicationHandler for App {
         let Some(event) = self.tap_assist(event) else { return };
         let Some(screen) = self.screen.as_mut() else { return };
         let session = self.session.clone();
+        // a finger or a pen pressing brings the on-screen keyboard up for a field it focuses (a
+        // tablet's pen that moves the mouse as well as the system's pen)
+        match &event {
+            WindowEvent::Touch(t) if t.phase == winit::event::TouchPhase::Started => {
+                screen.touch_keyboard.touched(Instant::now());
+            }
+            WindowEvent::MouseInput { state: winit::event::ElementState::Pressed, .. } => {
+                screen.touch_keyboard.clicked(crate::pen::mouse_pen().is_some(), Instant::now());
+            }
+            _ => {}
+        }
         // on the canvas Ctrl+X, C and V are the app's shortcuts (a layer cut, copied or pasted,
         // from a clipboard of its own, the system's perhaps empty); a text field keeps them for
         // the system's clipboard
         let canvas_keys = session.is_some() && !screen.egui.egui_ctx().egui_wants_keyboard_input();
         screen.egui.set_clipboard_shortcuts(!canvas_keys);
-        let response = screen.egui.on_window_event(&screen.window, &event);
+        // a finger landing on the interface while a hand rests on the canvas takes the pointer over
+        let canvas = self.ui.canvas_rect;
+        let heard = self.interface_touches.route(event.clone(), |p| screen.over_interface(p, canvas));
+        let mut response = egui_winit::EventResponse { consumed: false, repaint: false };
+        for each in &heard {
+            let one = screen.egui.on_window_event(&screen.window, each);
+            response.consumed |= one.consumed;
+            response.repaint |= one.repaint;
+        }
         // egui counts every redraw as wanting another; the frames it does want come from its
         // repaint delay, paced in `about_to_wait`
         if response.repaint && event != WindowEvent::RedrawRequested {
             screen.window.request_redraw();
         }
+        // F11: the window fills its screen without its frame (a pen display's whole screen for
+        // the canvas, as the tablet's), or goes back to a window
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event
+            && key.state.is_pressed()
+            && !key.repeat
+            && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11)
+        {
+            let full = screen.window.fullscreen().is_none();
+            screen.window.set_fullscreen(full.then_some(winit::window::Fullscreen::Borderless(None)));
+        }
         match event {
             WindowEvent::CloseRequested => {
                 // the artwork open is kept in the gallery, and files still being written finish
+                let waits = self.hide_while_opening();
                 if self.leave_artwork() {
                     files::finish_writing();
                     files::tell_what_was_told();
                     self.closed = true;
                     event_loop.exit();
+                } else if waits && let Some(screen) = &self.screen {
+                    screen.window.set_visible(true);
                 }
             }
             WindowEvent::Resized(size) => {
                 screen.resize(size.width, size.height);
                 if let Some(session) = &session {
                     session.resize_window(size.width, size.height);
+                    // minimised, time on the artwork stops counting; back, it counts again
+                    session.set_tracking(!screen.minimised());
                 }
                 screen.window.request_redraw();
             }
@@ -423,6 +533,8 @@ impl ApplicationHandler for App {
 
     /// A pen read by the app itself moved: its touches and hovering, as winit's would come.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
+        // (the start's watch asks too)
+        startup::answered();
         let Some(window) = self.screen.as_ref().map(|s| (s.window.id(), s.window.scale_factor())) else { return };
         for event in pen::take_events(window.1) {
             self.window_event(event_loop, window.0, event);
@@ -439,6 +551,7 @@ impl ApplicationHandler for App {
         if std::mem::replace(&mut self.closed, true) {
             return;
         }
+        self.hide_while_opening();
         if !self.leave_artwork() {
             log::error!("the artwork open couldn't be kept as the app ended");
         }
@@ -463,6 +576,10 @@ impl ApplicationHandler for App {
         }
         if let Some(fine) = self.screen.as_mut().and_then(Screen::canvases_made) {
             self.canvases_made(fine, event_loop);
+            // the gallery's note that they are being made goes
+            if let Some(screen) = &self.screen {
+                screen.window.request_redraw();
+            }
         }
         // what the files written meanwhile had to say; looked at again soon while any is writing
         files::tell_what_was_told();
@@ -512,18 +629,25 @@ impl App {
         let size = screen.window.inner_size();
         let scale = screen.window.scale_factor() as f32;
         session.set_display_scale(scale);
+        // the system's ask for less motion: a dropped colour's fill shows at once
+        session.set_reduce_motion(colour_drop::reduce_motion());
+        // until it shows, a driver crashing counts against the backend (unless a canvas has drawn
+        // on it before)
+        startup::canvas_opening();
         // its layers go up on a thread of their own (an artwork of many takes seconds), the window
         // drawing meanwhile
         let (gpu, opened) = (screen.gpu.clone(), session.clone());
         self.opening = Some((Instant::now(), std::thread::spawn(move || opened.use_gpu(gpu))));
         // the brushes as the last artwork left them
         if let Some(last) = &self.session {
-            last.keep_brushes(files::brushes_dir());
+            files::keep_brushes(last);
         }
         session.open_brushes(files::brushes_dir());
         self.ui.opened(&session, scale * screen.egui.egui_ctx().zoom_factor());
         session.show_in(size.width, size.height);
         self.input = input::Input::default();
+        // time on it counts while it is shown (not while the window is minimised)
+        session.set_tracking(!screen.minimised());
         self.session = Some(session);
         screen.window.request_redraw();
     }
@@ -566,6 +690,13 @@ impl App {
         if self.screen.is_none() {
             return;
         }
+        // on OpenGL nothing is drawn while the canvases' pipelines are made (see
+        // `Screen::gl_busy`), and nothing that would draw is taken in: looked at again soon (the
+        // window answers meanwhile)
+        if self.screen.as_ref().is_some_and(Screen::gl_busy) {
+            self.again = Some(Instant::now() + Duration::from_millis(100));
+            return;
+        }
         self.take_dropped();
         self.imported();
         self.artwork_read();
@@ -603,7 +734,11 @@ impl App {
         // an export shows its own card; the veil is for a slow save
         let exporting = !self.ui.export_card.busy()
             && files::exporting_since().is_some_and(|since| since.elapsed() >= SLOW_OPENING);
+        // a canvas opening while the pipelines are still being made waits for them: it says so
+        let opening = opening_words(self.opening.is_some() && screen.canvases_waited().is_some());
         screen.size_interface(self.ui.plugins(), Some(session.as_ref()));
+        // the strokes heard while a plugin makes their sound
+        self.stroke_sound.follow(Some(&session), self.ui.plugins().makes_stroke_sound());
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
@@ -612,7 +747,7 @@ impl App {
                 zoom.over_canvas(ui.ctx(), &mut self.gallery, &mut self.ui.look);
             }
             if slow {
-                opening_veil(ui.ctx());
+                veil(ui.ctx(), opening);
             } else if exporting {
                 veil(ui.ctx(), "Exporting…");
             } else if finishing_slowly {
@@ -650,7 +785,14 @@ impl App {
             p.draw(&screen.gpu, Some(&session));
         }
         if std::mem::take(&mut self.ui.keep_brushes) {
-            session.keep_brushes(files::brushes_dir());
+            // off the window's thread: a library with many brushes brought in is tens of megabytes
+            // when something in it changed (a brush chosen only writes the choices)
+            let kept = Arc::clone(&session);
+            let thread = std::thread::Builder::new().name("procraft-keep-brushes".to_owned());
+            if let Err(e) = thread.spawn(move || files::keep_brushes(&kept)) {
+                log::warn!("keeping the brushes on a thread of their own: {e}");
+                files::keep_brushes(&session);
+            }
         }
         for action in std::mem::take(&mut self.ui.actions) {
             self.act(action, &session);
@@ -662,6 +804,7 @@ impl App {
         let Some(screen) = self.screen.as_mut() else { return };
         self.last_frame = Instant::now();
         screen.size_interface(self.ui.plugins(), None);
+        self.stroke_sound.follow(None, false);
         let raw = screen.egui.take_egui_input(&screen.window);
         let mut asked = None;
         let (gallery, interface) = (&mut self.gallery, &mut self.ui);
@@ -674,6 +817,10 @@ impl App {
                     || photo.as_ref().is_some_and(|(since, ..)| since.elapsed() >= SLOW_OPENING),
             ),
         };
+        // the canvases' pipelines still being made after a moment: said at the gallery's foot
+        let waited = screen.canvases_waited();
+        // (on OpenGL from the first frame, which stays while they are made)
+        let getting_ready = waited.is_some_and(|w| w >= CANVASES_SLOW) || screen.canvases_later();
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             interface.style_once(ui.ctx());
             // closing: the gallery settling back into place, the canvas fading over it
@@ -682,6 +829,8 @@ impl App {
                 Some(zoom) => zoom.over_gallery(ui.ctx()),
                 None => zoom::Zoom::end(ui.ctx()),
             }
+            // the New canvas list offers the kinds of artwork the plugins on make
+            gallery.kinds = interface.plugins().kinds();
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
             // a pen's buttons do nothing here, and nothing in the artwork opened next either
             crate::pen::take_button_presses();
@@ -690,12 +839,19 @@ impl App {
             interface.plugin_alert(ui.ctx());
             if reading == Some(true) {
                 opening_veil(ui.ctx());
+            } else if getting_ready {
+                getting_ready_note(ui.ctx());
             }
         });
         self.again = screen.draw(None, self.started, output).map(|after| Instant::now() + after);
-        // looked at again soon while an artwork is read
-        if reading.is_some() {
-            let soon = Instant::now() + Duration::from_millis(50);
+        // looked at again soon while an artwork is read, and once the pipelines have taken long
+        // enough to say so (once made, the window is asked to draw again)
+        let soon = match waited {
+            _ if reading.is_some() => Some(Instant::now() + Duration::from_millis(50)),
+            Some(waited) if !getting_ready => Some(Instant::now() + CANVASES_SLOW.saturating_sub(waited)),
+            _ => None,
+        };
+        if let Some(soon) = soon {
             self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }
         if self.title != "ProCraft" {
@@ -721,6 +877,8 @@ impl App {
                 if !busy {
                     let session = files::new_from_preset(&preset);
                     let dir = self.gallery.store.new_folder(folder);
+                    // its time-lapse made as the preset says
+                    files::keep_preset_time_lapse(&preset, &dir);
                     self.open_artwork(session, dir);
                     self.ui.started_new();
                 }
@@ -733,6 +891,24 @@ impl App {
                     let dir = self.gallery.store.new_folder(folder);
                     self.open_artwork(session, dir);
                     self.ui.started_new();
+                }
+            }
+            // a plugin's kind of artwork, the screen's size, its plugin keeping it
+            Some(gallery::Asked::PluginKind(kind, folder)) => {
+                let (w, h) = self.gallery.screen_px;
+                let canvas = self.ui.plugins_shared().open_canvas(kind.clone(), w, h, None);
+                match canvas {
+                    Some(canvas) if !busy => {
+                        let session = CanvasSession::new(w, h);
+                        session.set_new_profile(procraft_core::P3.into());
+                        if session.attach_plugin_canvas(kind, canvas) {
+                            let dir = self.gallery.store.new_folder(folder);
+                            self.open_artwork(session, dir);
+                            self.ui.started_new();
+                        }
+                    }
+                    Some(_) => {}
+                    None => files::say("The plugin couldn't make this artwork."),
                 }
             }
             Some(gallery::Asked::Share(list, format)) => {
@@ -825,6 +1001,10 @@ impl App {
     }
 
     fn open_artwork(&mut self, session: Arc<CanvasSession>, dir: String) {
+        // a plugin's own artwork goes to its plugin (on); else it shows what it last drew
+        if session.plugin_kind().is_some() && !session.open_plugin_artwork(self.ui.plugins_shared()) {
+            log::warn!("an artwork of a plugin's that isn't on opened as what it last drew");
+        }
         self.ui.artwork_dir = Some(dir.clone());
         // kept saved as it changes, as the tablet's
         Arc::clone(&session).start_autosave(dir.clone());
@@ -1059,8 +1239,16 @@ impl App {
         // nothing they show can be drawn (and with the screen gone this happens once)
         self.projection = None;
         self.screen = None;
-        files::tell("The graphics device stopped", "ProCraft starts again, with the artwork as it was last saved.");
-        startup::start_again(None);
+        // as a backend starts, or a canvas first draws on it, that counts against the backend
+        if let Some(tried) = startup::device_lost() {
+            log::warn!("the graphics device stopped as this backend started: starting again on the next");
+            if !startup::start_on_next(tried) {
+                startup::stopped("the graphics device stopped, and it couldn't start itself again");
+            }
+        } else {
+            files::tell("The graphics device stopped", "ProCraft starts again, with the artwork as it was last saved.");
+            startup::start_again(None);
+        }
         event_loop.exit();
     }
 
@@ -1085,7 +1273,9 @@ impl App {
         log::warn!("the canvases' pipelines failed on this graphics backend: starting again on the next");
         self.screen = None;
         self.closed = true;
-        startup::start_again(Some(tried));
+        if !startup::start_again(Some(tried)) {
+            startup::stopped("its pipelines failed on this graphics backend, and it couldn't start itself again");
+        }
         event_loop.exit();
     }
 
@@ -1095,9 +1285,25 @@ impl App {
         folder.map(|f| f.to_string_lossy().into_owned()).filter(|f| *f != self.gallery.store.root())
     }
 
+    /// The window goes from the screen while the artwork open is still being made (its canvas
+    /// waits for the canvases' pipelines: a minute or more on a slow GPU's shader compiler), as
+    /// keeping it waits for that: no window stands still meanwhile. True if it went.
+    fn hide_while_opening(&self) -> bool {
+        let waits = self.opening.as_ref().is_some_and(|(_, made)| !made.is_finished());
+        if waits && let Some(screen) = &self.screen {
+            log::info!(
+                "closing while a canvas is still being made: the window goes, the artwork is kept once it is made"
+            );
+            screen.window.set_visible(false);
+        }
+        waits
+    }
+
     /// The artwork open is put away and kept; false if it couldn't be.
     fn leave_artwork(&mut self) -> bool {
         if let Some(session) = self.session.clone() {
+            // its time counted up to now, saved with it
+            session.set_tracking(false);
             self.ui.closing(&session);
             // no save of its own after this one
             session.stop_autosave();
@@ -1105,6 +1311,7 @@ impl App {
         let kept = self.keep_artwork();
         // still open: kept saved again
         if !kept && let (Some(session), Some(dir)) = (&self.session, &self.artwork) {
+            session.set_tracking(true);
             Arc::clone(session).start_autosave(dir.clone());
         }
         kept
@@ -1118,7 +1325,7 @@ impl App {
         if let Some((_, made)) = self.opening.take() {
             let _ = made.join();
         }
-        session.keep_brushes(files::brushes_dir());
+        files::keep_brushes(&session);
         let (brush, mask) = self.ui.colours.brush_and_mask();
         files::keep_colours(brush, mask);
         let edits = session.edits();
@@ -1199,4 +1406,13 @@ impl App {
 fn frame_gap(window: &Window) -> Duration {
     let millihertz = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).filter(|&m| m > 0);
     Duration::from_secs_f64(1000.0 / f64::from(millihertz.unwrap_or(60_000)))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_computers_memory_is_read() {
+        let total = super::memory_total().expect("the system says how much memory there is");
+        assert!(total >= 1 << 30, "{total} bytes");
+    }
 }

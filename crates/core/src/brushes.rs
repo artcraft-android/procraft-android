@@ -5,7 +5,7 @@ use procraft_engine::document::Document;
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::Pointer;
 use procraft_engine::preview;
-use procraft_engine::stroke::{Stamp, StrokeBuilder};
+use procraft_engine::stroke::{LEAST_ROUNDNESS, MOST_ROUNDNESS, Stamp, StrokeBuilder};
 use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
 
 use crate::CanvasSession;
@@ -117,8 +117,7 @@ impl CanvasSession {
         };
         // as a stamp is drawn: across its full size, squashed across, turned on the screen
         let (roundness, turn) = (f32::from_bits(roundness), f32::from_bits(rotation));
-        let roundness =
-            if roundness.is_finite() { roundness.clamp(0.05, procraft_engine::stroke::MOST_ROUNDNESS) } else { 1.0 };
+        let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
         let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
         let loops: Vec<Vec<f32>> = traced
             .iter()
@@ -166,8 +165,7 @@ impl CanvasSession {
             (None, Some(i)) => procraft_engine::textures::shapes().get(i as usize).map(|s| s.pixels.clone()),
             (None, None) => None,
         };
-        let roundness =
-            if roundness.is_finite() { roundness.clamp(0.05, procraft_engine::stroke::MOST_ROUNDNESS) } else { 1.0 };
+        let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
         let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
         let size = procraft_engine::textures::TEXTURE_SIZE;
         // averaged down to about the picture's size first, so a small picture keeps fine detail's
@@ -356,12 +354,21 @@ impl CanvasSession {
         }
     }
 
-    fn drawn_preview(&self, brush: procraft_engine::brush::Brush, width: u32, height: u32) -> Option<ThumbnailImage> {
+    pub(crate) fn drawn_preview(
+        &self,
+        brush: procraft_engine::brush::Brush,
+        width: u32,
+        height: u32,
+    ) -> Option<ThumbnailImage> {
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
         let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
-        // the preview it came with, while it is as it came
+        // the preview it came with, while it is as it came: a blank file preview (some imported
+        // brushes ship one) is no preview, so the brush draws its own
         if let Some((tw, th, rgba)) = brush.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
-            return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
+            let (pixels, _) = rgba.as_chunks::<4>();
+            if pixels.iter().any(|p| p[3] > 0) {
+                return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
+            }
         }
         // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
         let (gpu, kept) = {
@@ -409,8 +416,10 @@ impl CanvasSession {
             None => canvas.begin_stroke(layer, style),
         }
         if stamp_only {
-            // the brush's stamp on its own, filling the preview's height
-            canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), ch as f32 * 0.4, 1.0)]);
+            // the brush's stamp on its own in the middle, as wide as its preview size of its most
+            // size (a big one reaching past the preview, as there)
+            let side = (brush.setting("preview_size").clamp(0.0, 1.0) * brush.biggest()).max(1.0);
+            canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), side / 2.0, 1.0)]);
         } else {
             let samples = preview::samples(&brush);
             if let Some((second, _, diameter)) = second {
@@ -429,5 +438,30 @@ impl CanvasSession {
         // kept for the next (one drawn meanwhile elsewhere already is)
         self.shared.lock().preview.get_or_insert((canvas, doc));
         Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use procraft_engine::brush::Brush;
+
+    use crate::CanvasSession;
+
+    /// A brush file whose own preview is blank (a brush imported from another app can bring one):
+    /// the library draws the brush instead of showing nothing.
+    #[test]
+    fn a_blank_brush_file_preview_is_drawn_from_the_brush() {
+        let s = CanvasSession::new(64, 64);
+        if !s.prepare_offscreen() {
+            return;
+        }
+        let mut brush = Brush::round_pen();
+        let blank = crate::project::rgba_png(8, 8, &[0u8; 8 * 8 * 4]);
+        brush.thumbnail = Some(Arc::from(blank));
+        let preview = s.drawn_preview(brush, 240, 60).expect("a preview");
+        let painted = preview.rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+        assert!(painted > 100, "{painted} pixels");
     }
 }

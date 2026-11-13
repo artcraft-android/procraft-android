@@ -69,7 +69,7 @@ private val PanelEdge get() = if (Pc.light) Color(0xFFDADADA) else Color(0xFF363
 private val SegmentTrack get() = if (Pc.light) Color(0xFFD5D5D5) else Color(0xFF3C3C3C)
 private val CapsuleFill get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1A1A1A)
 private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF373737)
-private val DoneBlue = Color(0xFF0190FF)
+private val DoneBlue get() = Pc.tinted(Color(0xFF0190FF))
 
 /**
  * Sharing the layers as an animation: the frames playing, the settings (the size, the frame rate,

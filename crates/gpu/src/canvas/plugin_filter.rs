@@ -34,6 +34,7 @@ use super::{
 use crate::{Gpu, GpuError};
 
 const TEMPLATE: &str = include_str!("../shaders/plugin_filter_1.wgsl");
+const PICTURE_TEMPLATE: &str = include_str!("../shaders/plugin_picture_2.wgsl");
 
 /// The most a filter's text may be, in bytes.
 const MOST_TEXT: usize = 64 << 10;
@@ -55,9 +56,9 @@ const PIECE_LIMIT: Duration = Duration::from_millis(1500);
 /// The most a whole layer may take: the app waits for it.
 const WHOLE_LIMIT: Duration = Duration::from_secs(4);
 /// The most a driver may take to compile one.
-const COMPILE_LIMIT: Duration = Duration::from_secs(15);
+pub(super) const COMPILE_LIMIT: Duration = Duration::from_secs(15);
 /// Parsing and compiling recurse over what the file holds.
-const BIG_STACK: usize = 64 << 20;
+pub(super) const BIG_STACK: usize = 64 << 20;
 /// How many pixels each way the probe looks at.
 const PROBE_SIZE: u32 = 16;
 
@@ -72,6 +73,24 @@ const PIXEL: &str = "pixel";
 /// What an author may well call it, which WGSL keeps for itself: said so, not left to the parser.
 const RESERVED: &str = "filter";
 
+/// What one kind of plugin code is joined to and given: a filter's, or a picture's
+/// (`plugin_picture.rs`). Both are checked the same way.
+pub(super) struct Kind {
+    template: &'static str,
+    own_globals: &'static [&'static str],
+    given: &'static [&'static str],
+    /// The one function it must have.
+    entry: &'static str,
+}
+
+const FILTER: Kind = Kind { template: TEMPLATE, own_globals: &OWN_GLOBALS, given: &GIVEN, entry: PIXEL };
+pub(super) const PICTURE: Kind = Kind {
+    template: PICTURE_TEMPLATE,
+    own_globals: &["host_u", "host_budget"],
+    given: &["hue", "picture_size"],
+    entry: "picture",
+};
+
 /// A filter's code that has held up, with what its loops pay written in. Nothing has run.
 #[derive(Clone, Debug)]
 pub struct FilterCode {
@@ -85,6 +104,14 @@ impl FilterCode {
     /// The most a pixel can cost.
     pub fn worst(&self) -> u64 {
         self.worst
+    }
+
+    pub(super) fn loops(&self) -> bool {
+        self.loops
+    }
+
+    pub(super) fn into_module(self) -> Module {
+        self.module
     }
 }
 
@@ -101,7 +128,16 @@ pub fn read_filter(text: &str, keys: &[String]) -> Result<FilterCode, String> {
         return Err("too long".to_owned());
     }
     let (text, keys) = (text.to_owned(), keys.to_vec());
-    on_a_big_stack(move || read(&text, &keys)).unwrap_or_else(|| Err("reading it panicked".to_owned()))
+    on_a_big_stack(move || read(&text, &keys, &FILTER)).unwrap_or_else(|| Err("reading it panicked".to_owned()))
+}
+
+/// Reads `text`, code of `kind` with no controls, as [`read_filter`] reads a filter's.
+pub(super) fn read_kind(text: &str, kind: &'static Kind) -> Result<FilterCode, String> {
+    if text.len() > MOST_TEXT {
+        return Err("too long".to_owned());
+    }
+    let text = text.to_owned();
+    on_a_big_stack(move || read(&text, &[], kind)).unwrap_or_else(|| Err("reading it panicked".to_owned()))
 }
 
 /// Whether `key` is a plain field name; what isn't must not go into the template.
@@ -113,13 +149,16 @@ fn plain_key(key: &str) -> bool {
 
 /// The template with `keys` as its values, and `text` after all of it: there is nothing below it
 /// for the text to change the meaning of.
-fn joined(text: &str, keys: &[String]) -> String {
+fn joined(text: &str, keys: &[String], kind: &Kind) -> String {
     let fields: String = keys.iter().map(|key| format!("{key}: f32, ")).collect();
     let read: Vec<String> = VALUE_PLACES.iter().take(keys.len()).map(|place| format!("host_u.{place}")).collect();
     let (fields, read) =
         if keys.is_empty() { ("host_none: f32,".to_owned(), "0.0".to_owned()) } else { (fields, read.join(", ")) };
-    let template =
-        TEMPLATE.replace("/*VALUES*/", &fields).replace("/*READ*/", &read).replace("/*BUDGET*/", &BUDGET.to_string());
+    let template = kind
+        .template
+        .replace("/*VALUES*/", &fields)
+        .replace("/*READ*/", &read)
+        .replace("/*BUDGET*/", &BUDGET.to_string());
     format!("{template}\n{text}\n")
 }
 
@@ -187,31 +226,32 @@ fn declared(text: &str) -> Vec<&str> {
 }
 
 /// `text` as code, checked, and what its loops pay written in.
-fn read(text: &str, keys: &[String]) -> Result<FilterCode, String> {
+fn read(text: &str, keys: &[String], kind: &Kind) -> Result<FilterCode, String> {
     if keys.len() > VALUE_PLACES.len() || !keys.iter().all(|key| plain_key(key)) {
         return Err("its controls can't be its values".to_owned());
     }
     // what its text declares reaches the whole module, the template too: a function of its own
     // called `mix` would take the selection's place. So none may be a word the template uses
-    let template: HashSet<&str> = words(TEMPLATE).into_iter().map(|(word, _)| word).collect();
+    let template: HashSet<&str> = words(kind.template).into_iter().map(|(word, _)| word).collect();
     let names = declared(text);
+    let entry = kind.entry;
     if names.contains(&RESERVED) {
-        return Err(format!("{RESERVED} is a word WGSL keeps for itself: the function is called {PIXEL}"));
+        return Err(format!("{RESERVED} is a word WGSL keeps for itself: the function is called {entry}"));
     }
-    if !names.contains(&PIXEL) {
-        return Err(format!("it has no {PIXEL} function"));
+    if !names.contains(&entry) {
+        return Err(format!("it has no {entry} function"));
     }
     let taken = names.iter().find(|name| {
-        **name != PIXEL && (template.contains(*name) || name.starts_with(OWN_PREFIX) || GIVEN.contains(*name))
+        **name != entry && (template.contains(*name) || name.starts_with(OWN_PREFIX) || kind.given.contains(*name))
     });
     if let Some(name) = taken {
         return Err(format!("it declares {name}, which is the app's"));
     }
-    let whole = joined(text, keys);
+    let whole = joined(text, keys, kind);
     let mut module = naga::front::wgsl::parse_str(&whole).map_err(|e| e.emit_to_string(&whole))?;
-    holds_only_a_filter(&module)?;
+    holds_only(&module, kind)?;
     validate(&module, &whole)?;
-    let pixel = function_named(&module, PIXEL).ok_or("it has no pixel function")?;
+    let pixel = function_named(&module, entry).ok_or_else(|| format!("it has no {entry} function"))?;
     let costs = straight_costs(&module);
     let straight = costs.get(pixel.index()).copied().unwrap_or(u64::MAX);
     if straight > MOST_STRAIGHT {
@@ -233,17 +273,17 @@ fn function_named(module: &Module, name: &str) -> Option<Handle<Function>> {
     module.functions.iter().find(|(_, function)| function.name.as_deref() == Some(name)).map(|(handle, _)| handle)
 }
 
-/// Whether what the template joined with a filter's text has nothing but what the template brought
-/// and some functions, constants and types, none of them too big.
-fn holds_only_a_filter(module: &Module) -> Result<(), String> {
+/// Whether what the template joined with a filter's (or a picture's) text has nothing but what the
+/// template brought and some functions, constants and types, none of them too big.
+fn holds_only(module: &Module, kind: &Kind) -> Result<(), String> {
     let mut entries: Vec<&str> = module.entry_points.iter().map(|entry| entry.name.as_str()).collect();
     entries.sort_unstable();
     if entries != OWN_ENTRIES {
         return Err("it has entry points of its own".to_owned());
     }
-    let own = |name: &Option<String>| name.as_deref().is_some_and(|name| OWN_GLOBALS.contains(&name));
+    let own = |name: &Option<String>| name.as_deref().is_some_and(|name| kind.own_globals.contains(&name));
     let mut globals = module.global_variables.iter();
-    if module.global_variables.len() != OWN_GLOBALS.len() || !globals.all(|(_, global)| own(&global.name)) {
+    if module.global_variables.len() != kind.own_globals.len() || !globals.all(|(_, global)| own(&global.name)) {
         return Err("it declares global variables or resources".to_owned());
     }
     if !module.overrides.is_empty() {
@@ -257,7 +297,7 @@ fn holds_only_a_filter(module: &Module) -> Result<(), String> {
     let values = values.map(|(handle, _)| handle);
     for (_, function) in module.functions.iter() {
         let name = function.name.as_deref().unwrap_or("");
-        if name.starts_with(OWN_PREFIX) || GIVEN.contains(&name) {
+        if name.starts_with(OWN_PREFIX) || kind.given.contains(&name) {
             continue;
         }
         let locals = function.local_variables.iter();
@@ -496,7 +536,17 @@ impl Gpu {
                 source: wgpu::ShaderSource::Naga(Cow::Owned(code.module)),
             });
             let pipeline = |entry: &str| {
-                blended_pipeline(device, &layout, &module, "plugin filter", ("host_vs", entry), LAYER_FORMAT, None)
+                // a plugin's own code: not kept for the next run
+                blended_pipeline(
+                    device,
+                    None,
+                    &layout,
+                    &module,
+                    "plugin filter",
+                    ("host_vs", entry),
+                    LAYER_FORMAT,
+                    None,
+                )
             };
             let probe_target = texture(device, "plugin filter probe", PROBE_SIZE, PROBE_SIZE, LAYER_FORMAT);
             Arc::new(FilterProgram {

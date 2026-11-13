@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -28,6 +29,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -45,7 +47,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
@@ -58,14 +59,21 @@ private enum class DropTouch { TAP, HOLD, DRAG, GONE }
 /**
  * A colour that can be dragged out onto the canvas to fill there (the colour button, or a swatch
  * with [swatch] giving its colour): tapped it does [onTap], held still [onHold]; dragged, its colour
- * goes with the finger as a dot and fills where it is let go below the top bar.
+ * is pulled out (of the colour button's centre, or where the swatch was pressed) and goes with the
+ * finger, filling where it is let go below the top bar.
  */
 internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = null, onHold: (() -> Unit)? = null, onTap: () -> Unit): Modifier = composed {
     val tap by rememberUpdatedState(onTap)
     val hold by rememberUpdatedState(onHold)
     val colour by rememberUpdatedState(swatch)
     var origin by remember { mutableStateOf(Offset.Zero) }
-    onGloballyPositioned { origin = it.positionInRoot() }.pointerInput(vm) {
+    var centre by remember { mutableStateOf(Offset.Zero) }
+    onGloballyPositioned {
+        origin = it.positionInRoot()
+        centre = origin + Offset(it.size.width / 2f, it.size.height / 2f)
+        // the colour button's centre: over the bars a dragged colour shrinks the further it is from it
+        if (colour == null) vm.dropButton = centre
+    }.pointerInput(vm) {
         awaitEachGesture {
             val down = awaitFirstDown()
             down.consume()
@@ -90,7 +98,9 @@ internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = nul
                 DropTouch.GONE -> Unit
                 DropTouch.DRAG -> {
                     var at = origin + down.position
-                    vm.dropDragStart(at, colour?.invoke(), down.type == PointerType.Stylus || down.type == PointerType.Eraser, down.uptimeMillis)
+                    val pen = down.type == PointerType.Stylus || down.type == PointerType.Eraser
+                    val swatchRgb = colour?.invoke()
+                    vm.dropDragStart(at, swatchRgb, pen, down.uptimeMillis, from = if (swatchRgb == null) centre else origin + down.position)
                     var lifted = false
                     while (true) {
                         // held still a moment, the colour comes to rest (a slide then sets the threshold)
@@ -121,14 +131,38 @@ internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = nul
     }
 }
 
-/** The colour being dragged out: a flat dot under the finger. */
+/**
+ * The colour being dragged out, as the core's [io.github.artcraftandroid.procraft.core.ColourBlob]
+ * works it out each frame: a drop pulled out of the colour button that lets go and follows the
+ * finger as a ball, springing and wobbling on its own.
+ */
 @Composable
 fun DropDot(vm: CanvasViewModel) {
-    val (at, rgb) = vm.dropDot ?: return
-    Box(
-        Modifier.offset { IntOffset((at.x - DotSize.toPx() / 2).roundToInt(), (at.y - DotSize.toPx() / 2).roundToInt()) }
-            .size(DotSize).clip(CircleShape).background(CanvasSpace.color(rgb)),
-    )
+    val blob = vm.dropBlob ?: return
+    val rgb = vm.dropDot?.second ?: return
+    var shape by remember(blob) { mutableStateOf<io.github.artcraftandroid.procraft.core.BlobShape?>(null) }
+    LaunchedEffect(blob) {
+        while (true) withFrameMillis { shape = blob.shape(SystemClock.uptimeMillis().toDouble()) }
+    }
+    val outlines = shape?.outlines ?: return
+    val colour = CanvasSpace.color(rgb)
+    val scale = vm.density
+    Canvas(Modifier.fillMaxSize()) {
+        // points to pixels; the outlines filled together, where they cross too
+        val path = Path()
+        for (outline in outlines) {
+            val p = outline.points
+            if (p.size < 6) continue
+            path.moveTo(p[0] * scale, p[1] * scale)
+            var i = 2
+            while (i + 1 < p.size) {
+                path.lineTo(p[i] * scale, p[i + 1] * scale)
+                i += 2
+            }
+            path.close()
+        }
+        drawPath(path, colour)
+    }
 }
 
 /**
@@ -149,7 +183,7 @@ fun DropBandUi(vm: CanvasViewModel) {
     if (band == DropBand.NONE && shown.value <= 0f) return
     val what = kept[0]
     val ink = if (Pc.light) Color(0xFF222222) else Color(0xFFC5C5C5)
-    val blue = if (Pc.light) Color(0xFF0A8CFD) else Color(0xFF0076FD)
+    val blue = Pc.tinted(if (Pc.light) Color(0xFF0A8CFD) else Color(0xFF0076FD))
     BoxWithConstraints(Modifier.offset(y = Pc.BarHeight).fillMaxWidth().clipToBounds()) {
         val width = maxWidth
         Column(Modifier.graphicsLayer { translationY = -(1f - shown.value) * size.height }) {
@@ -196,9 +230,6 @@ fun DropBandUi(vm: CanvasViewModel) {
 private fun Modifier.press(onClick: () -> Unit): Modifier = composed {
     clickable(remember { MutableInteractionSource() }, indication = null, onClick = onClick)
 }
-
-/** The dragged colour's dot, across. */
-private val DotSize = 55.5.dp
 
 /** The band, translucent over the canvas, dark and light. */
 private val BandDark = Color(0xD63B3B3B)

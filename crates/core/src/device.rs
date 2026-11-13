@@ -114,6 +114,8 @@ pub fn warm_gpu() {
 #[uniffi::export]
 pub fn set_gpu_record_folder(dir: String) {
     start_log();
+    // the canvases' pipelines kept there between runs as well, where the GPU can
+    procraft_gpu::keep_pipelines_in(PathBuf::from(&dir));
     *RECORD_FOLDER.lock().unwrap_or_else(PoisonError::into_inner) = Some(PathBuf::from(dir));
 }
 

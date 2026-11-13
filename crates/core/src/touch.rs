@@ -55,6 +55,12 @@ pub enum CompanionMode {
 const RAPID_REPEAT_MS: f64 = 120.0;
 /// A pen held over the canvas and not heard from for this long (seconds) has gone.
 const PEN_HOVER_STALE_S: f32 = 0.5;
+/// After the pen leaves (lifts, or stops being held over the canvas), a finger landing alone is
+/// still taken for the hand that held it for this long (seconds).
+const PEN_GONE_S: f32 = 0.5;
+/// While the pen is near, fingers landing within this long (milliseconds) of each other make a
+/// gesture; one landing alone is a hand resting on the screen.
+const TOGETHER_MS: f64 = 100.0;
 /// Two fingers parting while they close faster than this (their spread, as a part of where it
 /// started, a second) fit the canvas if it is pinched smaller than it fits; the speed is taken
 /// over this long (milliseconds) before they part.
@@ -510,6 +516,15 @@ pub(crate) struct Touches {
     /// When the pen was last told held over the canvas (none: it has left), and Hover's touch:
     /// where its finger last was (window x) and how far apart two fingers last were.
     pen_hovering: Option<std::time::Instant>,
+    /// The pen on the canvas, when it last lifted (its input's time, milliseconds), and when it was
+    /// last no longer held over it.
+    pen_pointer: Option<u64>,
+    pen_lifted_ms: Option<f64>,
+    pen_left: Option<std::time::Instant>,
+    /// While the pen is near: a finger that landed alone, waiting for another to land with it (its
+    /// kind and first input), and the hand's touches, which do nothing until they lift.
+    palm_wait: Option<(u64, PointerKind, Vec<PenSample>)>,
+    palms: Vec<u64>,
     hover_x: f32,
     hover_spread: f32,
     /// The pen's own gestures: where it hovers, and a squeeze held.
@@ -597,6 +612,11 @@ impl Default for Touches {
             pan_last: None,
             panned: false,
             pen_hovering: None,
+            pen_pointer: None,
+            pen_lifted_ms: None,
+            pen_left: None,
+            palm_wait: None,
+            palms: Vec::new(),
             hover_x: 0.0,
             hover_spread: 0.0,
             pen: pen::PenState::default(),
@@ -657,6 +677,50 @@ fn is_pen(kind: PointerKind) -> bool {
 impl CanvasSession {
     fn touches(&self) -> std::sync::MutexGuard<'_, Touches> {
         self.shared.touches.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether the pen is near enough that a hand's touches are taken for its: on the canvas, held
+    /// over it (unless Hover's touch takes fingers then), or just gone (lifted before `now_ms`, an
+    /// input's time, or no longer held over it).
+    fn pen_near(t: &Touches, now_ms: Option<f64>) -> bool {
+        let hovering = t.pen_hovering.is_some_and(|at| at.elapsed().as_secs_f32() < PEN_HOVER_STALE_S);
+        let left = t.pen_left.is_some_and(|at| at.elapsed().as_secs_f32() < PEN_GONE_S);
+        let gone_ms = f64::from(PEN_GONE_S) * 1000.0;
+        let lifted = now_ms.zip(t.pen_lifted_ms).is_some_and(|(now, lifted)| (0.0..gone_ms).contains(&(now - lifted)));
+        t.pen_pointer.is_some() || (!t.settings.hover_touch && (hovering || left || lifted))
+    }
+
+    /// What the touches down are doing is taken back (a hand resting on the screen, the pen come
+    /// to it), and they are left alone until they lift; `keep` stays.
+    fn hand_aside<'a>(
+        &'a self,
+        mut t: std::sync::MutexGuard<'a, Touches>,
+        keep: Option<u64>,
+        out: &mut Vec<TouchCommand>,
+    ) -> std::sync::MutexGuard<'a, Touches> {
+        let mode = std::mem::replace(&mut t.mode, Mode::None);
+        t.held = None;
+        let hand: Vec<u64> = t.down.iter().map(|d| d.id).filter(|id| Some(*id) != keep).collect();
+        t.palms.extend(hand);
+        t.down.retain(|d| Some(d.id) == keep);
+        t.hold_due = None;
+        t.quickshape_due = None;
+        t.rapid_due = None;
+        match mode {
+            Mode::Finger => {
+                self.end_stroke_tools(&mut t);
+                drop(t);
+                self.stroke_cancel();
+                t = self.touches();
+            }
+            Mode::Pick => {
+                t.pick_next = false;
+                out.push(TouchCommand::PickCancel);
+            }
+            _ => {}
+        }
+        out.push(TouchCommand::CursorGone);
+        t
     }
 
     /// The tool a stroke borrows (or the one it gives back): not counted as one chosen.
@@ -775,8 +839,25 @@ impl CanvasSession {
     /// The pen is held over the canvas (or not): with Hover's touch on, a finger then sets the
     /// brush rather than painting. Told again with each of the pen's moves: a pen not heard from
     /// for [`PEN_HOVER_STALE_S`] has gone (a system may not say when it leaves).
-    pub fn set_touch_pen_hovering(&self, hovering: bool) {
-        self.touches().pen_hovering = hovering.then(std::time::Instant::now);
+    ///
+    /// The pen coming near a hand already on the screen (a finger alone, painting or waiting) takes
+    /// back what it was doing and leaves it alone until it lifts, as a tablet made for a pen does.
+    pub fn set_touch_pen_hovering(&self, hovering: bool) -> Vec<TouchCommand> {
+        let mut out = Vec::new();
+        let mut t = self.touches();
+        let was_near = Self::pen_near(&t, None);
+        let now = std::time::Instant::now();
+        if hovering {
+            t.pen_hovering = Some(now);
+        } else if t.pen_hovering.take().is_some() {
+            t.pen_left = Some(now);
+        }
+        let lone = matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Pick | Mode::Held);
+        if hovering && !was_near && Self::pen_near(&t, None) && !t.down.is_empty() && t.modify_pointer.is_none() && lone
+        {
+            drop(self.hand_aside(t, None, &mut out));
+        }
+        out
     }
 
     /// The single touch companion's Zoom or Move on (a lone press dragged on the canvas zooms or
@@ -811,17 +892,60 @@ impl CanvasSession {
     }
 
     /// A pointer goes down on the canvas (`samples` its first input).
+    ///
+    /// While the pen is near (on the canvas, held over it, or just gone), a finger landing alone
+    /// is a hand resting on the screen and does nothing until it lifts; fingers landing within
+    /// [`TOGETHER_MS`] of each other make a gesture as ever.
     pub fn touch_down(&self, id: u64, kind: PointerKind, samples: Vec<PenSample>) -> Vec<TouchCommand> {
+        let Some(first) = last_of(&samples).copied() else { return Vec::new() };
+        let mut t = self.touches();
+        if is_pen(kind) {
+            t.pen_pointer = Some(id);
+            // a finger waiting for another is the hand's
+            if let Some((waiting, _, _)) = t.palm_wait.take() {
+                t.palms.push(waiting);
+            }
+        } else if kind == PointerKind::Finger
+            && !t.modify_held
+            && Self::pen_near(&t, Some(first.time_ms))
+            && (t.pen_pointer.is_some() || t.down.is_empty())
+        {
+            let waiting = t.palm_wait.take();
+            match waiting {
+                _ if t.pen_pointer.is_some() => t.palms.push(id),
+                None => t.palm_wait = Some((id, kind, samples)),
+                Some((other, other_kind, other_samples)) => {
+                    let landed = last_of(&other_samples).map_or(f64::MIN, |s| s.time_ms);
+                    if first.time_ms - landed <= TOGETHER_MS {
+                        drop(t);
+                        let mut out = self.touch_down_now(other, other_kind, other_samples);
+                        out.extend(self.touch_down_now(id, kind, samples));
+                        return out;
+                    }
+                    t.palms.extend([other, id]);
+                }
+            }
+            return Vec::new();
+        }
+        drop(t);
+        self.touch_down_now(id, kind, samples)
+    }
+
+    /// A pointer goes down on the canvas, taken as a touch.
+    fn touch_down_now(&self, id: u64, kind: PointerKind, samples: Vec<PenSample>) -> Vec<TouchCommand> {
         let Some(first) = last_of(&samples).copied() else { return Vec::new() };
         let mut out = Vec::new();
         let mut t = self.touches();
-        (t.scale, t.handle_scale) = {
+        let hooks;
+        (t.scale, t.handle_scale, hooks) = {
             let st = self.shared.lock();
-            (st.display_scale, st.interface_scale())
+            (st.display_scale, st.interface_scale(), st.hooks.clone())
         };
         let at = (first.x, first.y);
         t.down.retain(|d| d.id != id);
         t.down.push(Down { id, at, from: at });
+        // a plugin pinning panels open: the canvas takes the touch as if none were
+        let pinned = t.panel_open && hooks.is_some_and(|hooks| hooks.pin_panels());
         // the companion's Zoom or Move takes a lone press, and others while it is held do nothing
         if t.mode == Mode::Companion {
             return out;
@@ -862,28 +986,9 @@ impl CanvasSession {
             && t.modify_pointer.is_none()
             && matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Gesture | Mode::Pick | Mode::Held)
         {
-            let mode = std::mem::replace(&mut t.mode, Mode::None);
-            t.held = None;
-            t.down.retain(|d| d.id == id);
-            t.hold_due = None;
-            t.quickshape_due = None;
-            t.rapid_due = None;
-            match mode {
-                Mode::Finger => {
-                    self.end_stroke_tools(&mut t);
-                    drop(t);
-                    self.stroke_cancel();
-                    t = self.touches();
-                }
-                Mode::Pick => {
-                    t.pick_next = false;
-                    out.push(TouchCommand::PickCancel);
-                }
-                _ => {}
-            }
-            out.push(TouchCommand::CursorGone);
+            t = self.hand_aside(t, Some(id), &mut out);
         }
-        if t.down.len() == 1 && t.panel_open {
+        if t.down.len() == 1 && t.panel_open && !pinned {
             Self::wait_for_panel(&mut t, kind, first, samples);
         } else if t.down.len() == 1 {
             self.first_down(&mut t, kind, first, &samples, &mut out);
@@ -1207,7 +1312,15 @@ impl CanvasSession {
 
     /// The platform called the touches off: what they were doing is taken back.
     pub fn touch_cancel(&self) -> Vec<TouchCommand> {
-        let ids: Vec<u64> = self.touches().down.iter().map(|d| d.id).collect();
+        let ids: Vec<u64> = {
+            let mut t = self.touches();
+            t.palms.clear();
+            t.palm_wait = None;
+            if t.pen_pointer.take().is_some() {
+                t.pen_left = Some(std::time::Instant::now());
+            }
+            t.down.iter().map(|d| d.id).collect()
+        };
         let mut out = Vec::new();
         for id in ids {
             out.extend(self.lifted(id, Vec::new(), true));
@@ -1738,6 +1851,22 @@ impl CanvasSession {
     fn lifted(&self, id: u64, samples: Vec<PenSample>, cancelled: bool) -> Vec<TouchCommand> {
         let mut out = Vec::new();
         let mut t = self.touches();
+        if t.pen_pointer == Some(id) {
+            t.pen_pointer = None;
+            match last_of(&samples) {
+                Some(last) => t.pen_lifted_ms = Some(last.time_ms),
+                None => t.pen_left = Some(std::time::Instant::now()),
+            }
+        }
+        // the hand's touches lift as they landed: doing nothing
+        if t.palm_wait.as_ref().is_some_and(|(waiting, _, _)| *waiting == id) {
+            t.palm_wait = None;
+            return out;
+        }
+        if let Some(i) = t.palms.iter().position(|palm| *palm == id) {
+            t.palms.remove(i);
+            return out;
+        }
         let Some(i) = t.down.iter().position(|d| d.id == id) else { return out };
         t.down.remove(i);
         let now = last_of(&samples).map_or(t.tap_start, |s| s.time_ms);
@@ -1907,6 +2036,14 @@ impl CanvasSession {
                 }
                 self.pour_end(!cancelled, None);
                 out.push(TouchCommand::Filled);
+            }
+            // a tap on a handle rather than a drag of it: a curve's anchor steps to its next state
+            Mode::Shape(i) => {
+                let tapped = !t.shape_dragged && now - t.tap_start <= TAP_MS && !cancelled;
+                drop(t);
+                if tapped && self.quickshape_cycle_anchor(i).is_some() {
+                    out.push(TouchCommand::ShapeChanged);
+                }
             }
             // a tap, on its outline or elsewhere, ends the editing; a drag only turned or moved it
             Mode::ShapePin | Mode::ShapeMove => {
@@ -2653,6 +2790,65 @@ mod tests {
         assert!(s.touch_tick(due).contains(&TouchCommand::Undo));
     }
 
+    /// The pen as if it had left long enough ago that fingers are fingers again.
+    fn pen_long_gone(s: &CanvasSession) {
+        let mut t = s.touches();
+        t.pen_left = None;
+        t.pen_lifted_ms = None;
+    }
+
+    #[test]
+    fn a_hand_by_the_pen_does_nothing_and_fingers_together_still_undo() {
+        let s = session();
+        s.set_touch_pen_hovering(true);
+        // a hand landing alone while the pen hovers: nothing, moved or lifted
+        assert!(s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 0.0)).is_empty());
+        assert!(s.touch_move(1, at(160.0, 320.0, 30.0)).is_empty());
+        assert!(!painting(&s));
+        // more of the hand landing later: nothing either
+        assert!(s.touch_down(3, PointerKind::Finger, at(200.0, 300.0, 300.0)).is_empty());
+        assert!(s.touch_up(3, at(200.0, 300.0, 350.0)).is_empty());
+        assert!(s.touch_up(1, at(160.0, 320.0, 400.0)).is_empty());
+        // two fingers tapped together: undo, as ever
+        assert!(s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 1000.0)).is_empty());
+        s.touch_down(2, PointerKind::Finger, at(200.0, 100.0, 1040.0));
+        let mut out = s.touch_up(2, at(200.0, 100.0, 1100.0));
+        out.extend(s.touch_up(1, at(100.0, 100.0, 1110.0)));
+        assert!(out.contains(&TouchCommand::Undo), "{out:?}");
+        // the pen drawing: a finger landing does nothing, the stroke goes on
+        s.touch_down(5, PointerKind::Stylus, at(300.0, 100.0, 2000.0));
+        assert!(s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 2010.0)).is_empty());
+        s.touch_move(5, at(340.0, 120.0, 2030.0));
+        assert!(s.touch_up(5, at(360.0, 130.0, 2050.0)).contains(&TouchCommand::StrokeEnded));
+        assert!(s.touch_up(1, at(100.0, 300.0, 2060.0)).is_empty());
+        // just lifted (and no hover told): a finger alone is still the hand's
+        s.set_touch_pen_hovering(false);
+        assert!(s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 2100.0)).is_empty());
+        assert!(s.touch_up(1, at(100.0, 300.0, 2150.0)).is_empty());
+        // gone a while: a finger paints
+        pen_long_gone(&s);
+        s.touch_down(1, PointerKind::Finger, at(10.0, 10.0, 3000.0));
+        s.touch_move(1, at(60.0, 10.0, 3020.0));
+        assert!(s.touch_up(1, at(60.0, 10.0, 3040.0)).contains(&TouchCommand::StrokeEnded));
+    }
+
+    #[test]
+    fn a_hand_down_when_the_pen_comes_near_is_set_aside() {
+        let s = session();
+        // a palm painting before the pen is seen
+        s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 0.0));
+        s.touch_move(1, at(140.0, 320.0, 20.0));
+        assert!(painting(&s));
+        // the pen held over the canvas: the palm's stroke is taken back and it does nothing more
+        let out = s.set_touch_pen_hovering(true);
+        assert!(out.contains(&TouchCommand::CursorGone), "{out:?}");
+        assert!(!painting(&s));
+        assert!(s.touch_move(1, at(180.0, 340.0, 40.0)).is_empty());
+        assert!(s.touch_up(1, at(180.0, 340.0, 60.0)).is_empty());
+        // told again as it moves: nothing more to take back
+        assert!(s.set_touch_pen_hovering(true).is_empty());
+    }
+
     #[test]
     fn the_pen_landing_on_a_resting_hand_draws_and_the_hand_does_nothing() {
         let s = session();
@@ -3185,14 +3381,14 @@ mod tests {
         assert!(!out.contains(&TouchCommand::StrokeEnded));
 
         s.set_touch_selecting(tool(SelectKind::Automatic));
-        s.touch_down(1, PointerKind::Finger, at(50.0, 50.0, 100.0));
-        let out = s.touch_move(1, at(120.0, 50.0, 120.0));
+        s.touch_down(1, PointerKind::Finger, at(50.0, 50.0, 1000.0));
+        let out = s.touch_move(1, at(120.0, 50.0, 1020.0));
         let slid = out.iter().find_map(|c| match c {
             TouchCommand::SelectionThreshold { threshold, done: false, .. } => Some(*threshold),
             _ => None,
         });
         assert!(slid.is_some_and(|t| t > 0.5), "{out:?}");
-        let out = s.touch_up(1, at(120.0, 50.0, 140.0));
+        let out = s.touch_up(1, at(120.0, 50.0, 1040.0));
         assert!(out.iter().any(|c| matches!(c, TouchCommand::SelectionThreshold { done: true, .. })), "{out:?}");
         s.set_touch_selecting(None);
     }

@@ -1,7 +1,7 @@
 //! The session in a window its caller owns and draws (the desktop app): the caller makes the
 //! device and the surface, draws each frame and presents it.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use procraft_engine::profile::Profile;
 use procraft_gpu::{Gpu, wgpu};
@@ -24,8 +24,9 @@ impl CanvasSession {
     }
 
     /// Draws a frame into `view` (`format`, `size` window pixels, its colours shown in `screen`),
-    /// which the caller then presents. `started` is when drawing began. True while another frame
-    /// is wanted already (the view settling, the selection's bands drifting, caches remade).
+    /// which the caller then presents. `started` is when drawing began. How soon another frame is
+    /// wanted, if one is: at once while the view settles or caches are remade, later while the
+    /// selection's bands drift (when they have moved a pixel).
     pub fn draw(
         &self,
         view: &wgpu::TextureView,
@@ -33,14 +34,17 @@ impl CanvasSession {
         size: (u32, u32),
         screen: Profile,
         started: Instant,
-    ) -> bool {
+    ) -> Option<Duration> {
         let mut st = self.shared.lock();
         // being redrawn a stroke at a time: the picture as it was until that is done
         if st.holding_frames {
-            return false;
+            return None;
         }
         st.draw_frame(view, format, size, screen, started);
-        st.needs_frame
+        if st.needs_frame {
+            return Some(Duration::ZERO);
+        }
+        st.frame_due.map(|at| at.saturating_duration_since(Instant::now()))
     }
 
     /// Something changed since the last frame was drawn.

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.tweening",
+  "name": "Tweening",
+  "version": "1.1.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Animation Assist's frame options get In-between: a frame drawn between a frame and the next, the drawings slid and faded between them. Tap again for more.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["inbetween"],
+  "controls": [
+    { "key": "slide", "type": "switch", "label": "Slide the drawings", "starts": true },
+    { "key": "near", "type": "slider", "label": "Nearer the next frame", "least": 0.1, "most": 0.9, "step": 0.05, "starts": 0.5, "shown_times": 100, "unit": "%" }
+  ]
+}

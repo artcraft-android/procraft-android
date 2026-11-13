@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.interface-colour",
+  "name": "Interface colour",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "The blue of what's chosen and switched on, in a colour of your own.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["interface_colour"],
+  "controls": [
+    { "key": "hue", "type": "slider", "label": "Hue", "least": 0, "most": 360, "step": 1, "starts": 212, "unit": "°", "live": true },
+    { "key": "saturation", "type": "slider", "label": "Saturation", "least": 0, "most": 1, "step": 0.01, "starts": 1, "shown_times": 100, "unit": "%", "live": true }
+  ]
+}

@@ -206,9 +206,98 @@ pub fn disc_picture(hue: f32, side: u32) -> Vec<u8> {
     })
 }
 
+/// The triangle picker's height across its square: an equilateral triangle of side 1.
+const TRIANGLE_HEIGHT: f32 = 0.866_025_4;
+
+/// The triangle picker's corners in its square (0..1, y down): the pure hue at the right, white
+/// at the top left, black at the bottom left, the triangle centred across the square.
+fn triangle_corners() -> [[f32; 2]; 3] {
+    let left = (1.0 - TRIANGLE_HEIGHT) / 2.0;
+    [[left + TRIANGLE_HEIGHT, 0.5], [left, 0.0], [left, 1.0]]
+}
+
+/// How much of the pure hue, white and black make a point of the triangle picker's square (they
+/// add up to 1; one below 0 is outside).
+fn triangle_parts(x: f32, y: f32) -> [f32; 3] {
+    let [p, w, k] = triangle_corners();
+    let det = (w[1] - k[1]) * (p[0] - k[0]) + (k[0] - w[0]) * (p[1] - k[1]);
+    let a = ((w[1] - k[1]) * (x - k[0]) + (k[0] - w[0]) * (y - k[1])) / det;
+    let b = ((k[1] - p[1]) * (x - k[0]) + (p[0] - k[0]) * (y - k[1])) / det;
+    [a, b, 1.0 - a - b]
+}
+
+/// Where saturation `s` and brightness `v` sit in the triangle picker's square (0..1, y down).
+#[uniffi::export]
+pub fn triangle_point(s: f32, v: f32) -> Vec<f32> {
+    let (s, v) = (s.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+    let [p, w, k] = triangle_corners();
+    let (a, b, c) = (v * s, v * (1.0 - s), 1.0 - v);
+    vec![a * p[0] + b * w[0] + c * k[0], a * p[1] + b * w[1] + c * k[1]]
+}
+
+/// The saturation and brightness at a point of the triangle picker's square (0..1, y down); one
+/// outside the triangle is taken at its edge.
+#[uniffi::export]
+pub fn triangle_sv(x: f32, y: f32) -> Vec<f32> {
+    let parts = triangle_parts(x, y).map(|part| part.max(0.0));
+    let sum: f32 = parts.iter().sum();
+    let [a, b, _] = if sum > 0.0 { parts.map(|part| part / sum) } else { [0.0, 0.0, 1.0] };
+    let v = (a + b).clamp(0.0, 1.0);
+    vec![if v > 1e-6 { (a / v).clamp(0.0, 1.0) } else { 0.0 }, v]
+}
+
+/// The triangle picker's picture for `hue`, `side` pixels square: saturation and brightness
+/// between the pure hue, white and black, with a soft edge; premultiplied RGBA.
+#[uniffi::export]
+pub fn triangle_picture(hue: f32, side: u32) -> Vec<u8> {
+    let side = side.min(4096) as usize;
+    let n = side as f32;
+    picture_rows(side, |y, row| {
+        for (x, px) in row.iter_mut().enumerate() {
+            let parts = triangle_parts((x as f32 + 0.5) / n, (y as f32 + 0.5) / n);
+            // how far in from the nearest side, in pixels
+            let inside = parts.iter().fold(f32::MAX, |least, &part| least.min(part)) * TRIANGLE_HEIGHT * n;
+            let edge = (inside + 0.5).clamp(0.0, 1.0);
+            if edge <= 0.0 {
+                continue;
+            }
+            let [a, b, _] = parts.map(|part| part.max(0.0));
+            let v = (a + b).clamp(0.0, 1.0);
+            let s = if v > 1e-6 { (a / v).clamp(0.0, 1.0) } else { 0.0 };
+            let rgb = hsv_to_rgb([hue, s, v]);
+            let premultiplied = |c: f32| (byte(c) as f32 * edge).round() as u8;
+            *px = [premultiplied(rgb[0]), premultiplied(rgb[1]), premultiplied(rgb[2]), (edge * 255.0).round() as u8];
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_triangle_takes_saturation_and_brightness_and_gives_them_back() {
+        for (s, v) in [(1.0, 1.0), (0.0, 1.0), (0.5, 0.5), (0.25, 0.8), (0.9, 0.1)] {
+            let p = triangle_point(s, v);
+            let back = triangle_sv(p[0], p[1]);
+            assert!((back[0] - s).abs() < 1e-3 && (back[1] - v).abs() < 1e-3, "({s}, {v}) came back {back:?}");
+        }
+        // the corners: the pure hue, white, black
+        let [p, w, k] = triangle_corners();
+        assert_eq!(triangle_sv(p[0], p[1]), vec![1.0, 1.0]);
+        assert_eq!(triangle_sv(w[0], w[1]), vec![0.0, 1.0]);
+        assert_eq!(triangle_sv(k[0], k[1])[1], 0.0);
+        // past an edge, at the edge
+        let past = triangle_sv(1.0, 0.5);
+        assert!((past[0] - 1.0).abs() < 1e-3 && (past[1] - 1.0).abs() < 1e-3, "{past:?}");
+        // the picture: the pure hue near its corner, nothing outside
+        let side = 64;
+        let picture = triangle_picture(0.0, side);
+        let at = |x: usize, y: usize| picture[(y * side as usize + x) * 4..][..4].to_vec();
+        let near = at((p[0] * 64.0) as usize - 3, 32);
+        assert!(near[0] > 200 && near[1] < 60 && near[3] == 255, "{near:?}");
+        assert_eq!(at(63, 2), vec![0, 0, 0, 0]);
+    }
 
     #[test]
     fn the_square_goes_onto_the_disc_and_back() {

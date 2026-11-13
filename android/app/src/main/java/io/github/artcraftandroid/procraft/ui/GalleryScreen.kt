@@ -514,6 +514,11 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     newCanvas = false
                     vm.newPresetArtwork(it)
                 },
+                kinds = vm.plugins.kinds(),
+                onKind = { kind, w, h ->
+                    newCanvas = false
+                    vm.newArtwork(w, h, kind.key)
+                },
             ) { w, h ->
                 newCanvas = false
                 vm.newArtwork(w, h)
@@ -828,7 +833,7 @@ private fun SelectHeader(
                     }
                 }
             }
-            Box(Modifier.padding(start = 13.dp).size(44.dp, 45.dp).clip(CircleShape).background(Color(0xFF0190FF)).clickable(onClick = onDone), contentAlignment = Alignment.Center) {
+            Box(Modifier.padding(start = 13.dp).size(44.dp, 45.dp).clip(CircleShape).background(Pc.tinted(Color(0xFF0190FF))).clickable(onClick = onDone), contentAlignment = Alignment.Center) {
                 Icon(PcIcons.DoneTick, contentDescription = "Done", tint = Color.White, modifier = Modifier.requiredSize(40.dp))
             }
         }
@@ -854,8 +859,12 @@ private val RenameFieldFill = Color(0x14FFFFFF)
  */
 @Composable
 private fun RenameArtwork(a: Artwork, version: Int, from: androidx.compose.ui.geometry.Rect?, closing: Boolean, shown: Float, onDone: (String) -> Unit) {
-    val image by produceState<ImageBitmap?>(null, a.dir.path, a.modified, version) {
-        value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
+    // the last one decoded shows while it loads again (an artwork opened or closed, saved meanwhile),
+    // so a canvas of another colour never flashes white
+    val image by produceState(ThumbnailsShown.get(a.thumbnail.path), a.dir.path, a.modified, version) {
+        val decoded = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
+        if (decoded != null) ThumbnailsShown.put(a.thumbnail.path, decoded)
+        value = decoded ?: value
     }
     var text by remember(a) { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(a.name, androidx.compose.ui.text.TextRange(0, a.name.length))) }
     val rise = remember(a) { androidx.compose.animation.core.Animatable(if (from == null) 1f else 0f) }
@@ -1551,14 +1560,21 @@ private val ThumbShadowDrop = 5.dp
 private val ThumbShadow get() = if (Pc.light) Color(0x1D000000) else Color(0x45000000)
 private val ThumbRim get() = if (Pc.light) Color(0xFFBEBEBE) else Color(0xFF424242)
 
+/** The thumbnails last decoded, by file: shown while one loads again. */
+private val ThumbnailsShown = android.util.LruCache<String, ImageBitmap>(64)
+
 /**
  * An artwork's thumbnail, as large as fits in its cell's box, with a soft shadow; while selecting,
  * a circle at its top right ([chosen]: filled blue with a tick).
  */
 @Composable
 private fun Thumbnail(a: Artwork, version: Int, chosen: Boolean? = null, wash: Boolean = false, onPlaced: (androidx.compose.ui.geometry.Rect) -> Unit = {}) {
-    val image by produceState<ImageBitmap?>(null, a.dir.path, a.modified, version) {
-        value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
+    // the last one decoded shows while it loads again (an artwork opened or closed, saved meanwhile),
+    // so a canvas of another colour never flashes white
+    val image by produceState(ThumbnailsShown.get(a.thumbnail.path), a.dir.path, a.modified, version) {
+        val decoded = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
+        if (decoded != null) ThumbnailsShown.put(a.thumbnail.path, decoded)
+        value = decoded ?: value
     }
     val ratio = if (a.width > 0 && a.height > 0) a.width.toFloat() / a.height else 0.75f
     val cell = LocalCell.current
@@ -1603,7 +1619,8 @@ private fun Thumbnail(a: Artwork, version: Int, chosen: Boolean? = null, wash: B
 
 /**
  * The new-canvas list: the screen's size first, then the presets, each with its colour profile and
- * size; a preset row swiped left shows Edit and Delete.
+ * size; a preset row swiped left shows Edit and Delete. Under them, a row for each kind of artwork a
+ * plugin on makes, the screen's size.
  */
 @Composable
 private fun NewCanvasPanel(
@@ -1614,6 +1631,8 @@ private fun NewCanvasPanel(
     onEdit: (Int) -> Unit,
     onDelete: (Int) -> Unit,
     onPick: (CanvasPreset) -> Unit,
+    kinds: List<io.github.artcraftandroid.procraft.core.PluginKind> = emptyList(),
+    onKind: (io.github.artcraftandroid.procraft.core.PluginKind, Int, Int) -> Unit = { _, _, _ -> },
     onScreenSize: (Int, Int) -> Unit,
 ) {
     // the screen as it is turned now (2560 x 1600 in landscape, 1600 x 2560 upright)
@@ -1650,7 +1669,7 @@ private fun NewCanvasPanel(
         PresetRow("Screen Size", "$sw × ${sh}px", CanvasPreset.P3, Modifier.padding(horizontal = 9.dp).height(38.dp).clip(CircleShape).background(Pc.LightRowStrong)) { onScreenSize(sw, sh) }
         // the presets scroll past 376 tall
         Column(
-            Modifier.padding(start = 9.dp, end = 9.dp, top = 9.5.dp, bottom = 30.dp).heightIn(max = 376.dp).clip(RoundedCornerShape(24.dp)).background(Pc.LightRow)
+            Modifier.padding(start = 9.dp, end = 9.dp, top = 9.5.dp, bottom = if (kinds.isEmpty()) 30.dp else 0.dp).heightIn(max = 376.dp).clip(RoundedCornerShape(24.dp)).background(Pc.LightRow)
                 .verticalScroll(rememberScrollState()),
         ) {
             presets.forEachIndexed { i, p ->
@@ -1669,6 +1688,14 @@ private fun NewCanvasPanel(
                     if (opened != null) opened = null else onPick(p)
                 }
             }
+        }
+        // the plugins' kinds of artwork, each the screen's size
+        kinds.forEachIndexed { k, kind ->
+            val bottom = if (k == kinds.lastIndex) 30.dp else 0.dp
+            PresetRow(
+                kind.label, "$sw × ${sh}px", CanvasPreset.P3,
+                Modifier.padding(start = 9.dp, end = 9.dp, top = 9.5.dp, bottom = bottom).height(38.dp).clip(CircleShape).background(Pc.LightRowStrong),
+            ) { onKind(kind, sw, sh) }
         }
     }
 }

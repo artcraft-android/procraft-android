@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.randomise-brush",
+  "name": "Brush randomiser",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "A Randomise button in the brush studio sets the brush's settings at random. Cancel takes it back.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["randomise_brush"]
+}

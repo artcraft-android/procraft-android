@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.brush-sounds",
+  "name": "Brush sounds",
+  "version": "1.1.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "A sound as you draw: an eraser, pencil, pen, paintbrush, airbrush or spray can, by the brush. Import a recording for any of them. A brush can have its own in the Brush Studio.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["stroke_sound"],
+  "controls": [
+    { "key": "volume", "type": "slider", "label": "Volume", "least": 0, "most": 1, "step": 0.01, "starts": 1, "shown_times": 100, "unit": "%", "live": true },
+    { "key": "sound", "type": "slider", "label": "Sound", "least": 0, "most": 6, "step": 1, "starts": 0, "names": ["By brush", "Eraser", "Pencil", "Pen", "Paintbrush", "Airbrush", "Spray can"], "live": true },
+    { "key": "eraser", "type": "switch", "label": "Sound when erasing", "starts": true },
+    { "key": "eraser_sound", "type": "slider", "label": "Erasing sound", "least": 1, "most": 6, "step": 1, "starts": 1, "names": ["Eraser", "Pencil", "Pen", "Paintbrush", "Airbrush", "Spray can"], "live": true },
+    { "key": "eraser_recording", "type": "file", "label": "Eraser recording", "accepts": "sound" },
+    { "key": "pencil_recording", "type": "file", "label": "Pencil recording", "accepts": "sound" },
+    { "key": "pen_recording", "type": "file", "label": "Pen recording", "accepts": "sound" },
+    { "key": "paintbrush_recording", "type": "file", "label": "Paintbrush recording", "accepts": "sound" },
+    { "key": "airbrush_recording", "type": "file", "label": "Airbrush recording", "accepts": "sound" },
+    { "key": "spray_recording", "type": "file", "label": "Spray can recording", "accepts": "sound" }
+  ],
+  "brush_controls": [
+    { "key": "sound", "label": "Sound", "choices": ["Default", "Eraser", "Pencil", "Pen", "Paintbrush", "Airbrush", "Spray can", "No sound"] }
+  ]
+}

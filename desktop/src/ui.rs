@@ -5,17 +5,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, Stroke, Ui, vec2};
+use egui::{Color32, Key, Modifiers, Rect, Stroke, Ui, vec2};
 use procraft_core::{
-    Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyShortcut, ModeButton, ModeSwitch, Modes, QuickAction,
-    ToolKind, TouchCommand, Trigger, mode_switch,
+    Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyCombo, KeyShortcut, ModeButton, ModeSwitch, Modes,
+    QuickAction, ToolKind, TouchCommand, Trigger, mode_switch,
 };
 
 use crate::actions::{Act, Actions};
 use crate::alert::{Alert, Answer, Asking};
 use crate::chrome::{BarButton, Lit, SideBar};
 use crate::colour_drop::{ColourDrop, Touch};
-use crate::colours::{Colours, srgb, to_hex};
+use crate::colours::{Colours, hsv_to_rgb, of_hex, srgb, take_rgb, to_hex};
 use crate::copy_paste::Choice;
 use crate::files::Format;
 use crate::input::Input;
@@ -76,6 +76,41 @@ enum Popover {
     Colour,
 }
 
+/// The background's colour picked in the colour panel: as the panel shows it (hue, saturation,
+/// brightness), the colour last sent to the background (0xRRGGBB), and whether any was.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BackgroundPick {
+    hsv: [f32; 3],
+    sent: u32,
+    changed: bool,
+}
+
+impl BackgroundPick {
+    /// Starts on the background's colour `rgb`, a grey taking the hue `hue`.
+    fn new(rgb: u32, hue: f32) -> BackgroundPick {
+        let mut hsv = [hue, 0.0, 0.0];
+        take_rgb(&mut hsv, rgb);
+        BackgroundPick { hsv, sent: rgb, changed: false }
+    }
+
+    /// What the panel shows now (`hsv`): the colour to send to the background while it is open, if
+    /// it differs from the last one sent.
+    fn follow(&mut self, hsv: [f32; 3]) -> Option<u32> {
+        self.hsv = hsv;
+        let rgb = to_hex(hsv_to_rgb(hsv));
+        (rgb != self.sent).then(|| {
+            self.sent = rgb;
+            self.changed = true;
+            rgb
+        })
+    }
+
+    /// The colour to keep as one undo step as the panel closes: the last sent, if any was.
+    fn kept(self) -> Option<u32> {
+        self.changed.then_some(self.sent)
+    }
+}
+
 pub struct Interface {
     pub actions: Vec<Action>,
     /// Where the canvas shows, clear of the bar (points).
@@ -97,6 +132,9 @@ pub struct Interface {
     /// A Save As being written: where and at which edits, or why it couldn't be.
     pub saving: Option<std::sync::mpsc::Receiver<Result<(std::path::PathBuf, u64), String>>>,
     open: Option<Popover>,
+    /// The background's colour being picked, in the colour panel shown in the Layers panel's
+    /// place.
+    background_pick: Option<BackgroundPick>,
     pub(crate) colours: Colours,
     drop: ColourDrop,
     library: Library,
@@ -114,6 +152,10 @@ pub struct Interface {
     /// Layer Select's list: where (points) and the layers drawn there, top first.
     layer_choice: Option<(egui::Pos2, Vec<u64>)>,
     actions_panel: Actions,
+    /// A plugin's panel's slider being moved: its row, and where it is.
+    plugin_panel_held: Option<(usize, f32)>,
+    /// A plugin's panel took Space as the key press it asked for: let go, it is no tap.
+    space_to_panel: bool,
     layers: Layers,
     pub look: Look,
     side_bar: SideBar,
@@ -215,6 +257,7 @@ impl Default for Interface {
             saving: None,
             inserting: Vec::new(),
             open: None,
+            background_pick: None,
             colours: Colours::default(),
             drop: ColourDrop::default(),
             library: Library::default(),
@@ -226,6 +269,8 @@ impl Default for Interface {
             copy_paste: false,
             layer_choice: None,
             actions_panel: Actions::default(),
+            plugin_panel_held: None,
+            space_to_panel: false,
             layers: Layers::default(),
             look: Look::default(),
             side_bar: SideBar::default(),
@@ -313,6 +358,7 @@ impl Interface {
             self.model_warnings(session);
         }
         self.layers.forget();
+        self.background_pick = None;
         self.text.forget();
         crate::text::prepare_fonts();
         self.transform.on = false;
@@ -335,7 +381,11 @@ impl Interface {
     /// The artwork is put away (to the gallery, for another, or with the window): brushes coming
     /// in from files are waited for, Recolor ends keeping what it filled, and Layer Opacity ends.
     pub fn closing(&mut self, session: &CanvasSession) {
+        // a plugin's panel goes with the artwork it was open over
+        self.prefs.plugins.close_panel();
+        self.plugin_panel_held = None;
         self.reference.keep(session);
+        self.end_background_pick(session);
         self.library.finish_importing(session);
         self.end_recolor(session);
         session.set_touch_layer_opacity(None);
@@ -365,6 +415,11 @@ impl Interface {
     /// The plugins, which say how big the interface shows.
     pub fn plugins(&self) -> &procraft_core::Plugins {
         &self.prefs.plugins
+    }
+
+    /// The plugins, to keep: what opens a plugin's artwork holds them.
+    pub fn plugins_shared(&self) -> Arc<procraft_core::Plugins> {
+        Arc::clone(&self.prefs.plugins)
     }
 
     /// Tap Assistance is on (Advanced settings).
@@ -516,6 +571,7 @@ impl Interface {
         self.time_lapse.record(&ctx, session, input.idle());
         // the brush studio over everything (the library stays open under it)
         if let Some(new) = self.library.studio.take() {
+            self.studio.plugin_rows = crate::studio::plugin_rows(&self.prefs.plugins);
             self.studio.begin(&ctx, session, new);
         }
         if self.studio.open {
@@ -582,8 +638,9 @@ impl Interface {
         if self.guide_editor.open {
             self.canvas_rect = Rect::EVERYTHING;
             guide_lines(ui.painter(), session);
-            self.guide_editor.show(&ctx, &mut self.look, session);
-            session.set_backdrops(Vec::new());
+            let mut glass = Vec::new();
+            self.guide_editor.show(&ctx, &mut self.look, session, &mut glass);
+            session.set_backdrops(glass);
             self.popover_open = false;
             return;
         }
@@ -687,9 +744,16 @@ impl Interface {
         // then does nothing)
         // Alt held is the button held; tapped it does nothing, being in the system's own shortcuts
         let used = session.set_modify_held(taps.modify_down || input.modify_key());
-        // Space tapped, not moving the canvas, opens or closes the QuickMenu
-        if std::mem::take(&mut input.space_tapped) && !self.keys_taken() {
-            self.quick_menu.toggle(ctx.content_rect().center());
+        // Space tapped, not moving the canvas, opens or closes the QuickMenu (or does what a plugin
+        // rebinding keys takes it as)
+        let space_tapped = std::mem::take(&mut input.space_tapped);
+        let to_panel = std::mem::take(&mut self.space_to_panel);
+        self.space_to_panel = to_panel && !space_tapped && input.moving_view();
+        if space_tapped && !to_panel && !self.keys_taken() {
+            let space = KeyCombo { key: "space".into(), command: false, shift: false, alt: false };
+            if let Some(press) = self.prefs.plugins.key_press(space) {
+                self.press(&ctx, session, &info, &press);
+            }
         }
         if taps.modify_tapped && !used {
             self.tap_modify(&ctx, session);
@@ -726,7 +790,17 @@ impl Interface {
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
         }
-        // the colour panel dragged out by its grabber: a window over the canvas until closed
+        // the background's colour is kept, however its panel closed
+        if self.open != Some(Popover::Layers) {
+            self.end_background_pick(session);
+        }
+        // the colour panel dragged out by its grabber: a window over the canvas until closed, its
+        // Classic as the plugins on now draw it
+        if self.colours.floating.is_some() {
+            self.colours.set_triangle(self.prefs.plugins.colour_triangle());
+            let picker = self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
+            self.colours.set_picker(picker);
+        }
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
         // the colour model chosen on the panel, kept; the panel works in the one kept
         if let Some(model) = self.colours.model_chosen.take() {
@@ -738,6 +812,7 @@ impl Interface {
             self.actions_panel.closed();
         }
         self.transform.show(&ctx, &mut self.look, session, &mut backdrops);
+        self.plugin_panel(&ctx, session, &mut backdrops);
         crate::model_picture::show(&ctx, &mut self.look, session);
         if let Some(on) = self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT, self.model) {
             self.prefs.selection_x_ray = on;
@@ -771,7 +846,12 @@ impl Interface {
         }
         // a full-screen page covers the timeline, as it covers the canvas
         if self.canvas_info.is_none() && !self.gesture_controls.open {
+            self.animation.tweens = self.prefs.plugins.tweens();
+            self.animation.frame_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Frame);
             let said = self.animation.show(&ctx, &mut self.look, session, &self.colours.palettes, self.colours.harmony);
+            if let Some(key) = self.animation.run_action.take() {
+                self.run_plugin_action(&ctx, session, key);
+            }
             if let Some(crate::animation::Said::NoRoom) = said {
                 crate::files::no_room(session);
             }
@@ -821,7 +901,7 @@ impl Interface {
             self.licences = false;
         }
         let keys_to_canvas = self.canvas_shown() && !ctx.egui_wants_keyboard_input() && !self.keys_taken();
-        self.shortcut_list.show(&ctx, keys_to_canvas);
+        self.shortcut_list.show(&ctx, keys_to_canvas, &self.prefs.plugins);
         self.name_colour(&ctx);
         self.place_canvas(session, ctx.pixels_per_point());
         session.set_glass(backdrops, windows);
@@ -1224,6 +1304,11 @@ impl Interface {
     /// Undo (recoloring, the core takes back the open fill first).
     fn undo(&mut self, session: &CanvasSession) {
         self.feedback();
+        // transforming, the transform's last change goes back, the box with it
+        if self.transform.on {
+            self.transform.moved(session.transform_apply(procraft_core::TransformAction::Undo));
+            return;
+        }
         // a finished text's step goes back to editing that text first, as a step of its own
         if !self.text.editing()
             && !self.transform.on
@@ -1237,7 +1322,7 @@ impl Interface {
             && let Some(name) = session.text_box_undo()
         {
             self.text.reread(session);
-            self.overlays.notice(format!("Undo {name}"), false);
+            self.step_notice(session, true, Some(name));
             return;
         }
         // undoing while editing text otherwise undoes the whole edit
@@ -1245,20 +1330,31 @@ impl Interface {
         let could = session.info().can_undo;
         let name = session.undo();
         if could || name.is_some() {
-            self.overlays.notice(name.map_or("Undo".into(), |n| format!("Undo {n}")), false);
+            self.step_notice(session, true, name);
         }
         self.follow_shape(session);
         // a model's tile chosen before comes back, with its channel's colour
         self.layers.follow_channel(session, &mut self.colours);
     }
 
+    /// The notice an undo (`undo`) or a redo of the step `name` shows, unless a plugin hides it.
+    fn step_notice(&mut self, session: &CanvasSession, undo: bool, name: Option<String>) {
+        if let Some(text) = session.step_notice(undo, name) {
+            self.overlays.notice(text, false);
+        }
+    }
+
     fn redo(&mut self, session: &CanvasSession) {
         self.feedback();
+        // transforming, nothing is redone until it ends
+        if self.transform.on {
+            return;
+        }
         if self.text.editing()
             && let Some(name) = session.text_box_redo()
         {
             self.text.reread(session);
-            self.overlays.notice(format!("Redo {name}"), false);
+            self.step_notice(session, false, Some(name));
             return;
         }
         // text being edited is kept first
@@ -1269,7 +1365,7 @@ impl Interface {
         let text = if editing { None } else { session.text_redo_layer() };
         let name = session.redo();
         if could {
-            self.overlays.notice(name.map_or("Redo".into(), |n| format!("Redo {n}")), false);
+            self.step_notice(session, false, name);
         }
         self.follow_shape(session);
         self.layers.follow_channel(session, &mut self.colours);
@@ -1616,7 +1712,8 @@ impl Interface {
 
     /// Opens adjustment `a` on the current layer (anything else open ends first).
     fn start_adjustment(&mut self, session: &CanvasSession, a: procraft_core::Adjustment) {
-        if !self.takes_changes(session) {
+        let why = session.why_not_adjusted(a);
+        if !self.say_blocked(session, why) {
             return;
         }
         self.switch_modes(session, ModeButton::Adjustment);
@@ -1627,6 +1724,40 @@ impl Interface {
 
     /// Opens the plugin's filter `id` on the current layer, as [`Self::start_adjustment`] does. The
     /// artwork is saved first, the first time in a session.
+    /// The panel a plugin's action showed, while it is open: a touch on it told to the plugin on a
+    /// thread of its own (it may take seconds), Done closing it.
+    fn plugin_panel(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, backdrops: &mut Vec<f32>) {
+        let Some(panel) = self.prefs.plugins.panel() else {
+            self.plugin_panel_held = None;
+            return;
+        };
+        let asked = crate::actions::plugin_panel(ctx, &mut self.look, &panel, &mut self.plugin_panel_held, backdrops);
+        match asked {
+            Some(crate::actions::PanelTouch::Touch(row, value)) => {
+                let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
+                std::thread::spawn(move || {
+                    plugins.panel_touched(row, value, session);
+                    ctx.request_repaint();
+                });
+            }
+            Some(crate::actions::PanelTouch::Close) => self.prefs.plugins.close_panel(),
+            None => {}
+        }
+    }
+
+    /// A plugin's action `key` run on the artwork, on a thread of its own (it may take seconds): the
+    /// panel closes so what it does shows; anything it says, or its stopping, is told as a failure
+    /// is.
+    fn run_plugin_action(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, key: String) {
+        // (what it may paint on, it checks: not a locked layer)
+        self.open = None;
+        let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
+        std::thread::spawn(move || {
+            plugins.run_action(key, session);
+            ctx.request_repaint();
+        });
+    }
+
     fn start_plugin_filter(&mut self, session: &CanvasSession, id: String) {
         if !self.takes_changes(session) {
             return;
@@ -1718,7 +1849,7 @@ impl Interface {
         }
         let Some(cut) = session.cut_layer() else { return false };
         self.clipboard = Some(cut);
-        self.system_clipboard.copied_here();
+        self.system_clipboard.copied_here(self.clipboard.as_ref());
         self.overlays.notice("Layer cut", false);
         true
     }
@@ -1728,7 +1859,7 @@ impl Interface {
         self.open = None;
         if let Some(copied) = session.copy_layer() {
             self.clipboard = Some(copied);
-            self.system_clipboard.copied_here();
+            self.system_clipboard.copied_here(self.clipboard.as_ref());
             self.overlays.notice("Layer copied", false);
         }
     }
@@ -1738,7 +1869,7 @@ impl Interface {
         self.open = None;
         if let Some(copied) = session.copy_canvas() {
             self.clipboard = Some(copied);
-            self.system_clipboard.copied_here();
+            self.system_clipboard.copied_here(self.clipboard.as_ref());
             self.overlays.notice("Canvas copied", false);
         }
     }
@@ -1854,6 +1985,12 @@ impl Interface {
                 &crate::icons::EYE_STRUCK,
                 Some("Show"),
             ),
+            Blocked::AlphaLocked => (
+                "Alpha Lock is on",
+                format!("\u{201c}{}\u{201d} can't be liquified while its alpha is locked.", l.name),
+                &crate::icons::PAGE_LOCKED,
+                Some("Turn Off"),
+            ),
             Blocked::MeshLocked => (
                 "Mesh is locked",
                 format!(
@@ -1953,6 +2090,7 @@ impl Interface {
         let Some((why, id)) = self.blocked.take() else { return };
         match answer {
             Answer::Extra if why == Blocked::Locked => _ = session.set_layer_locked(id, false),
+            Answer::Extra if why == Blocked::AlphaLocked => _ = session.set_layer_alpha_lock(id, false),
             // its own box ticked (what else hides it stays)
             Answer::Extra if matches!(why, Blocked::Hidden | Blocked::GroupHidden) => {
                 if let Some(said) = session.show_layer(id) {
@@ -2097,6 +2235,56 @@ impl Interface {
         goes_on
     }
 
+    /// The colour panel picking the background's colour, hanging from the Layers button: what is
+    /// picked goes to the background as it changes, the brush keeping its colour; its tick closes
+    /// it. Returns where it is.
+    fn background_panel(
+        &mut self,
+        ctx: &egui::Context,
+        session: &Arc<CanvasSession>,
+        button: Rect,
+        backdrops: &mut Vec<f32>,
+    ) -> Rect {
+        let Some(pick) = self.background_pick.as_mut() else { return Rect::NOTHING };
+        self.colours.set_triangle(self.prefs.plugins.colour_triangle());
+        let picker = self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
+        self.colours.set_picker(picker);
+        let brush = std::mem::replace(&mut self.colours.hsv, pick.hsv);
+        self.colours.background = true;
+        let history = self.prefs.colour_history_shown;
+        let shown = self.colours.show(
+            ctx,
+            &mut self.look,
+            session,
+            &mut self.drop,
+            button,
+            &mut self.prefs.colour_history_shown,
+            backdrops,
+        );
+        if self.prefs.colour_history_shown != history {
+            self.prefs.keep();
+        }
+        self.colours.background = false;
+        let picked = std::mem::replace(&mut self.colours.hsv, brush);
+        if let Some(rgb) = pick.follow(picked) {
+            let [r, g, b] = of_hex(rgb);
+            session.set_background_color(r, g, b, false);
+        }
+        if std::mem::take(&mut self.colours.background_done) {
+            self.open = None;
+        }
+        shown
+    }
+
+    /// The background's colour picked is kept, as one undo step (if it changed), and the panel
+    /// goes back to the brush's.
+    fn end_background_pick(&mut self, session: &CanvasSession) {
+        if let Some(rgb) = self.background_pick.take().and_then(BackgroundPick::kept) {
+            let [r, g, b] = of_hex(rgb);
+            session.set_background_color(r, g, b, true);
+        }
+    }
+
     /// The open panel, hanging from its button; a press anywhere else, or Escape, closes it.
     fn popover(
         &mut self,
@@ -2120,14 +2308,19 @@ impl Interface {
                 self.keep_brushes |= std::mem::take(&mut self.library.changed);
                 shown
             }
+            Popover::Layers if self.background_pick.is_some() => self.background_panel(ctx, session, button, backdrops),
             Popover::Layers => {
+                self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
                 let shown = self.layers.show(ctx, &mut self.look, session, &mut self.colours, button, backdrops);
+                if let Some(key) = self.layers.run_action.take() {
+                    self.run_plugin_action(ctx, session, key);
+                }
                 if let Some((text, warning)) = self.layers.notice.take() {
                     self.overlays.notice(text, warning);
                 }
                 if let Some(copied) = self.layers.copied.take() {
                     self.clipboard = Some(copied);
-                    self.system_clipboard.copied_here();
+                    self.system_clipboard.copied_here(self.clipboard.as_ref());
                 }
                 if std::mem::take(&mut self.layers.share) {
                     self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));
@@ -2139,9 +2332,18 @@ impl Interface {
                 if std::mem::take(&mut self.layers.layer_opacity) {
                     self.start_layer_opacity(session);
                 }
+                // its background row tapped: the colour panel in its place, on the background's
+                if std::mem::take(&mut self.layers.pick_background) {
+                    let b = session.background();
+                    self.background_pick = Some(BackgroundPick::new(to_hex([b.r, b.g, b.b]), self.colours.hsv[0]));
+                }
                 shown
             }
             Popover::Colour => {
+                self.colours.set_triangle(self.prefs.plugins.colour_triangle());
+                let picker =
+                    self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
+                self.colours.set_picker(picker);
                 let shown = self.prefs.colour_history_shown;
                 let history = &mut self.prefs.colour_history_shown;
                 let rect = self.colours.show(ctx, &mut self.look, session, &mut self.drop, button, history, backdrops);
@@ -2157,9 +2359,10 @@ impl Interface {
             Popover::Adjustments => {
                 use crate::adjustments::MenuRow;
                 let filters = self.prefs.plugins.filters();
-                let turned = self.adjustments.showing_filters && !filters.is_empty();
+                let actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Adjustments);
+                let turned = self.adjustments.showing_filters && (!filters.is_empty() || !actions.is_empty());
                 let (shown, tapped) =
-                    crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, turned);
+                    crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, &actions, turned);
                 match tapped {
                     Some(MenuRow::Open(a)) => self.start_adjustment(session, a),
                     Some(MenuRow::Plugins) => self.adjustments.showing_filters = true,
@@ -2167,6 +2370,10 @@ impl Interface {
                     Some(MenuRow::Filter(id)) => {
                         self.adjustments.showing_filters = false;
                         self.start_plugin_filter(session, id);
+                    }
+                    Some(MenuRow::Action(key)) => {
+                        self.adjustments.showing_filters = false;
+                        self.run_plugin_action(ctx, session, key);
                     }
                     None => {}
                 }
@@ -2186,6 +2393,7 @@ impl Interface {
                     model: self.model,
                     model_flat: self.model && session.model_flat(),
                     paint_through: self.model && session.paint_through(),
+                    svg: session.exports_svg(),
                 };
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
@@ -2193,6 +2401,11 @@ impl Interface {
                     Some(Act::ImportPlugin) => {
                         if let Some(path) = crate::files::pick_plugin() {
                             self.offer_plugin_file(&path);
+                        }
+                    }
+                    Some(Act::PluginAction) => {
+                        if let Some(key) = self.actions_panel.take_plugin_action() {
+                            self.run_plugin_action(ctx, session, key);
                         }
                     }
                     Some(Act::Prefs) => {
@@ -2315,6 +2528,7 @@ impl Interface {
     /// One of the menus of popover `which` is open.
     fn modal(&self, which: Popover) -> bool {
         match which {
+            Popover::Layers if self.background_pick.is_some() => self.colours.modal(),
             Popover::Layers => self.layers.modal(),
             Popover::Brushes => self.library.modal(),
             Popover::Colour => self.colours.modal(),
@@ -2339,7 +2553,10 @@ impl Interface {
     /// A hex keypad, or text being edited, takes the keys (a text field's are egui's own).
     fn keys_taken(&self) -> bool {
         self.text.editing()
-            || ((self.open == Some(Popover::Colour) || self.colours.floating.is_some()) && self.colours.takes_keys())
+            || ((self.open == Some(Popover::Colour)
+                || self.colours.floating.is_some()
+                || self.background_pick.is_some())
+                && self.colours.takes_keys())
             || self.animation.takes_keys()
     }
 
@@ -2356,71 +2573,103 @@ impl Interface {
             || self.settings)
     }
 
-    /// A hardware keyboard's shortcuts: the core's (keys.rs), and the desktop's files: Ctrl (⌘)
-    /// with N, O, S (and Shift).
-    fn shortcuts(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo) {
+    /// A hardware keyboard's shortcuts: the core's (keys.rs), and the desktop's own: Ctrl (⌘) with
+    /// N, O, S (and Shift) for its files, with +, - and 0 for its view. A plugin rebinding keys takes
+    /// each press as it says first; a plugin's panel asking for a key press takes the next.
+    fn shortcuts(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, info: &CanvasInfo) {
         // a text field, or the hex keypad, takes the keys; text being edited takes them all
         if ctx.egui_wants_keyboard_input() || self.keys_taken() {
             return;
         }
-        let pressed = |modifiers: Modifiers, key: Key| {
-            ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
-        };
-        let command_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-        // with Shift first: the shortcut without it would take it too
-        if pressed(command_shift, Key::S) {
-            self.actions.push(Action::SaveAs);
-        } else if pressed(Modifiers::COMMAND, Key::S) {
-            self.actions.push(Action::Save);
-        }
-        if pressed(Modifiers::COMMAND, Key::N) {
-            self.actions.push(Action::New);
-        }
-        if pressed(Modifiers::COMMAND, Key::O) {
-            self.actions.push(Action::Open);
-        }
-        let keys: Vec<(Key, Modifiers)> = ctx.input(|i| {
+        let keys: Vec<(Key, Modifiers, bool)> = ctx.input(|i| {
             i.events
                 .iter()
                 .filter_map(|e| match e {
-                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                    egui::Event::Key { key, pressed: true, modifiers, repeat, .. } => Some((*key, *modifiers, *repeat)),
                     _ => None,
                 })
                 .collect()
         });
-        for (key, modifiers) in keys {
-            // R tapped turns the canvas a step, held it turns it by dragging: the window's input
-            // sees to it (input.rs)
-            if key == Key::R && !modifiers.command && !modifiers.alt {
-                ctx.input_mut(|i| i.consume_key(modifiers, key));
-                continue;
-            }
-            // Ctrl (⌘) with + or = zooms in about the window's middle, with - out, with 0 fits the
-            // canvas (the desktop's own, as the R key's turn)
-            if modifiers.command && matches!(key, Key::Plus | Key::Equals | Key::Minus | Key::Num0) {
-                let middle = ctx.content_rect().center() * ctx.pixels_per_point();
-                match key {
-                    Key::Num0 => session.settle_to_fit(),
-                    Key::Minus => session.view_gesture(middle.x, middle.y, 0.0, 0.0, 1.0 / KEY_ZOOM, 0.0),
-                    _ => session.view_gesture(middle.x, middle.y, 0.0, 0.0, KEY_ZOOM, 0.0),
+        let mut asking = self.prefs.plugins.panel().is_some_and(|panel| panel.key_press);
+        for (key, modifiers, repeat) in keys {
+            let Some(name) = key_name(key) else { continue };
+            let press =
+                KeyCombo { key: name.into(), command: modifiers.command, shift: modifiers.shift, alt: modifiers.alt };
+            if asking {
+                if !repeat {
+                    // the one press it asked for, told on a thread of its own (it may take a while)
+                    asking = false;
+                    match key {
+                        Key::Escape => _ = escape(ctx),
+                        Key::Space => self.space_to_panel = true,
+                        _ => {}
+                    }
+                    let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
+                    std::thread::spawn(move || {
+                        plugins.panel_key(press, session);
+                        ctx.request_repaint();
+                    });
                 }
                 ctx.input_mut(|i| i.consume_key(modifiers, key));
                 continue;
             }
-            let Some(name) = key_name(key) else { continue };
-            let transforming = self.transform.on;
-            let Some(shortcut) = procraft_core::key_shortcut(
-                name.into(),
-                modifiers.command,
-                modifiers.shift,
-                modifiers.alt,
-                transforming,
-            ) else {
+            // R tapped turns the canvas a step, held it turns it by dragging, and Space tapped opens
+            // the QuickMenu, held it moves the canvas: the window's input sees to them (input.rs),
+            // as to Escape and F11 elsewhere
+            if key == Key::R && !modifiers.command && !modifiers.alt {
+                ctx.input_mut(|i| i.consume_key(modifiers, key));
                 continue;
+            }
+            if matches!(key, Key::Space | Key::Escape | Key::F11) {
+                continue;
+            }
+            let did = match self.prefs.plugins.key_press(press) {
+                Some(press) => self.press(ctx, session, info, &press),
+                // a key a plugin took away does nothing
+                None => true,
             };
-            ctx.input_mut(|i| i.consume_key(modifiers, key));
-            self.key_shortcut(ctx, session, info, shortcut);
+            if did {
+                ctx.input_mut(|i| i.consume_key(modifiers, key));
+            }
         }
+    }
+
+    /// Does what `press` does (as a plugin rebinding keys took it): the desktop's own, else the
+    /// core's shortcut on it. True if it did something.
+    fn press(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, press: &KeyCombo) -> bool {
+        if press.command {
+            // Ctrl (⌘) with + or = zooms in about the window's middle, with - out, with 0 fits the
+            // canvas (the desktop's own, as the R key's turn)
+            let middle = ctx.content_rect().center() * ctx.pixels_per_point();
+            match press.key.as_str() {
+                "s" => self.actions.push(if press.shift { Action::SaveAs } else { Action::Save }),
+                "n" => self.actions.push(Action::New),
+                "o" => self.actions.push(Action::Open),
+                "=" | "plus" => session.view_gesture(middle.x, middle.y, 0.0, 0.0, KEY_ZOOM, 0.0),
+                "-" => session.view_gesture(middle.x, middle.y, 0.0, 0.0, 1.0 / KEY_ZOOM, 0.0),
+                "0" => session.settle_to_fit(),
+                _ => {
+                    return self.canvas_press(ctx, session, info, press);
+                }
+            }
+            return true;
+        }
+        self.canvas_press(ctx, session, info, press)
+    }
+
+    /// Does the core's shortcut on `press`, if it has one; true if it did.
+    fn canvas_press(
+        &mut self,
+        ctx: &egui::Context,
+        session: &CanvasSession,
+        info: &CanvasInfo,
+        press: &KeyCombo,
+    ) -> bool {
+        let shortcut =
+            procraft_core::key_shortcut(press.key.clone(), press.command, press.shift, press.alt, self.transform.on);
+        let Some(shortcut) = shortcut else { return false };
+        self.key_shortcut(ctx, session, info, shortcut);
+        true
     }
 
     /// Does what a keyboard shortcut says.
@@ -2432,8 +2681,8 @@ impl Interface {
             KeyShortcut::CopyLayer => self.copy_layer(session),
             KeyShortcut::CutLayer => self.cut_layer(session),
             KeyShortcut::Paste => self.paste(ctx, false),
-            KeyShortcut::Paint => self.choose_tool(session, ToolKind::Paint),
-            KeyShortcut::Erase => self.choose_tool(session, ToolKind::Erase),
+            KeyShortcut::Paint => self.tool_key(session, ToolKind::Paint),
+            KeyShortcut::Erase => self.tool_key(session, ToolKind::Erase),
             KeyShortcut::Eyedropper => session.set_pick_next(!session.pick_next()),
             KeyShortcut::Selection => self.toggle_selection(session),
             KeyShortcut::Transform => self.toggle_transform(session),
@@ -2454,6 +2703,12 @@ impl Interface {
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
             KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
         }
+    }
+
+    /// A tool's key: whatever mode is open ends, keeping what it made, as for the tool's button.
+    fn tool_key(&mut self, session: &CanvasSession, tool: ToolKind) {
+        self.switch_modes(session, ModeButton::Tool);
+        self.choose_tool(session, tool);
     }
 
     /// A tool chosen (as its button does when it isn't the current one).
@@ -2489,7 +2744,8 @@ fn escape_id() -> egui::Id {
     egui::Id::unique("escape taken")
 }
 
-/// The name the core's shortcuts know `key` by (keys.rs), if it has one.
+/// The name the core's shortcuts know `key` by (keys.rs, as a plugin is told a press), if it has
+/// one.
 fn key_name(key: Key) -> Option<&'static str> {
     Some(match key {
         Key::OpenBracket | Key::OpenCurlyBracket => "[",
@@ -2501,6 +2757,29 @@ fn key_name(key: Key) -> Option<&'static str> {
         Key::ArrowRight => "right",
         Key::ArrowUp => "up",
         Key::ArrowDown => "down",
+        Key::Space => "space",
+        Key::Escape => "escape",
+        Key::Minus => "-",
+        Key::Equals => "=",
+        Key::Plus => "plus",
+        Key::Comma => ",",
+        Key::Period => ".",
+        Key::Slash => "/",
+        Key::Backslash => "\\",
+        Key::Quote => "'",
+        Key::Backtick => "`",
+        Key::F1 => "f1",
+        Key::F2 => "f2",
+        Key::F3 => "f3",
+        Key::F4 => "f4",
+        Key::F5 => "f5",
+        Key::F6 => "f6",
+        Key::F7 => "f7",
+        Key::F8 => "f8",
+        Key::F9 => "f9",
+        Key::F10 => "f10",
+        Key::F11 => "f11",
+        Key::F12 => "f12",
         // the letters and digits by their names ("A", "0")
         _ => Some(key.name()).filter(|n| n.len() == 1)?,
     })
@@ -2646,5 +2925,55 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
             })
         }
         Err(_) => Inserted::Failed("This picture can't be opened."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_go_by_the_names_the_core_knows_and_go_as_they_are_with_no_plugin() {
+        let named = [
+            (Key::Z, "Z"),
+            (Key::Num0, "0"),
+            (Key::OpenCurlyBracket, "["),
+            (Key::Space, "space"),
+            (Key::Escape, "escape"),
+            (Key::Plus, "plus"),
+            (Key::Equals, "="),
+            (Key::Backslash, "\\"),
+            (Key::F1, "f1"),
+            (Key::F12, "f12"),
+            (Key::ArrowUp, "up"),
+        ];
+        for (key, name) in named {
+            assert_eq!(key_name(key), Some(name), "{key:?}");
+        }
+        assert_eq!(key_name(Key::Tab), None);
+        assert_eq!(key_name(Key::F13), None);
+        // with no plugin rebinding keys, each press goes as it is (its key as the core names it)
+        let plugins = procraft_core::Plugins::new();
+        let press = KeyCombo { key: "Z".into(), command: true, shift: false, alt: false };
+        assert_eq!(plugins.key_press(press).map(|p| (p.key, p.command)), Some(("z".to_owned(), true)));
+        assert_eq!(plugins.key_shortcut_list(true, false), procraft_core::key_shortcut_list(true, false));
+    }
+
+    #[test]
+    fn a_background_pick_sends_each_change_and_keeps_the_last_as_it_closes() {
+        // white, a grey, starts on the brush's hue
+        let mut pick = BackgroundPick::new(0xFFFFFF, 0.6);
+        assert_eq!(pick.hsv, [0.6, 0.0, 1.0]);
+        // shown as it was: nothing to send, nothing to keep
+        assert_eq!(pick.follow([0.6, 0.0, 1.0]), None);
+        assert_eq!(pick.kept(), None);
+        // each new colour sent once, the last kept
+        assert_eq!(pick.follow([0.0, 1.0, 1.0]), Some(0xFF0000));
+        assert_eq!(pick.follow([0.0, 1.0, 1.0]), None);
+        assert_eq!(pick.follow([1.0 / 3.0, 1.0, 1.0]), Some(0x00FF00));
+        assert_eq!(pick.kept(), Some(0x00FF00));
+        // back where it began is still a change to keep (the live changes were sent)
+        assert_eq!(pick.follow([0.6, 0.0, 1.0]), Some(0xFFFFFF));
+        assert_eq!(pick.kept(), Some(0xFFFFFF));
     }
 }

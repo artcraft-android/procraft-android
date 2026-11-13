@@ -68,7 +68,17 @@ struct ArtworkFile {
         skip_serializing_if = "Option::is_none"
     )]
     reference: Option<procraft_engine::reference_window::ReferenceWindow>,
+    /// The kind of artwork it is, if a plugin makes it (`<id>.<key>`): the plugin's data is beside
+    /// it in `plugin-data.bin`, and the layers are what it drew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin: Option<String>,
+    /// The layer a plugin's artwork's picture is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin_layer: Option<u64>,
 }
+
+/// A plugin's artwork's data in its folder.
+pub(crate) const PLUGIN_DATA: &str = "plugin-data.bin";
 
 /// A view kept with an artwork: the canvas point in the middle of the window, the zoom and the
 /// rotation (radians).
@@ -168,6 +178,8 @@ pub(crate) struct SaveSnapshot {
     gpu: Option<procraft_gpu::Gpu>,
     /// The Reference window's picture, if it has one.
     reference_picture: Option<Arc<Vec<u8>>>,
+    /// A plugin's artwork's data, if it is one.
+    plugin_data: Option<Vec<u8>>,
 }
 
 /// How much of a save's layers may still be on their way back from the GPU when the lock is let
@@ -224,6 +236,16 @@ pub(crate) fn pixels_hash(rgba: &[u8]) -> u64 {
 }
 
 impl crate::State {
+    /// The time counted since tracking last started goes into the artwork's (at most a day at
+    /// once), and counts on from now.
+    pub(crate) fn count_tracked_time(&mut self) {
+        let Some(since) = self.tracking_since else { return };
+        let now = std::time::Instant::now();
+        let ms = u64::try_from(now.duration_since(since).as_millis()).unwrap_or(u64::MAX).min(24 * 3600 * 1000);
+        self.info.tracked_ms = self.info.tracked_ms.saturating_add(ms);
+        self.tracking_since = Some(now);
+    }
+
     /// See [`CanvasSession::edits`].
     pub(crate) fn edits(&self) -> u64 {
         self.revision.wrapping_add(self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made))
@@ -232,6 +254,7 @@ impl crate::State {
     /// Nothing under way that saving would end or cut short.
     pub(crate) fn idle(&self) -> bool {
         self.stroke.is_none()
+            && self.plugin_artwork.as_ref().is_none_or(|a| !a.down)
             && self.transform.is_none()
             && !self.adjusting
             && self.text_edit.is_none()
@@ -258,6 +281,8 @@ impl crate::State {
             let there = known.get(&id) == Some(&hash) && layer_path(dir, id).exists();
             (!there).then_some((id, hash, rgba))
         };
+        // the time on it up to now saved with it
+        self.count_tracked_time();
         let model = self.model_snapshot()?;
         let file = ArtworkFile {
             format: FORMAT.to_owned(),
@@ -276,6 +301,17 @@ impl crate::State {
                 .or(self.saved_view),
             model: model.as_ref().map(|m| m.saved.clone()),
             reference: Some(self.reference_window.clone()).filter(|w| !w.is_unused()),
+            // (opened with its plugin off, it stays the plugin's: its kind and data kept as they were)
+            plugin: self
+                .plugin_artwork
+                .as_ref()
+                .map(|a| a.kind.clone())
+                .or_else(|| self.plugin_opened.as_ref().map(|o| o.kind.clone())),
+            plugin_layer: self
+                .plugin_artwork
+                .as_ref()
+                .map(|a| a.layer.0)
+                .or_else(|| self.plugin_opened.as_ref().and_then(|o| o.layer)),
         };
         let mut layers = Vec::new();
         let mut reading = Vec::new();
@@ -343,6 +379,11 @@ impl crate::State {
         }
         let gpu = self.gpu.clone();
         let reference_picture = self.reference_picture.clone();
+        let plugin_data = self
+            .plugin_artwork
+            .as_ref()
+            .map(|a| a.kept.clone())
+            .or_else(|| self.plugin_opened.as_ref().and_then(|o| o.data.clone()));
         Ok(SaveSnapshot {
             changed: changed_ids,
             file,
@@ -354,6 +395,7 @@ impl crate::State {
             model,
             gpu,
             reference_picture,
+            plugin_data,
         })
     }
 }
@@ -455,8 +497,19 @@ impl CanvasSession {
 /// Writes a save into `dir` (made if missing): the layers that changed since the last save there,
 /// the thumbnail and the document.
 fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Result<(), MobileError> {
-    let SaveSnapshot { file, mut layers, reading, files, composite, unshown, model, gpu, reference_picture, .. } =
-        snapshot;
+    let SaveSnapshot {
+        file,
+        mut layers,
+        reading,
+        files,
+        composite,
+        unshown,
+        model,
+        gpu,
+        reference_picture,
+        plugin_data,
+        ..
+    } = snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
     for (id, read) in reading {
         let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
@@ -541,6 +594,13 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
                 fs::write(p, png).map_err(|e| file_error("writing the reference picture", e))
             });
             stage(written, picture_path, &mut staged)?;
+        }
+        // a plugin's artwork's own data, whole, before the document that names its kind
+        if let Some(data) = plugin_data.as_deref() {
+            let path = dir.join(PLUGIN_DATA);
+            let written =
+                write_beside(&path, |p| fs::write(p, data).map_err(|e| file_error("writing the plugin's artwork", e)));
+            stage(written, path, &mut staged)?;
         }
         let json = serde_json::to_string(&file).map_err(|e| file_error("writing the artwork", e))?;
         let doc = dir.join("artwork.json");
@@ -700,6 +760,12 @@ impl CanvasSession {
             st.scene = scene;
             st.reference_window = file.reference.unwrap_or_default();
             st.reference_picture = reference_picture.map(Arc::new);
+            // a plugin's artwork: its kind and data, for the app to open it with its plugin
+            st.plugin_opened = file.plugin.map(|kind| crate::plugin_artwork::PluginOpened {
+                kind,
+                data: fs::read(dir.join(PLUGIN_DATA)).ok(),
+                layer: file.plugin_layer,
+            });
         }
         Ok(session)
     }
@@ -885,6 +951,7 @@ impl CanvasSession {
                 self.exported(0.1 + 0.6 * (i + 1) as f32 / count as f32);
             }
             let reference = (st.reference_window.clone(), st.reference_picture.clone());
+            st.count_tracked_time();
             (st.doc.clone(), pixels, composite, st.name.clone(), st.info.clone(), reference.0, reference.1)
         };
         let (w, h) = (doc.width(), doc.height());
@@ -972,9 +1039,24 @@ impl CanvasSession {
         self.shared.lock().name.clone()
     }
 
-    /// When the artwork was made, its strokes, the time spent on it and its author.
+    /// When the artwork was made, its strokes, the time spent on it (up to now) and its author.
     pub fn artwork_info(&self) -> ArtworkInfo {
-        self.shared.lock().info.clone()
+        let mut st = self.shared.lock();
+        st.count_tracked_time();
+        st.info.clone()
+    }
+
+    /// Time on the artwork counts while `on` (it is shown and the app in front), from now; off,
+    /// what was counted is added to the artwork's. Each save and [`Self::artwork_info`] takes the
+    /// time counted so far. (Android counts it itself, by [`Self::add_tracked_time`].)
+    pub fn set_tracking(&self, on: bool) {
+        let mut st = self.shared.lock();
+        st.count_tracked_time();
+        if !on {
+            st.tracking_since = None;
+        } else if st.tracking_since.is_none() {
+            st.tracking_since = Some(std::time::Instant::now());
+        }
     }
 
     pub fn set_author(&self, name: String) {
@@ -1284,11 +1366,13 @@ pub(crate) enum Opened {
 }
 
 impl Opened {
-    /// The pixels, which must be `width` × `height`.
+    /// The pixels, `width` × `height`: a layer's file of another size (one a crop's save left as
+    /// it was) comes in from its top left corner, cut or with clear pixels to fill, rather than
+    /// be lost.
     pub(crate) fn pixels(self, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
         match self {
             Opened::Pixels(rgba) => Ok(rgba),
-            Opened::Png(bytes) => decode_png(std::io::Cursor::new(bytes), width, height),
+            Opened::Png(bytes) => decode_png_into(std::io::Cursor::new(bytes), width, height, true),
         }
     }
 }
@@ -1320,23 +1404,44 @@ pub(crate) fn read_png(path: &Path, width: u32, height: u32) -> Result<Vec<u8>, 
 
 /// The RGBA8 pixels of the PNG `from` reads, which must be `width` × `height`.
 fn decode_png(from: impl std::io::BufRead + std::io::Seek, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
+    decode_png_into(from, width, height, false)
+}
+
+/// As [`decode_png`]; `fit`, a PNG of another size is taken from its top left corner into
+/// `width` × `height` (cut, or clear where it is smaller).
+fn decode_png_into(
+    from: impl std::io::BufRead + std::io::Seek,
+    width: u32,
+    height: u32,
+    fit: bool,
+) -> Result<Vec<u8>, MobileError> {
     let decoder = png::Decoder::new(from);
     let mut reader = decoder.read_info().map_err(|e| file_error("opening a layer", e))?;
     let (color, depth) = reader.output_color_type();
     let (w, h, interlaced) = (reader.info().width, reader.info().height, reader.info().interlaced);
-    if w != width || h != height || color != png::ColorType::Rgba || depth != png::BitDepth::Eight {
+    let sized = w == width && h == height;
+    if (!sized && !fit) || color != png::ColorType::Rgba || depth != png::BitDepth::Eight {
         return Err(file_error("opening a layer", format!("{w}×{h} {color:?}")));
+    }
+    if !sized {
+        log::warn!("a layer of {w}×{h} opened into {width}×{height}, from its top left");
     }
     let line = width as usize * 4;
     let mut buf = vec![0; line * height as usize];
     if interlaced {
         // not one of ours: whole or not at all
-        reader.next_frame(&mut buf).map_err(|e| file_error("opening a layer", e))?;
+        let mut whole = vec![0; w as usize * 4 * h as usize];
+        reader.next_frame(&mut whole).map_err(|e| file_error("opening a layer", e))?;
+        for (row, from) in buf.chunks_mut(line).zip(whole.chunks(w as usize * 4)) {
+            for (to, from) in row.iter_mut().zip(from) {
+                *to = *from;
+            }
+        }
         return Ok(buf);
     }
     // row by row: one damaged part way keeps the rows before the damage (the rest clear) rather
     // than the whole layer being lost
-    for (y, row) in buf.chunks_mut(line).enumerate() {
+    for (y, row) in buf.chunks_mut(line).enumerate().take(h as usize) {
         match reader.next_row() {
             Ok(Some(read)) => {
                 for (to, from) in row.iter_mut().zip(read.data()) {
@@ -1687,6 +1792,34 @@ mod signature_tests {
         assert!(cut[kept * line..].iter().all(|&v| v == 0));
         // cut before any row: none can be read
         assert!(Opened::Png(whole[..40].to_vec()).pixels(w, h).is_err());
+    }
+
+    #[test]
+    fn a_layer_file_of_another_size_opens_from_its_top_left() {
+        let (w, h) = (6u32, 4u32);
+        let rgba: Vec<u8> = (0..w * h).flat_map(|i| [(i % w) as u8 * 40, (i / w) as u8 * 60, 7, 255]).collect();
+        let path = std::env::temp_dir().join(format!("procraft-sized-layer-{}.png", std::process::id()));
+        write_png(&path, w, h, &rgba, &[]).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        let at = |px: &[u8], cw: u32, x: u32, y: u32| px[((y * cw + x) * 4) as usize..][..4].to_vec();
+        // smaller: the top left part
+        let cut = Opened::Png(bytes.clone()).pixels(4, 3).unwrap();
+        assert_eq!(cut.len(), 4 * 3 * 4);
+        for (x, y) in [(0, 0), (3, 0), (0, 2), (3, 2)] {
+            assert_eq!(at(&cut, 4, x, y), at(&rgba, w, x, y));
+        }
+        // bigger: all of it at the top left, clear around it
+        let grown = Opened::Png(bytes.clone()).pixels(8, 5).unwrap();
+        assert_eq!(at(&grown, 8, 5, 3), at(&rgba, w, 5, 3));
+        assert_eq!(at(&grown, 8, 6, 0), vec![0; 4]);
+        assert_eq!(at(&grown, 8, 0, 4), vec![0; 4]);
+        // anything else read by size still must be that size
+        assert!(read_png_bytes_sized(&bytes, 4, 3).is_err());
+    }
+
+    fn read_png_bytes_sized(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
+        decode_png(std::io::Cursor::new(bytes.to_vec()), width, height)
     }
 
     #[test]

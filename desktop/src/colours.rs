@@ -8,8 +8,8 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui
 use std::sync::Arc;
 
 use procraft_core::{
-    CanvasSession, ColourHistory, HueControl, Palettes, SLIDER_HUES, colours_in_p3, disc_picture, disc_to_square,
-    harmony_wheel, hue_at, hue_position, p3_hsv_of, p3_hsv_to_rgb, square_to_disc,
+    CanvasSession, ColourHistory, HueControl, Palettes, Plugins, SLIDER_HUES, colours_in_p3, disc_picture,
+    disc_to_square, harmony_wheel, hue_at, hue_position, p3_hsv_of, p3_hsv_to_rgb, square_to_disc,
 };
 
 use crate::colour_drop::{ColourDrop, Touch};
@@ -291,6 +291,11 @@ pub struct Colours {
     /// saturation.
     coords: [f32; 3],
     coords_of: Option<(ColourModel, u32)>,
+    /// The panel picks the background's colour (the Layers panel's Background color row tapped):
+    /// titled so, with a tick that closes it, and its colour sent to no brush (the interface takes
+    /// it to the background); and the tick tapped.
+    pub background: bool,
+    pub background_done: bool,
 }
 
 impl Default for Colours {
@@ -327,6 +332,8 @@ impl Default for Colours {
             model_chosen: None,
             coords: [0.0; 3],
             coords_of: None,
+            background: false,
+            background_done: false,
         }
     }
 }
@@ -380,6 +387,17 @@ impl Colours {
             self.set_model_coords(coords);
         }
         changed
+    }
+
+    /// Whether Classic shows a plugin's triangle in place of its square.
+    pub fn set_triangle(&mut self, on: bool) {
+        self.pickers.triangle = on;
+    }
+
+    /// The picker plugin on, if any, and the session its picture is drawn with: Classic's square is
+    /// its.
+    pub fn set_picker(&mut self, picker: Option<(Arc<Plugins>, Arc<CanvasSession>)>) {
+        self.pickers.picker = picker;
     }
 
     /// Classic's square in `rect`, in the colour model; whether it changed the colour.
@@ -577,6 +595,10 @@ impl Colours {
     }
 
     pub fn send(&self, session: &CanvasSession) {
+        // picking the background's colour, the brush keeps its own
+        if self.background {
+            return;
+        }
         let [r, g, b] = self.rgb();
         session.set_color(r, g, b);
         let [r, g, b] = self.secondary;
@@ -641,7 +663,17 @@ impl Colours {
                 ui.allocate_rect(rect, Sense::click());
                 panel::frame(ui, look, "colour frame", rect, arrow_x, backdrops);
                 let body = panel::body(rect);
-                if self.mode == Mode::Palettes {
+                if self.background {
+                    // titled so on every page, with a tick 12 in from the right that closes it
+                    panel::header(ui, look, body, "Background", 20.0, false, false);
+                    let tick =
+                        Rect::from_min_size(pos2(body.right() - 12.0 - 44.0, body.top() + 19.0), vec2(44.0, 44.0));
+                    ui.painter().circle_filled(tick.center(), 22.0, argb(pc::ACCENT));
+                    look.icon(ui, &icons::DONE_TICK, tick.center(), 40.0, Color32::WHITE);
+                    if ui.interact(tick, ui.scope_id().with("background done"), Sense::click()).clicked() {
+                        self.background_done = true;
+                    }
+                } else if self.mode == Mode::Palettes {
                     panel::header(ui, look, body, "Palettes", 20.0, false, false);
                     // the plus: a new palette, from a file or a picture, or the examples back
                     let plus =
@@ -658,7 +690,7 @@ impl Colours {
                 let swatch = vec2(43.0, 25.0);
                 let second = Rect::from_min_size(pos2(body.right() - 20.0 - swatch.x, body.top() + 21.5), swatch);
                 let first = second.translate(vec2(-(swatch.x + 7.0), 0.0));
-                if self.mode != Mode::Palettes {
+                if self.mode != Mode::Palettes && !self.background {
                     // the colour model, for the pages that work in one
                     if self.mode != Mode::Harmony {
                         let model =
@@ -679,10 +711,12 @@ impl Colours {
                 }
                 let grabber = Rect::from_center_size(pos2(body.center().x, body.top() + 6.0), vec2(40.0, 4.0));
                 ui.painter().rect_filled(grabber, 2, argb(GRABBER));
-                // dragged out by its grabber, the panel floats as a window of its own
+                // dragged out by its grabber, the panel floats as a window of its own (not while
+                // it picks the background's colour)
                 let handle = Rect::from_center_size(pos2(body.center().x, body.top() + 15.0), vec2(150.0, 30.0));
                 let held = ui.interact(handle, ui.scope_id().with("undock"), Sense::drag());
-                if held.dragged()
+                if !self.background
+                    && held.dragged()
                     && let (Some(p), Some(from)) = (held.interact_pointer_pos(), ui.input(|i| i.pointer.press_origin()))
                     && p.distance(from) > UNDOCK_DRAG
                 {
@@ -962,6 +996,12 @@ pub struct Pickers {
     /// brightness.
     square: Option<(u32, usize, ColourModel, TextureHandle)>,
     wheel: Option<(u32, usize, TextureHandle)>,
+    /// A plugin has Classic show a triangle in place of its square (HSB), or a picker plugin draws
+    /// it (its picture and where touches land); the picture for its hue and size, and whether a
+    /// picker plugin's.
+    pub triangle: bool,
+    pub picker: Option<(Arc<Plugins>, Arc<CanvasSession>)>,
+    triangle_picture: Option<(u32, usize, bool, TextureHandle)>,
     /// Harmony's hue, saturation and brightness (Display P3) as dragged to, with the colour they
     /// made: kept while that is the colour, not worked out again from it (a dark or greyish
     /// colour's would wander, and black's be lost).
@@ -1067,6 +1107,10 @@ impl Pickers {
     /// brightness up; returns whether it changed `hsv`.
     pub fn square(&mut self, ui: &Ui, hsv: &mut [f32; 3], square: Rect) -> bool {
         let model = self.model;
+        // a plugin's: its picker, or a triangle, in its place
+        if (self.triangle || self.picker.is_some()) && model == ColourModel::Hsb {
+            return self.triangle(ui, hsv, square);
+        }
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let before = *hsv;
@@ -1094,6 +1138,54 @@ impl Pickers {
         // the knob may hang over the square's edge
         let at = pos2(square.left() + hsv[1] * square.width(), square.top() + (1.0 - hsv[2]) * square.height());
         knob(ui, at, 10.75, srgb(model.to_rgb(*hsv)));
+        *hsv != before
+    }
+
+    /// A plugin's picker in Classic's square `area`, as big as fits: a picker plugin's picture,
+    /// touches and knob, or else a triangle (saturation and brightness between the pure hue at the
+    /// right, white at the top left and black at the bottom left); returns whether it changed `hsv`.
+    fn triangle(&mut self, ui: &Ui, hsv: &mut [f32; 3], area: Rect) -> bool {
+        let side = area.width().min(area.height());
+        let rect = Rect::from_center_size(area.center(), vec2(side, side));
+        let ctx = ui.ctx().clone();
+        let before = *hsv;
+        let picker = self.picker.clone();
+        let pick = |x: f32, y: f32| match &picker {
+            Some((plugins, _)) => plugins.picker_pick(x, y),
+            None => Some(procraft_core::triangle_sv(x, y)),
+        };
+        let response = ui.interact(rect, ui.scope_id().with("classic triangle"), Sense::click_and_drag());
+        if let Some(p) = response.interact_pointer_pos()
+            && let Some([s, v]) = pick((p.x - rect.left()) / side, (p.y - rect.top()) / side).as_deref()
+        {
+            hsv[1] = *s;
+            hsv[2] = *v;
+        }
+        let hue_key = (hsv[0] * 10_000.0).round() as u32;
+        let px = (side * ctx.pixels_per_point()).round() as usize;
+        let plugin = picker.is_some();
+        let stale = |(h, at, by, _): &(u32, usize, bool, TextureHandle)| *h != hue_key || *at != px || *by != plugin;
+        if self.triangle_picture.as_ref().is_none_or(stale) {
+            let rgba = match &picker {
+                Some((_, session)) => session.picker_picture(hsv[0], px as u32),
+                None => Some(procraft_core::triangle_picture(hsv[0], px as u32)),
+            };
+            // (a picture that couldn't be drawn shows none; its plugin goes off)
+            self.triangle_picture = rgba.filter(|rgba| rgba.len() == px * px * 4).map(|rgba| {
+                let image = egui::ColorImage::from_rgba_premultiplied([px, px], &rgba);
+                (hue_key, px, plugin, ctx.load_texture("classic triangle", image, TextureOptions::LINEAR))
+            });
+        }
+        if let Some((_, _, _, t)) = &self.triangle_picture {
+            ui.painter().image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        let at = match &picker {
+            Some((plugins, _)) => plugins.picker_point(hsv[1], hsv[2]),
+            None => Some(procraft_core::triangle_point(hsv[1], hsv[2])),
+        };
+        if let Some([x, y]) = at.as_deref() {
+            knob(ui, pos2(rect.left() + x * side, rect.top() + y * side), 10.75, srgb(ColourModel::Hsb.to_rgb(*hsv)));
+        }
         *hsv != before
     }
 
@@ -2283,5 +2375,57 @@ mod tests {
             let back = hue_at(HueControl::Slider, hue_position(HueControl::Slider, hue));
             assert!((back - hue).abs() < 1e-3, "{hue} came back {back}");
         }
+    }
+
+    #[test]
+    fn picking_the_background_the_panel_says_so_and_leaves_the_brush_s_colour() {
+        use egui::{Event, Modifiers, PointerButton, RawInput};
+        let (ctx, mut look, mut drop) = (egui::Context::default(), Look::default(), ColourDrop::default());
+        crate::look::install_fonts(&ctx);
+        let session = CanvasSession::new(64, 64);
+        let mut colours = Colours { mode: Mode::Disc, ..Colours::default() };
+        colours.send(&session);
+        let brush = session.color();
+        colours.background = true;
+        // a colour taken while it picks the background goes to no brush
+        colours.set_rgb(&session, 0x3366CC);
+        assert_eq!(session.color(), brush);
+        assert_eq!(to_hex(colours.rgb()), 0x3366CC);
+        // its tick, 12 in from the right, level with the title, closes it
+        let button = Rect::from_min_size(pos2(1000.0, 10.0), vec2(40.0, 40.0));
+        let (mut tick, mut history) = (Pos2::ZERO, true);
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        for step in 0..6 {
+            let events = match step {
+                2 => vec![Event::PointerMoved(tick)],
+                3 => vec![press(tick, true)],
+                4 => vec![press(tick, false)],
+                _ => Vec::new(),
+            };
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 1100.0))),
+                time: Some(f64::from(step) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let shown =
+                    colours.show(ui.ctx(), &mut look, &session, &mut drop, button, &mut history, &mut Vec::new());
+                let body = panel::body(shown);
+                tick = pos2(body.right() - 12.0 - 22.0, body.top() + 19.0 + 22.0);
+            });
+            output.textures_delta.clear();
+        }
+        assert!(colours.background_done);
+        assert_eq!(session.color(), brush);
+        // picking done, the brush's colour goes to the brush again
+        colours.background = false;
+        colours.set_rgb(&session, 0xCC3366);
+        assert_ne!(session.color(), brush);
     }
 }

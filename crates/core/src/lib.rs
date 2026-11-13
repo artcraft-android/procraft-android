@@ -18,10 +18,12 @@ mod adjusting;
 mod animation;
 mod brush_files;
 mod brush_library;
+mod brush_pictures;
 mod brushes;
 mod bundled;
 mod clipboard;
 mod colour;
+mod colour_blob;
 mod colour_drag;
 mod crop;
 mod crop_edit;
@@ -47,8 +49,12 @@ mod modes;
 mod palettes;
 mod pick;
 mod pickers;
+mod plugin_artwork;
+mod plugin_canvas;
+mod plugin_commands;
 mod plugin_file;
 mod plugin_filter;
+mod plugin_panel;
 mod plugin_run;
 mod plugins;
 mod pour;
@@ -62,8 +68,11 @@ mod reference_view;
 mod reference_window;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod render;
+mod reveal;
 mod scene3d;
 mod selection;
+mod sound_file;
+mod stroke_sound;
 mod studio;
 #[cfg(test)]
 mod tests;
@@ -73,6 +82,7 @@ mod timelapse;
 mod touch;
 mod transform;
 mod turn;
+mod tween;
 #[cfg(target_os = "android")]
 mod window;
 // the iPad app's window is its layer: taken and drawn into as Android's is
@@ -105,10 +115,12 @@ pub use animation::{
     export_fps_label, frame_rate,
 };
 pub use brush_files::{BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes};
+pub use brush_library::prepare_brushes;
 pub use brushes::{BrushInfo, BrushSetInfo, RecentBrush};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
 };
+pub use colour_blob::{BlobOutline, BlobShape, ColourBlob};
 pub use colour_drag::{ColourDrag, DragStep};
 pub use crop_edit::CropShown;
 pub use device::keep_device;
@@ -125,7 +137,7 @@ pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_sto
 pub use keys::{KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
 pub use layers::{
     BlendModeInfo, Blocked, HiddenBy, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
-    brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for, set_resident_budget,
+    brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for, set_layer_budget, set_resident_budget,
 };
 pub use liquify::liquify_reach;
 pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch};
@@ -133,13 +145,16 @@ pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
 pub use pickers::{
     disc_picture, disc_to_square, disc_to_square_point, harmony_wheel, p3_hsv_of, p3_hsv_to_rgb, rgb_to_p3_hsv,
-    square_to_disc, square_to_disc_point,
+    square_to_disc, square_to_disc_point, triangle_picture, triangle_point, triangle_sv,
 };
+pub use plugin_canvas::{PluginCanvas, PluginKind};
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
+pub use plugin_panel::{PanelRow, PluginPanel};
 pub use plugins::{
-    PluginControl, PluginInfo, PluginOffer, PluginPart, PluginSlider, PluginSource, PluginSwitch, Plugins,
-    plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown, plugin_slider_whole,
+    PluginAction, PluginControl, PluginInfo, PluginOffer, PluginPart, PluginPlace, PluginSlider, PluginSource,
+    PluginSwitch, Plugins, plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown,
+    plugin_slider_whole,
 };
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
@@ -153,7 +168,7 @@ pub use quick_menu::{
     quick_adjustments_listed, quick_menu_active_after, quick_menu_added, quick_menu_saved, quick_menu_slots,
     quick_menus, quick_menus_saved,
 };
-pub use quickshape::{QuickShapeInfo, QuickShapeKind};
+pub use quickshape::{QuickShapeAnchor, QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{
     ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect, reference_view_pinched,
 };
@@ -167,7 +182,7 @@ pub use scene3d::{
 pub use selection::{SelectionDisplay, SelectionJoin};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
-    small_source, source_from_picture, source_library, source_size,
+    small_source, source_from_copy, source_from_picture, source_library, source_size,
 };
 pub use text::{TextAlignment, TextDraw, TextDrawn, TextInfo, TextSide};
 pub use text_draw::{
@@ -401,6 +416,17 @@ pub(crate) struct State {
     pub(crate) brush_on_screen: bool,
     /// What samples go through on their way to a stroke, if anything.
     pub(crate) hooks: Option<Arc<hooks::Hooks>>,
+    /// A plugin's own artwork shown here, if this session shows one: its strokes go to it.
+    pub(crate) plugin_artwork: Option<plugin_artwork::PluginArtwork>,
+    /// Opened from a folder holding a plugin's artwork: its kind and its data, until the app opens
+    /// it with its plugin.
+    pub(crate) plugin_opened: Option<plugin_artwork::PluginOpened>,
+    /// The picker plugin's picture, compiled for this session's GPU: whose it is, and its code.
+    pub(crate) picker_program: Option<(String, Arc<str>, Arc<procraft_gpu::PictureProgram>)>,
+    /// When the stroke's input was last heard, for a sound plugin.
+    pub(crate) sound_heard: Option<std::time::Instant>,
+    /// Where the pen last hovered (window pixels) and when, for the spray can's rattle.
+    pub(crate) sound_hover: Option<(procraft_engine::geom::Vec2, std::time::Instant)>,
     /// Crops kept for undo: the canvas and document from before; and one undone, for redo, with
     /// the steps the canvas then put back had made (redo only while that hasn't changed).
     crop_undo: Option<(Canvas, Document)>,
@@ -416,6 +442,10 @@ pub(crate) struct State {
     pub(crate) text_steps: Vec<(u64, procraft_engine::document::LayerId)>,
     /// A colour dropped on the canvas whose threshold can still change.
     pub(crate) pour: Option<pour::Pour>,
+    /// A dropped colour's fill spreading in, while it does.
+    pub(crate) reveal: Option<reveal::Reveal>,
+    /// The system asks for less motion: a dropped colour's fill shows at once.
+    pub(crate) reduce_motion: bool,
     /// Recolor, while it is on.
     pub(crate) recolor: Option<recolor::Recolor>,
     /// The library as the user has it, and as it ships.
@@ -453,6 +483,9 @@ pub(crate) struct State {
     pub(crate) gpu: Option<Gpu>,
     pub(crate) canvas: Option<Canvas>,
     pub(crate) needs_frame: bool,
+    /// A frame wanted at this time, not before: the selection's bands drift slowly, so a frame
+    /// shows them moved only every so often (a pixel at a time).
+    pub(crate) frame_due: Option<std::time::Instant>,
     /// Frames wait (the canvas is being redrawn a stroke at a time, as the brush studio's pad is
     /// when its brush changes), and one was asked for meanwhile.
     pub(crate) holding_frames: bool,
@@ -468,6 +501,12 @@ pub(crate) struct State {
     pub(crate) pad_strokes: Option<Vec<(PointerKind, Vec<PenSample>)>>,
     /// Brush files' grains at their own size.
     pub(crate) grain_store: grain_store::GrainStore,
+    /// Where the library was last kept or read whole, and what it held then (see
+    /// `brush_library::Images::Told`): kept again only once that changes.
+    pub(crate) library_kept: Option<(std::path::PathBuf, u64)>,
+    /// Plugins' changes in progress (an action's or a panel touch's): while any is, no stroke
+    /// begins and undo and redo wait, or they would join its step.
+    pub(crate) plugin_stepping: u32,
     /// The pad shows only its sample scribble: a stroke of one's own takes it away.
     pub(crate) pad_sample: bool,
     /// The pad drawn as a sphere, the flat pad's strokes set aside meanwhile.
@@ -494,6 +533,9 @@ pub(crate) struct State {
     pub(crate) name: String,
     /// What the artwork keeps about itself: when it was made, strokes, time spent, its author.
     pub(crate) info: project::ArtworkInfo,
+    /// Since when time on the artwork counts, while it does (see [`CanvasSession::set_tracking`]):
+    /// not yet in `info`.
+    pub(crate) tracking_since: Option<std::time::Instant>,
     /// Saved layer pixels waiting for the canvas (an opened artwork before it is shown).
     pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
     /// The canvas couldn't be made from these pixels (a failure elsewhere doesn't stop the next try).
@@ -1207,6 +1249,28 @@ impl Shared {
 #[derive(uniffi::Object)]
 pub struct CanvasSession {
     pub(crate) shared: Arc<Shared>,
+    /// Itself, for what it hands plugins told of an event.
+    me: std::sync::Weak<CanvasSession>,
+}
+
+impl CanvasSession {
+    /// Tells the plugins on `hook` (an event's) that it happened: each acts at once, as one step
+    /// of its own. Not while a plugin is changing the artwork itself: its changes tell nothing.
+    pub(crate) fn tell_plugins(&self, hook: plugin_run::Hook) {
+        let hooks = {
+            let st = self.shared.lock();
+            if st.plugin_stepping > 0 {
+                return;
+            }
+            st.hooks.clone()
+        };
+        let (Some(hooks), Some(me)) = (hooks, self.me.upgrade()) else { return };
+        if !hooks.listens(hook) {
+            return;
+        }
+        let _step = self.plugin_step();
+        hooks.tell(hook, me);
+    }
 }
 
 #[uniffi::export]
@@ -1252,11 +1316,18 @@ impl CanvasSession {
             text_drawn: None,
             text_steps: Vec::new(),
             pour: None,
+            reveal: None,
+            reduce_motion: false,
             recolor: None,
             crop_undo: None,
             selection_visibility: 0.25,
             brush_on_screen: false,
             hooks: None,
+            picker_program: None,
+            plugin_artwork: None,
+            plugin_opened: None,
+            sound_heard: None,
+            sound_hover: None,
             input: procraft_engine::stroke::InputSettings::default(),
             crop_redo: None,
             library: shelf,
@@ -1282,6 +1353,7 @@ impl CanvasSession {
             scene: None,
             x_ray: false,
             needs_frame: false,
+            frame_due: None,
             holding_frames: false,
             frame_held: false,
             stop: false,
@@ -1290,6 +1362,8 @@ impl CanvasSession {
             frames: 0,
             pad_strokes: None,
             grain_store: grain_store::GrainStore::default(),
+            library_kept: None,
+            plugin_stepping: 0,
             pad_sample: false,
             sphere: None,
             frame_interval_ms: 0.0,
@@ -1307,6 +1381,7 @@ impl CanvasSession {
                     .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0)),
                 ..project::ArtworkInfo::default()
             },
+            tracking_since: None,
             revision: 0,
             transform: None,
             transform_mode: procraft_engine::transform::TransformMode::Freeform,
@@ -1359,7 +1434,8 @@ impl CanvasSession {
             reference_window: Default::default(),
             reference_picture: None,
         };
-        Arc::new(CanvasSession {
+        Arc::new_cyclic(|me| CanvasSession {
+            me: me.clone(),
             shared: Arc::new(Shared {
                 state: parking_lot::Mutex::new(state),
                 wake: parking_lot::Condvar::new(),
@@ -1450,6 +1526,19 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // a plugin's own artwork takes its strokes itself
+        if st.plugin_touch(plugin_artwork::Phase::Down, &samples) {
+            self.shared.frame(st);
+            return;
+        }
+        // a plugin changing the artwork: this stroke would join its step
+        if st.plugin_stepping > 0 {
+            return;
+        }
+        // radial symmetry in as many parts as a plugin says, for this stroke
+        st.doc.guide.radial = st.hooks.as_ref().and_then(|hooks| hooks.radial_segments());
+        // a fill still spreading in shows all of itself before anything is drawn over it
+        st.end_reveal();
         // the graphics stopped (perhaps while the app was away, its notice long gone): nothing
         // drawn will show, so each stroke tells it again
         if st.gpu.as_ref().is_some_and(Gpu::is_lost) {
@@ -1542,6 +1631,7 @@ impl CanvasSession {
                 steps: 0,
                 fresh: second.is_none().then(|| builder.clone()),
                 samples: Vec::new(),
+                line: builder.clone(),
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
         match second {
@@ -1558,6 +1648,13 @@ impl CanvasSession {
     pub fn stroke_add(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.plugin_touch(plugin_artwork::Phase::Moved, &samples) {
+            self.shared.frame(st);
+            return;
+        }
+        if st.plugin_stepping > 0 {
+            return;
+        }
         if st.scene_shown() {
             st.scene_stroke_add(&samples, false);
             self.shared.frame(st);
@@ -1610,6 +1707,13 @@ impl CanvasSession {
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.plugin_touch(plugin_artwork::Phase::Up, &samples) {
+            self.shared.frame(st);
+            return;
+        }
+        if st.plugin_stepping > 0 {
+            return;
+        }
         // a paint stroke's colour goes into the history (painting an adjustment on uses none)
         if st.tool == ToolKind::Paint
             && !st.adjusting
@@ -1633,6 +1737,8 @@ impl CanvasSession {
             self.shared.frame(st);
             return;
         }
+        // (painted into an open adjustment, it tells no plugin: what one did would end it)
+        let tells = !st.adjusting;
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let stamps = builder.add(&canvas_samples);
         // (a stroke shown with a tip lays them with the rest of it, as it ends)
@@ -1648,12 +1754,21 @@ impl CanvasSession {
         st.bake_painted_on();
         st.remember_last_stroke();
         self.shared.frame(st);
+        drop(guard);
+        // plugins told it was kept, before the next touch is taken
+        if tells {
+            self.tell_plugins(plugin_run::Hook::StrokeKept);
+        }
     }
 
     /// Drops the stroke (a second finger turned it into a gesture).
     pub fn stroke_cancel(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.plugin_touch(plugin_artwork::Phase::Off, &[]) {
+            self.shared.frame(st);
+            return;
+        }
         if st.scene_shown() {
             st.scene_stroke_cancel();
             self.shared.frame(st);
@@ -1707,6 +1822,12 @@ impl CanvasSession {
 
     pub fn grey_view(&self) -> bool {
         self.shared.lock().grey_view
+    }
+
+    /// Whether the system asks for less motion (Reduce Motion, animations off): a dropped colour's
+    /// fill then shows at once instead of spreading in.
+    pub fn set_reduce_motion(&self, reduce: bool) {
+        self.shared.lock().reduce_motion = reduce;
     }
 
     /// How many window pixels make one interface point (the screen's density).
@@ -1922,7 +2043,23 @@ impl CanvasSession {
 
     /// Undoes the last step; returns what it was called, if it was named.
     pub fn undo(&self) -> Option<String> {
+        // (nothing while a plugin changes the artwork: its step isn't one yet)
+        if self.shared.lock().plugin_stepping > 0 {
+            return None;
+        }
+        // a plugin's own artwork goes back through what it kept; the canvas's own steps (an action's,
+        // say) once it has none
+        if self.plugin_undo(true) == Some(true) {
+            return None;
+        }
         self.await_pour();
+        self.shared.lock().end_reveal();
+        // transforming, the transform's own last change goes back: the canvas's steps wait until
+        // it ends (one taken back under it would leave the box over what is no longer there)
+        if self.shared.lock().transform.is_some() {
+            self.transform_apply(crate::transform::TransformAction::Undo);
+            return None;
+        }
         // a picture being placed on a model goes first
         if self.model_picture_box().is_some() {
             self.model_picture_end(false);
@@ -1959,7 +2096,18 @@ impl CanvasSession {
 
     /// Redoes the last step undone; returns what it was called, if it was named.
     pub fn redo(&self) -> Option<String> {
+        if self.shared.lock().plugin_stepping > 0 {
+            return None;
+        }
+        if self.plugin_undo(false) == Some(true) {
+            return None;
+        }
         self.await_pour();
+        self.shared.lock().end_reveal();
+        // transforming, nothing is redone until it ends
+        if self.shared.lock().transform.is_some() {
+            return None;
+        }
         if let Some(name) = self.text_box_redo() {
             return Some(name);
         }
@@ -2039,8 +2187,9 @@ impl CanvasSession {
             size: sliders.size,
             opacity: sliders.opacity,
             brush_diameter: st.brush(st.tool).diameter(sliders.size) * st.brush_scale(),
-            // an open shape is kept, then undone
-            can_undo: st.canvas.as_ref().is_some_and(Canvas::can_undo)
+            // an open shape is kept, then undone; a plugin's artwork goes by its own steps
+            can_undo: st.plugin_steps().is_some_and(|(undo, _)| undo)
+                || st.canvas.as_ref().is_some_and(Canvas::can_undo)
                 || st.crop_undo.is_some()
                 || st.shape.is_some()
                 || st.adjust.touched()
@@ -2049,7 +2198,8 @@ impl CanvasSession {
             can_redo: st.shape.as_ref().map_or_else(
                 || st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready() || st.shape_to_redo(),
                 quickshape::ShapeEdit::can_redo,
-            ) || st.text_edit.as_ref().is_some_and(|e| e.has_step(false)),
+            ) || st.text_edit.as_ref().is_some_and(|e| e.has_step(false))
+                || st.plugin_steps().is_some_and(|(_, redo)| redo),
             zoom: st.view.map_or(1.0, |v| v.zoom()),
             frames: st.frames,
             frame_interval_ms: st.frame_interval_ms,

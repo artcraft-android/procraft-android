@@ -434,6 +434,21 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
     )
 }
 
+/** Liquify's ring: its reach as a thin dark circle with a light edge, a fine cross in its middle. */
+@Composable
+private fun LiquifyRing(vm: CanvasViewModel) {
+    val at = vm.liquifyRingAt ?: return
+    val r = vm.liquifyRingRadius
+    androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+        for ((width, color) in listOf(3.dp.toPx() to Color.White, 1.dp.toPx() to Color.Black)) {
+            drawCircle(color, r, at, style = Stroke(width))
+            val arm = 5.dp.toPx()
+            drawLine(color, at - Offset(arm, 0f), at + Offset(arm, 0f), width)
+            drawLine(color, at - Offset(0f, arm), at + Offset(0f, arm), width)
+        }
+    }
+}
+
 private val NotchWidth = 20.dp
 private val NotchHeight = 4.dp
 private val NotchMark = Color(0x1AFFFFFF)
@@ -444,6 +459,7 @@ private val NotchMark = Color(0x1AFFFFFF)
  */
 @Composable
 fun BrushCursor(vm: CanvasViewModel) {
+    LiquifyRing(vm)
     val at = vm.cursorAt ?: return
     val r = vm.cursorRadius
     if (r < 2f) return

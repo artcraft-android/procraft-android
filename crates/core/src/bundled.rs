@@ -7,14 +7,29 @@
 
 /// Each by its folder's name under `plugins/`, and the file packed from it.
 pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
+    ("brush-sounds", include_bytes!("../bundled-plugins/brush-sounds.procraft-plugin")),
+    ("colour-triangle", include_bytes!("../bundled-plugins/colour-triangle.procraft-plugin")),
     ("extract-lines", include_bytes!("../bundled-plugins/extract-lines.procraft-plugin")),
     ("eyedropper-layer", include_bytes!("../bundled-plugins/eyedropper-layer.procraft-plugin")),
+    ("fill-all-layers", include_bytes!("../bundled-plugins/fill-all-layers.procraft-plugin")),
     ("gap-closing", include_bytes!("../bundled-plugins/gap-closing.procraft-plugin")),
+    ("grid-layer", include_bytes!("../bundled-plugins/grid-layer.procraft-plugin")),
+    ("hide-undo-notice", include_bytes!("../bundled-plugins/hide-undo-notice.procraft-plugin")),
+    ("interface-colour", include_bytes!("../bundled-plugins/interface-colour.procraft-plugin")),
     ("interface-size", include_bytes!("../bundled-plugins/interface-size.procraft-plugin")),
+    ("keyboard-shortcuts", include_bytes!("../bundled-plugins/keyboard-shortcuts.procraft-plugin")),
+    ("opacity-together", include_bytes!("../bundled-plugins/opacity-together.procraft-plugin")),
     ("outline", include_bytes!("../bundled-plugins/outline.procraft-plugin")),
+    ("paper-texture", include_bytes!("../bundled-plugins/paper-texture.procraft-plugin")),
     ("paste-into-masks", include_bytes!("../bundled-plugins/paste-into-masks.procraft-plugin")),
+    ("pin-panels", include_bytes!("../bundled-plugins/pin-panels.procraft-plugin")),
     ("posterise", include_bytes!("../bundled-plugins/posterise.procraft-plugin")),
+    ("quickshape-curves", include_bytes!("../bundled-plugins/quickshape-curves.procraft-plugin")),
+    ("radial-segments", include_bytes!("../bundled-plugins/radial-segments.procraft-plugin")),
+    ("randomise-brush", include_bytes!("../bundled-plugins/randomise-brush.procraft-plugin")),
     ("touch-offset", include_bytes!("../bundled-plugins/touch-offset.procraft-plugin")),
+    ("tweening", include_bytes!("../bundled-plugins/tweening.procraft-plugin")),
+    ("vector-canvas", include_bytes!("../bundled-plugins/vector-canvas.procraft-plugin")),
 ];
 
 #[cfg(test)]
@@ -66,6 +81,18 @@ mod tests {
         sha256(&all)
     }
 
+    /// What a plugin's packed file is made from, as `tools/pack_plugin.py` digests it: its folder,
+    /// and the plugin kit too when it is built with it.
+    fn source_digest(folder: &Path) -> String {
+        let mine = digest(folder);
+        let cargo = std::fs::read_to_string(folder.join("Cargo.toml")).unwrap_or_default();
+        if cargo.contains("path = \"../kit\"") {
+            sha256(format!("{mine}{}", digest(&plugins_folder().join("kit"))).as_bytes())
+        } else {
+            mine
+        }
+    }
+
     #[test]
     fn each_holds_up_as_a_plugin_file_and_is_its_folder_as_it_is_now() {
         let root = plugins_folder();
@@ -92,7 +119,7 @@ mod tests {
             let code = package.file(crate::plugin_run::MODULE).is_some();
             assert_eq!(code, package.manifest.holds.contains(&PluginPart::Hooks), "{name}");
             // its code can't be built here, so the folder as it was packed, all of it, is checked
-            let line = format!("{name} {}", digest(&folder));
+            let line = format!("{name} {}", source_digest(&folder));
             assert!(sources.lines().any(|kept| kept == line), "plugins/{name} has changed: {REPACK}");
             ids.push(package.manifest.id);
         }

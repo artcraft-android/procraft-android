@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.pin-panels",
+  "name": "Panels stay open",
+  "version": "1.2.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Painting with a panel open leaves it open. Its button on the top bar closes it.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["pin_panels"]
+}

@@ -54,17 +54,18 @@ private val GuideTop get() = if (Pc.light) Color(0xFFE1E1E3) else Color(0xFF1F1F
 private val GuideButton get() = if (Pc.light) Color(0xFFF5F8F9) else Color(0xFF1C1C1C)
 private val GuideButtonEdge get() = if (Pc.light) Color(0xFFDCDEDF) else Color(0xFF383838)
 private val GuideTitle get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFD8D8D8)
-private val GuideDone = Color(0xFF0190FF)
+private val GuideDone get() = Pc.tinted(Color(0xFF0190FF))
 private val GuideNote get() = if (Pc.light) Color(0xFFB5B5B5) else Color(0xFF4A4A4A)
 /** The toolbar's words: light, or dark grey with the light interface. */
 private val GuideLabel get() = if (Pc.light) Color(0xFF414141) else Color(0xFFD0D0D0)
-private val GuideNodeCentre = Color(0xFF0A84FF)
+private val GuideNodeCentre get() = Pc.tinted(Color(0xFF0A84FF))
 private val GuideNodeTurn = Color(0xFF30D158)
 
 /**
  * The grid size's keypad, frosted as measured: the sheet and its keys let a little of what is
- * under them through (dark over the dark editor: the sheet #1B1B1B, the side keys #2B2B2B, the
- * digits #525252; over the white canvas #2E2E30, #38383A, #59595B). Light, as Custom Canvas's.
+ * under them through, blurred (dark over the dark editor: the sheet #1B1B1B, the side keys #2B2B2B,
+ * the digits #525252; over the white canvas #2E2E30, #38383A, #59595B). Light, as Custom Canvas's,
+ * and opaque.
  */
 private val SheetFill get() = if (Pc.light) Color(0xFFD1D3D8) else Color(0xE91A1A1A)
 private val SheetKey get() = if (Pc.light) Color(0xFFABB2BB) else Color(0x514E4E4E)
@@ -79,6 +80,8 @@ private val KeyGap = 9.dp
 private val KeyGroups = 30.dp
 /** The sheet: the keys from 51 below its top to 38 above the screen's foot. */
 private val SheetHeight = 51.dp + KeyHeight * 4 + KeyGap * 3 + 38.dp
+/** The sheet's top corners. */
+private val SheetCorner = 30.dp
 
 private val KEYPAD_UNITS = listOf(
     GuideUnit.MILLIMETERS to "Millimeters",
@@ -213,7 +216,11 @@ fun GuideEditor(vm: CanvasViewModel) {
 private fun GridSizeKeypad(k: SizeKeypad, screenWidth: Dp, modifier: Modifier, onUnit: (GuideUnit) -> Unit, onKey: (Char) -> Unit, onDone: () -> Unit) {
     val w = ((screenWidth - 16.dp - KeyGroups * 2 - KeyGap * 2) / 5).coerceIn(40.dp, 150.dp)
     Box(
-        modifier.fillMaxWidth().height(SheetHeight).clip(RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp)).background(SheetFill)
+        modifier.fillMaxWidth().height(SheetHeight)
+            // the canvas under it blurred, as under the bars; its glass goes past the window's foot,
+            // so that only its top corners are rounded
+            .then(if (Pc.light) Modifier else rememberFrost(SheetCorner, BarGlass(pastBottom = SheetCorner)))
+            .clip(RoundedCornerShape(topStart = SheetCorner, topEnd = SheetCorner)).background(SheetFill)
             .pointerInput(Unit) { detectTapGestures { } },
     ) {
         Box(Modifier.align(Alignment.TopCenter).padding(top = 8.dp).size(250.dp, 32.dp)) {

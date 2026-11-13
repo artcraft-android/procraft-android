@@ -5,6 +5,7 @@
 //! nothing relies on reading the render target in the shader (Android GPUs have no portable way).
 
 mod canvas;
+mod kept;
 mod lighting;
 mod scene;
 mod sphere;
@@ -13,11 +14,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub use canvas::plugin_filter::{FilterCode, FilterProgram, FilterRun, read_filter};
+pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture};
 pub use canvas::{
-    Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, Readback, ReadyToPark, RemakeStats, Resample,
-    SecondStroke, SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target,
-    Thumbnail, most_resident, read_texture, start_reading, textures_bytes,
+    Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, LayerThumbnailStep, LiquifyMode, LiquifyStamp,
+    PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, SecondStroke, SelectionLook, SharedStroke,
+    SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, most_resident, read_texture,
+    start_reading, textures_bytes,
 };
+pub use kept::keep_pipelines_in;
 pub use lighting::Lighting;
 pub use scene::{
     GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, ShownSelection, SurfaceMap, material_source,
@@ -96,16 +100,42 @@ pub struct Gpu {
     lost: Arc<AtomicBool>,
     /// The canvases' pipelines, once the first canvas has made them.
     canvas_pipelines: Arc<OnceLock<Arc<canvas::Pipelines>>>,
+    /// The pipeline cache kept between runs (see [`kept`]), once the canvases' pipelines are made
+    /// with it.
+    kept: Arc<OnceLock<Option<kept::Kept>>>,
     /// Buffers pixels came back from the GPU through, kept for the next readback (see
     /// [`Gpu::readback_buffer`]).
     readbacks: Arc<std::sync::Mutex<Vec<wgpu::Buffer>>>,
 }
 
+/// `desc` with Direct3D 12's shader compiler chosen: the newer one if the app came with its
+/// `dxcompiler.dll` (beside it), else the one Windows has. Never one found elsewhere on the PATH, as
+/// wgpu would take: an older one there (an SDK's) can't make our shaders, and nothing draws.
+fn with_compiler(mut desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
+    desc.backend_options.dx12.shader_compiler = dx12_compiler();
+    desc
+}
+
+#[cfg(windows)]
+fn dx12_compiler() -> wgpu::Dx12Compiler {
+    let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("dxcompiler.dll")));
+    match beside.filter(|path| path.is_file()) {
+        Some(path) => wgpu::Dx12Compiler::DynamicDxc { dxc_path: path.to_string_lossy().into_owned() },
+        None => wgpu::Dx12Compiler::Fxc,
+    }
+}
+
+#[cfg(not(windows))]
+fn dx12_compiler() -> wgpu::Dx12Compiler {
+    wgpu::Dx12Compiler::Fxc
+}
+
 impl Gpu {
     /// A wgpu instance for this platform: Vulkan on Android, the native API elsewhere.
     pub fn instance() -> wgpu::Instance {
-        Gpu::instance_after(0)
-            .unwrap_or_else(|| wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()))
+        Gpu::instance_after(0).unwrap_or_else(|| {
+            wgpu::Instance::new(with_compiler(wgpu::InstanceDescriptor::new_without_display_handle()))
+        })
     }
 
     /// The backends a device is made from, best first: those `WGPU_BACKEND` names if it is set
@@ -113,8 +143,8 @@ impl Gpu {
     /// whose Vulkan is missing or fails); on Windows Vulkan and Direct3D 12, Direct3D 12 first on
     /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens), then OpenGL (a GPU or
     /// driver too old for either); on Linux Vulkan, then OpenGL (the same); elsewhere the native
-    /// API.
-    fn backends() -> Vec<wgpu::Backends> {
+    /// API. A backend's index here is the one the other calls take.
+    pub fn backends() -> Vec<wgpu::Backends> {
         if let Some(chosen) = wgpu::Backends::from_env().filter(|b| !b.is_empty()) {
             return vec![chosen];
         }
@@ -136,6 +166,21 @@ impl Gpu {
         Gpu::backends().len()
     }
 
+    /// Whether `WGPU_BACKEND` names the backends: then they are the only ones tried.
+    pub fn backends_named() -> bool {
+        wgpu::Backends::from_env().is_some_and(|b| !b.is_empty())
+    }
+
+    /// The GPUs `backends` sees, as each says what it is, from an instance of their own: no device
+    /// is made from any (Direct3D 12 makes one of its own for each, to ask what it can do; Vulkan
+    /// only asks), e.g. to choose which backend to try first.
+    pub fn adapters(backends: wgpu::Backends) -> Vec<wgpu::AdapterInfo> {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = backends;
+        let instance = wgpu::Instance::new(with_compiler(desc));
+        pollster::block_on(instance.enumerate_adapters(backends)).iter().map(wgpu::Adapter::get_info).collect()
+    }
+
     /// Backend `index`'s name, for the log and messages (see [`Gpu::instance_after`]).
     pub fn backend_name(index: usize) -> String {
         Gpu::backends().get(index).map_or_else(|| format!("backend {index}"), |b| backends_name(*b))
@@ -146,7 +191,7 @@ impl Gpu {
     pub fn instance_after(tries: usize) -> Option<wgpu::Instance> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = *Gpu::backends().get(tries)?;
-        Some(wgpu::Instance::new(desc))
+        Some(wgpu::Instance::new(with_compiler(desc)))
     }
 
     /// [`Gpu::instance_after`] for windows on `display`: OpenGL under Wayland and X11 can show
@@ -157,7 +202,7 @@ impl Gpu {
     ) -> Option<wgpu::Instance> {
         let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(display);
         desc.backends = *Gpu::backends().get(tries)?;
-        Some(wgpu::Instance::new(desc))
+        Some(wgpu::Instance::new(with_compiler(desc)))
     }
 
     /// Sends the writes queued so far to the device and waits for them, so the copies they were
@@ -235,6 +280,8 @@ impl Gpu {
     }
 
     fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, GpuError> {
+        // each stage timed in the log: on a slow driver, where a start stopped shows
+        let started = std::time::Instant::now();
         // every GPU the backend sees, for the log (a laptop's two, a driver's own name and version)
         for adapter in pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())) {
             let info = adapter.get_info();
@@ -247,6 +294,8 @@ impl Gpu {
                 info.driver_info
             );
         }
+        log::info!("the GPUs listed in {} ms", started.elapsed().as_millis());
+        let chosen = std::time::Instant::now();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
@@ -255,15 +304,24 @@ impl Gpu {
         }))
         .map_err(|e| GpuError::NoAdapter(e.to_string()))?;
         let info = adapter.get_info();
-        log::info!("GPU: {} ({:?}, driver {})", info.name, info.backend, info.driver_info);
+        log::info!(
+            "GPU: {} ({:?}, driver {}), chosen in {} ms",
+            info.name,
+            info.backend,
+            info.driver_info,
+            chosen.elapsed().as_millis()
+        );
+        let made = std::time::Instant::now();
         if keeps_textures_uncompressed(&info.name, info.backend) {
             UNCOMPRESSED.store(true, Ordering::Relaxed);
             log::info!("the canvas's textures kept uncompressed on this GPU");
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("procraft"),
-            // where the GPU has it, for strokes that build up only to their transfer
-            required_features: adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING,
+            // where the GPU has them: dual-source blending for strokes that build up only to their
+            // transfer, and the pipelines' compiled form to keep between runs
+            required_features: adapter.features()
+                & (wgpu::Features::DUAL_SOURCE_BLENDING | wgpu::Features::PIPELINE_CACHE),
             // the adapter's own limits, so large canvases fit where the GPU allows them
             required_limits: adapter.limits(),
             // memory taken in small blocks (a few MB up to 64): a block of each kind, once made,
@@ -273,6 +331,7 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
+        log::info!("the GPU's device made in {} ms", made.elapsed().as_millis());
         // new canvases and crops kept to what its textures can be
         procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
         log::info!(
@@ -301,6 +360,7 @@ impl Gpu {
             errors,
             lost,
             canvas_pipelines: Arc::default(),
+            kept: Arc::default(),
             readbacks: Arc::default(),
         })
     }
@@ -364,16 +424,40 @@ impl Gpu {
     /// Makes the pipelines canvases draw with, and the brush images they hold, now, so the first
     /// canvas on this device is made at once (slow: off the main thread).
     pub fn prepare_canvases(&self) {
+        let started = std::time::Instant::now();
         let _ = self.canvas_pipelines();
+        self.keep_pipelines();
+        let pipelines = started.elapsed().as_millis();
         procraft_engine::textures::prepare();
+        log::info!(
+            "canvases prepared: their pipelines in {pipelines} ms, the brushes' shapes and grains in {} ms",
+            started.elapsed().as_millis().saturating_sub(pipelines)
+        );
     }
 
-    /// The pipelines canvases draw with, made by the first canvas on this device.
+    /// The pipelines canvases draw with, made by the first canvas on this device: from their
+    /// compiled form kept by an earlier run, where there is one (see [`keep_pipelines_in`]).
     pub(crate) fn canvas_pipelines(&self) -> Arc<canvas::Pipelines> {
-        Arc::clone(
-            self.canvas_pipelines
-                .get_or_init(|| Arc::new(canvas::Pipelines::new(&self.device, canvas::liquify_format(&self.adapter)))),
-        )
+        Arc::clone(self.canvas_pipelines.get_or_init(|| {
+            let kept = self
+                .kept
+                .get_or_init(|| kept::folder().and_then(|dir| kept::Kept::open(&self.device, &self.adapter, &dir)));
+            let format = canvas::liquify_format(&self.adapter);
+            let pipelines = canvas::Pipelines::new(&self.device, format, kept.as_ref().map(|k| k.cache.clone()));
+            if let Some(kept) = kept {
+                kept.made();
+            }
+            Arc::new(pipelines)
+        }))
+    }
+
+    /// Keeps the pipelines made so far for the next run, where they are kept (see
+    /// [`keep_pipelines_in`]): those a window's first frame made as well. Writes a file: off the
+    /// main thread.
+    pub fn keep_pipelines(&self) {
+        if let Some(Some(kept)) = self.kept.get() {
+            kept.save();
+        }
     }
 
     /// GPU validation errors so far (each one is logged); tests expect none.

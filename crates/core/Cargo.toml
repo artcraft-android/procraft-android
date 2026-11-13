@@ -17,6 +17,8 @@ crate-type = ["cdylib", "lib"]
 workspace = true
 
 [dependencies]
+# a plugin's own artwork's draw list, drawn smooth on the CPU
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 procraft-engine = { workspace = true }
 procraft-gpu = { workspace = true }
 log = { workspace = true }

@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.keyboard-shortcuts",
+  "name": "Keyboard shortcuts",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Lets you change which keys do what: pick a shortcut and press the new keys.",
+  "compat": { "procraft": { "interface": 2 } },
+  "permissions": ["panel"],
+  "hooks": ["key_shortcut"],
+  "actions": [
+    { "key": "change", "label": "Change shortcuts" }
+  ]
+}

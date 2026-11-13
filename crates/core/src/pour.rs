@@ -9,10 +9,12 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use procraft_engine::document::LayerId;
 use procraft_engine::fill::{self, Flood};
+use procraft_engine::geom::{IRect, Vec2};
 use procraft_engine::selection::Mask;
 
 use crate::hooks::Hooks;
 use crate::plugin_run::MOST_FILL;
+use crate::reveal::{Reveal, Shake};
 use crate::{CanvasSession, Shared, State};
 
 /// What is said of a fill with more in it than can go through a plugin.
@@ -213,6 +215,56 @@ fn end_pour(shared: &Shared, st: &mut State, keep: bool, name: Option<&str>) {
     shared.frame(st);
 }
 
+impl State {
+    /// A dropped colour's fill over `region` (x, y, width, height, canvas pixels), the colour
+    /// landed on window point `point`, starts spreading in: the canvas as it was is kept to show
+    /// over the fill but for a hole that grows. Not with Reduce Motion, nor on a model.
+    fn start_reveal(&mut self, point: Vec2, region: [u32; 4]) {
+        self.end_reveal();
+        if self.reduce_motion || self.scene_shown() || self.sphere.is_some() {
+            return;
+        }
+        let Some(view) = self.view else { return };
+        let [x, y, w, h] = region.map(|v| i32::try_from(v).unwrap_or(i32::MAX));
+        let rect = IRect::new(x, y, x.saturating_add(w), y.saturating_add(h));
+        let mut shake = Shake::from_clock();
+        let Some(reveal) = Reveal::new(point, rect, &view, self.window_size, self.display_scale, &mut shake) else {
+            return;
+        };
+        // only what the window shows of it is veiled, at no more pixels than it is shown with
+        let (ww, wh) = (self.window_size.0 as f32, self.window_size.1 as f32);
+        let seen = [(0.0, 0.0), (ww, 0.0), (0.0, wh), (ww, wh)].map(|(x, y)| view.screen_to_canvas(Vec2::new(x, y)));
+        let seen = seen.iter().flatten().fold(None, |b: Option<(Vec2, Vec2)>, &q| {
+            let (lo, hi) = b.unwrap_or((q, q));
+            Some((Vec2::new(lo.x.min(q.x), lo.y.min(q.y)), Vec2::new(hi.x.max(q.x), hi.y.max(q.y))))
+        });
+        let Some((lo, hi)) = seen.filter(|(lo, hi)| lo.is_finite() && hi.is_finite()) else { return };
+        let seen = IRect::new(
+            lo.x.floor() as i32 - 2,
+            lo.y.floor() as i32 - 2,
+            hi.x.ceil() as i32 + 2,
+            hi.y.ceil() as i32 + 2,
+        );
+        let scale = view.to_screen().scale_factor();
+        if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+            canvas.veil_begin(gpu, rect.intersect(seen), scale);
+            if canvas.veil_rect().is_some() {
+                self.reveal = Some(reveal);
+            }
+        }
+    }
+
+    /// A fill spreading in shows all of itself now.
+    pub(crate) fn end_reveal(&mut self) {
+        if self.reveal.take().is_some() {
+            if let Some(canvas) = self.canvas.as_mut() {
+                canvas.veil_end();
+            }
+            self.needs_frame = true;
+        }
+    }
+}
+
 /// The smallest rectangle (x, y, width, height) holding every pixel where masks `a` and `b` (of
 /// the same size) differ; none where they don't.
 fn differ(a: &Mask, b: &Mask) -> Option<[u32; 4]> {
@@ -267,46 +319,14 @@ impl CanvasSession {
     /// the canvas, or the layer locked or text). The pour stays open for
     /// [`CanvasSession::pour_threshold`] until [`CanvasSession::pour_end`].
     pub fn pour_begin(&self, x: f32, y: f32, r: f32, g: f32, b: f32, threshold: f32) -> bool {
-        self.pour_end(true, None);
-        self.await_pour();
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let Some(seed) = seed_at(st, x, y) else { return false };
-        let (w, h) = (st.doc.width(), st.doc.height());
-        let current = st.doc.current();
-        let Some(layer) = st.doc.layer(current).cloned() else { return false };
-        if st.doc.is_locked(current) || layer.text.is_some() {
-            return false;
-        }
-        let Some(before) = st.current_pixels() else { return false };
-        let within = st.reach_selection();
-        // measured on the reference layer when another layer is it
-        let elsewhere = st.doc.reference().filter(|&r| r != current).and_then(|r| st.layer_pixels(r));
-        let mut pour = Pour {
-            layer: current,
-            before,
-            flood: None,
-            elsewhere,
-            colour: [r, g, b].map(unit),
-            selection: within,
-            alpha_lock: layer.alpha_lock,
-            shown: thousandths(threshold),
-            shown_region: None,
-            shown_mask: None,
-            closed: None,
-            finishing: None,
-        };
-        pour.measure(w, h, seed);
-        if pour.flood.is_none() {
-            return false;
-        }
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.hold_layer(current);
-        }
-        pour.show(w, st.canvas.as_mut(), false);
-        st.pour = Some(pour);
-        self.shared.frame(st);
-        true
+        self.begin_pour(x, y, [r, g, b], threshold, false)
+    }
+
+    /// Pours as [`CanvasSession::pour_begin`] does a colour dragged out and let go, or come to
+    /// rest, at window point (`x`, `y`): the fill is made at once, and shows spreading in from the
+    /// point over a moment (at once with Reduce Motion).
+    pub fn pour_drop(&self, x: f32, y: f32, r: f32, g: f32, b: f32, threshold: f32) -> bool {
+        self.begin_pour(x, y, [r, g, b], threshold, true)
     }
 
     /// The open pour redone from window point (`x`, `y`) instead, from the layer as it was: off
@@ -384,6 +404,63 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// Pours `colour` at window point (`x`, `y`) with `threshold` (see
+    /// [`CanvasSession::pour_begin`]); `spread`: shown spreading in from the point.
+    fn begin_pour(&self, x: f32, y: f32, colour: [f32; 3], threshold: f32, spread: bool) -> bool {
+        self.pour_end(true, None);
+        self.await_pour();
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        // a fill still spreading in shows all of itself
+        st.end_reveal();
+        let [r, g, b] = colour;
+        let Some(seed) = seed_at(st, x, y) else { return false };
+        let (w, h) = (st.doc.width(), st.doc.height());
+        let current = st.doc.current();
+        let Some(layer) = st.doc.layer(current).cloned() else { return false };
+        if st.doc.is_locked(current) || layer.text.is_some() {
+            return false;
+        }
+        let Some(before) = st.current_pixels() else { return false };
+        let within = st.reach_selection();
+        // measured on every layer seen while a plugin says so, else on the reference layer when
+        // another layer is it
+        let elsewhere = if st.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
+            st.composite_pixels()
+        } else {
+            st.doc.reference().filter(|&r| r != current).and_then(|r| st.layer_pixels(r))
+        };
+        let mut pour = Pour {
+            layer: current,
+            before,
+            flood: None,
+            elsewhere,
+            colour: [r, g, b].map(unit),
+            selection: within,
+            alpha_lock: layer.alpha_lock,
+            shown: thousandths(threshold),
+            shown_region: None,
+            shown_mask: None,
+            closed: None,
+            finishing: None,
+        };
+        pour.measure(w, h, seed);
+        if pour.flood.is_none() {
+            return false;
+        }
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.hold_layer(current);
+        }
+        pour.show(w, st.canvas.as_mut(), false);
+        let region = pour.shown_region;
+        st.pour = Some(pour);
+        if let Some(region) = region.filter(|_| spread) {
+            st.start_reveal(Vec2::new(x, y), region);
+        }
+        self.shared.frame(st);
+        true
+    }
+
     /// Waits for a fill a plugin is finishing, if there is one.
     pub(crate) fn await_pour(&self) {
         let finishing = self.shared.lock().pour.as_ref().and_then(|pour| pour.finishing.clone());

@@ -29,7 +29,7 @@ private val HeaderLabel get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFC
 private val ButtonLabel get() = if (Pc.light) Color(0xFF565656) else Color(0xFFA5A5A5)
 private val ChosenLabel get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFC0C0C0)
 private val CapsuleChosen get() = if (Pc.light) Color(0xFFA5A5A5) else Color(0xFF464646)
-private val DoneBlue = Color(0xFF0190FF)
+private val DoneBlue get() = Pc.tinted(Color(0xFF0190FF))
 
 /** A full-screen tool's header is this tall. */
 val ToolHeaderHeight = 85.dp

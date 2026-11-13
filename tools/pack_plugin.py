@@ -4,8 +4,8 @@
     python tools/pack_plugin.py --bundle
 
 With no name it packs them all. What goes in is what the manifest's `holds` says: for `hooks`, the
-folder's crate built to WebAssembly (rustup target add wasm32-unknown-unknown); for `filter`, its
-text. A file is a zip of the craft-extension.json, with those listed by size and SHA-256 as the app
+folder's crate built to WebAssembly (rustup target add wasm32-unknown-unknown), and for code on the
+`picker` hook its picture.wgsl too; for `filter`, its text. A file is a zip of the craft-extension.json, with those listed by size and SHA-256 as the app
 asks, and them (plugin.wasm, filter.wgsl or both). They land in target/plugins unless --out says
 where. A file packed again from the same folder comes out the same, byte for byte.
 
@@ -27,6 +27,7 @@ PLUGINS = os.path.join(ROOT, 'plugins')
 TARGET = 'wasm32-unknown-unknown'
 MODULE = 'plugin.wasm'
 FILTER = 'filter.wgsl'
+PICTURE = 'picture.wgsl'
 MANIFEST = 'craft-extension.json'
 TARGET_DIR = os.path.join(ROOT, 'target', 'plugins')
 BUNDLED = os.path.join(ROOT, 'crates', 'core', 'bundled-plugins')
@@ -72,6 +73,17 @@ def digest(folder):
     return sha.hexdigest()
 
 
+def source_digest(name):
+    """What `name`'s packed file is made from: its folder, and the plugin kit too when it is built
+    with it (a change to the kit is a change to it). The core's tests work it out the same way."""
+    folder = os.path.join(PLUGINS, name)
+    mine = digest(folder)
+    cargo = os.path.join(folder, 'Cargo.toml')
+    if os.path.isfile(cargo) and 'path = "../kit"' in open(cargo, encoding='utf-8').read():
+        return hashlib.sha256(f'{mine}{digest(os.path.join(PLUGINS, "kit"))}'.encode()).hexdigest()
+    return mine
+
+
 def pack(name, out):
     """The file `name`, of what its folder's manifest says it holds."""
     folder = os.path.join(PLUGINS, name)
@@ -83,6 +95,10 @@ def pack(name, out):
     if 'filter' in manifest['holds']:
         with open(os.path.join(folder, FILTER), 'rb') as f:
             files[FILTER] = f.read()
+    # a picker brings its picture
+    if 'picker' in manifest.get('hooks', []):
+        with open(os.path.join(folder, PICTURE), 'rb') as f:
+            files[PICTURE] = f.read()
     manifest['files'] = [
         {'path': path, 'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data)} for path, data in files.items()
     ]
@@ -105,7 +121,7 @@ def bundle(names):
     for name in names:
         pack(name, BUNDLED)
     with open(os.path.join(BUNDLED, SOURCES), 'w', encoding='utf-8', newline='') as f:
-        f.writelines(f'{name} {digest(os.path.join(PLUGINS, name))}\n' for name in names)
+        f.writelines(f'{name} {source_digest(name)}\n' for name in names)
 
 
 def main():

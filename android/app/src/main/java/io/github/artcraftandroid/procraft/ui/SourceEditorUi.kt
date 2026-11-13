@@ -66,7 +66,7 @@ private val EditorTitle get() = if (Pc.light) Color(0xFF333333) else Color(0xFFE
 private val CapsuleFill get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF1C1C1C)
 private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF383838)
 private val CapsuleInk get() = if (Pc.light) Color(0xFF585858) else Color(0xFFAAAAAA)
-private val DoneBlue = Color(0xFF0190FF)
+private val DoneBlue get() = Pc.tinted(Color(0xFF0190FF))
 private val RepeatLabel get() = if (Pc.light) Color(0xFF808080) else Color(0xFF808080)
 private val LibraryVeil = Color(0x80000000)
 private val LibrarySheet get() = if (Pc.light) Color(0xFFF2F2F7) else Color(0xFF1C1C1E)
@@ -76,7 +76,7 @@ private val LibraryEdge get() = if (Pc.light) Color(0xFFC8C8C8) else Color(0xFF5
 private val LibrarySearchFill get() = if (Pc.light) Color(0xFFE6E6EA) else Color(0xFF1B1B1B)
 private val LibrarySearchEdge get() = if (Pc.light) Color(0xFFD8D8DC) else Color(0xFF363636)
 private val LibraryHint get() = if (Pc.light) Color(0xFF8A8A8E) else Color(0xFF787878)
-private val MenuBlue = Color(0xFF0A84FF)
+private val MenuBlue get() = Pc.tinted(Color(0xFF0A84FF))
 
 /**
  * The brush studio's editor for the source [CanvasViewModel.sourceEditing] says (the shape, the

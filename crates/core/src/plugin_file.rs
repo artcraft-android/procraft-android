@@ -14,14 +14,16 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::plugin_run::{self, Hook, MODULE, MOST_MODULE};
-use crate::plugins::{self, PluginControl, PluginPart, PluginSlider, PluginSwitch};
+use crate::plugins::{
+    self, PluginBrushControl, PluginControl, PluginFile, PluginFileKind, PluginPart, PluginSlider, PluginSwitch,
+};
 
 /// The manifest's name in a plugin file, and in its folder.
 const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 1;
+const INTERFACE: u32 = 2;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -33,6 +35,8 @@ const MOST_MANIFEST: usize = 64 << 10;
 const MOST_SHADER: usize = 64 << 10;
 /// A filter's code in its folder.
 pub(crate) const FILTER_CODE: &str = "filter.wgsl";
+/// A picker's picture's code in its folder (code on the `picker` hook brings it).
+pub(crate) const PICTURE_CODE: &str = "picture.wgsl";
 /// How far an entry may shrink in the archive, from this size on: text never gets near it.
 const MOST_RATIO: usize = 100;
 const RATIO_FROM: usize = 64 << 10;
@@ -40,6 +44,12 @@ const RATIO_FROM: usize = 64 << 10;
 const MOST_DEPTH: usize = 8;
 const MOST_PATH: usize = 200;
 const MOST_CONTROLS: usize = 8;
+/// File controls, besides: each a file someone picks (so far a sound), kept with the plugin.
+const MOST_FILES: usize = 8;
+/// The folder in a plugin's home where the files picked for its file controls are kept.
+const CHOSEN: &str = "chosen";
+/// What a plugin's code keeps of its own (`procraft_keep`), a file in its home.
+const KEPT: &str = "kept";
 const MOST_HOOKS: usize = 8;
 /// The reason a stopped plugin gives, in bytes.
 const MOST_STOP_NOTE: usize = 200;
@@ -111,6 +121,13 @@ pub(crate) struct Manifest {
     /// Where its code steps in, if it holds any.
     pub hooks: Vec<Hook>,
     pub controls: Vec<PluginControl>,
+    /// Rows it adds to the brush studio, kept with each brush.
+    pub brush_controls: Vec<PluginBrushControl>,
+    /// What it does when tapped, and what it may reach then.
+    pub actions: Vec<crate::plugins::PluginAction>,
+    /// The kinds of artwork it makes.
+    pub kinds: Vec<crate::plugin_canvas::PluginKind>,
+    pub permissions: Vec<crate::plugin_commands::PluginPermission>,
     files: Vec<Listed>,
 }
 
@@ -169,6 +186,57 @@ struct RawManifest {
     hooks: Vec<String>,
     #[serde(default)]
     controls: Vec<RawControl>,
+    #[serde(default)]
+    brush_controls: Vec<RawBrushControl>,
+    #[serde(default)]
+    actions: Vec<RawAction>,
+    #[serde(default)]
+    kinds: Vec<RawKind>,
+}
+
+/// A kind of artwork a plugin makes: its key and its name in the gallery's menu.
+#[derive(Deserialize)]
+struct RawKind {
+    key: String,
+    label: String,
+}
+
+/// The most kinds of artwork a plugin may make.
+const MOST_KINDS: usize = 4;
+
+/// Something a plugin does when tapped: its key, the words on its row, and where else it's listed.
+#[derive(Deserialize)]
+struct RawAction {
+    key: String,
+    label: String,
+    #[serde(default)]
+    place: Option<String>,
+}
+
+/// The most actions a plugin may list.
+const MOST_ACTIONS: usize = 8;
+
+/// A row a plugin adds to the brush studio: a choice of a few, kept with each brush.
+#[derive(Deserialize)]
+struct RawBrushControl {
+    key: String,
+    label: String,
+    choices: Vec<String>,
+}
+
+/// The most rows a plugin may add to the brush studio, and choices a row may have.
+const MOST_BRUSH_CONTROLS: usize = 8;
+const MOST_CHOICES: usize = 16;
+
+/// `raw` as a row of plugin `id`'s in the brush studio, if it holds up: its key kept with each
+/// brush is `plugin:<id>:<key>`.
+fn checked_brush_control(id: &str, raw: RawBrushControl) -> Result<PluginBrushControl, Refusal> {
+    let plain = |text: &String, most| !text.trim().is_empty() && shows_plainly(text, most);
+    let choices = (2..=MOST_CHOICES).contains(&raw.choices.len()) && raw.choices.iter().all(|c| plain(c, 24));
+    if !valid_key(&raw.key) || !plain(&raw.label, 40) || !choices {
+        return Err(Refusal::Described);
+    }
+    Ok(PluginBrushControl { key: format!("plugin:{id}:{}", raw.key), label: raw.label, choices: raw.choices })
 }
 
 #[derive(Deserialize)]
@@ -216,6 +284,12 @@ struct RawControl {
     unit: Option<String>,
     #[serde(default)]
     at_least: Option<String>,
+    /// A slider's name for each step, from its least.
+    #[serde(default)]
+    names: Option<Vec<String>>,
+    /// What a file control takes: `sound`.
+    #[serde(default)]
+    accepts: Option<String>,
     #[serde(default)]
     shown_times: Option<f64>,
     /// A setting the app used to have, whose kept value this control takes over.
@@ -331,6 +405,17 @@ fn checked_control(id: &str, raw: RawControl) -> Result<PluginControl, Refusal> 
             let control = PluginSwitch { key, label: raw.label, on: starts, starts };
             Ok(PluginControl::Switch { control })
         }
+        // a file someone picks, kept with the plugin; it takes no setting the app used to have
+        "file" => {
+            let accepts = match raw.accepts.as_deref() {
+                _ if raw.keeps.is_some() => return Err(Refusal::Described),
+                Some("sound") => PluginFileKind::Sound,
+                // a kind of file this app doesn't take
+                Some(_) => return Err(Refusal::Newer),
+                None => return Err(Refusal::Described),
+            };
+            Ok(PluginControl::File { control: PluginFile { key, label: raw.label, accepts, chosen: None } })
+        }
         "slider" => {
             let (least, most, step) =
                 (raw.least.unwrap_or(f64::NAN), raw.most.unwrap_or(f64::NAN), raw.step.unwrap_or(1.0));
@@ -341,6 +426,13 @@ fn checked_control(id: &str, raw: RawControl) -> Result<PluginControl, Refusal> 
             }
             let (unit, at_least) = (raw.unit.unwrap_or_default(), raw.at_least);
             if !shows_plainly(&unit, 8) || at_least.as_deref().is_some_and(|text| !shows_plainly(text, 16)) {
+                return Err(Refusal::Described);
+            }
+            // a name for every step, or none
+            let names = raw.names.unwrap_or_default();
+            let steps = ((most - least) / step).round() + 1.0;
+            let named = |n: &String| !n.trim().is_empty() && shows_plainly(n, 16);
+            if !names.is_empty() && (names.len() as f64 != steps || !names.iter().all(named)) {
                 return Err(Refusal::Described);
             }
             let starts = match raw.starts {
@@ -358,6 +450,7 @@ fn checked_control(id: &str, raw: RawControl) -> Result<PluginControl, Refusal> 
                 shown_times: shown_times as f32,
                 unit,
                 at_least,
+                names,
                 live: raw.live.unwrap_or(false),
             };
             // kept to the range and on a step, however it was written
@@ -385,8 +478,15 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     }
     // (a field given twice is an error here, so a manifest can't say two things to two readers)
     let raw: RawManifest = serde_json::from_slice(text).map_err(|_| Refusal::Described)?;
-    if !raw.permissions.is_empty() {
-        return Err(Refusal::Permissions);
+    // what it may reach, by names this app gives; anything else it asks for is refused
+    let mut permissions = Vec::new();
+    for asked in &raw.permissions {
+        let given =
+            asked.as_str().and_then(crate::plugin_commands::PluginPermission::named).ok_or(Refusal::Permissions)?;
+        if permissions.contains(&given) {
+            return Err(Refusal::Described);
+        }
+        permissions.push(given);
     }
     let compat = raw.compat.procraft.ok_or(Refusal::OtherApp)?;
     // a part this app doesn't have is for a newer one
@@ -415,7 +515,12 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         }
         files.push(Listed { path: file.path, sha256: file.sha256, size: file.size });
     }
-    if raw.controls.len() > MOST_CONTROLS {
+    // files besides the rest, and only for code to use (a filter has no way to)
+    let picked = raw.controls.iter().filter(|c| c.kind == "file").count();
+    if raw.controls.len() - picked > MOST_CONTROLS || picked > MOST_FILES {
+        return Err(Refusal::Described);
+    }
+    if picked > 0 && (!holds.contains(&PluginPart::Hooks) || holds.contains(&PluginPart::Filter)) {
         return Err(Refusal::Described);
     }
     let mut keys = HashSet::new();
@@ -449,15 +554,58 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
             }
             hooks.push(hook);
         }
-        if hooks.is_empty() {
+        // code steps in somewhere, does something when tapped, or makes artworks of its own
+        if hooks.is_empty() && raw.actions.is_empty() && raw.kinds.is_empty() {
             return Err(Refusal::Described);
         }
     } else if !raw.hooks.is_empty() {
         return Err(Refusal::Described);
     }
+    // a picker brings its picture, and only a picker has one
+    if fits(PICTURE_CODE, MOST_SHADER) != hooks.contains(&Hook::Picker).then_some(true) {
+        return Err(Refusal::Described);
+    }
     // a filter's controls are its own, so none of them can be a moved setting
     if has(PluginPart::Filter) && controls.iter().any(|c| !c.key().starts_with(&format!("{id}."))) {
         return Err(Refusal::Described);
+    }
+    // rows in the brush studio, for code to read (a filter has no way to)
+    let fits_brush = raw.brush_controls.is_empty() || (has(PluginPart::Hooks) && !has(PluginPart::Filter));
+    let mut brush_keys = HashSet::new();
+    if !fits_brush
+        || raw.brush_controls.len() > MOST_BRUSH_CONTROLS
+        || !raw.brush_controls.iter().all(|c| brush_keys.insert(c.key.clone()))
+    {
+        return Err(Refusal::Described);
+    }
+    let brush_controls =
+        raw.brush_controls.into_iter().map(|c| checked_brush_control(&id, c)).collect::<Result<Vec<_>, _>>()?;
+    // actions and what they reach, for code written to interface 2 or later
+    let code = has(PluginPart::Hooks) && compat.interface.is_some_and(|interface| interface >= 2);
+    let mut action_keys = HashSet::new();
+    let plain = |text: &String| !text.trim().is_empty() && shows_plainly(text, 40);
+    let actions_fit = raw.actions.len() <= MOST_ACTIONS
+        && raw.actions.iter().all(|a| valid_key(&a.key) && plain(&a.label) && action_keys.insert(a.key.clone()));
+    let mut kind_keys = HashSet::new();
+    let kinds_fit = raw.kinds.len() <= MOST_KINDS
+        && raw.kinds.iter().all(|k| valid_key(&k.key) && plain(&k.label) && kind_keys.insert(k.key.clone()));
+    let extras = !raw.actions.is_empty() || !permissions.is_empty() || !raw.kinds.is_empty();
+    if !actions_fit || !kinds_fit || (!code && extras) {
+        return Err(Refusal::Described);
+    }
+    let kinds: Vec<crate::plugin_canvas::PluginKind> = raw
+        .kinds
+        .into_iter()
+        .map(|k| crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label })
+        .collect();
+    // a place this app doesn't have is for a newer one
+    let mut actions = Vec::new();
+    for a in raw.actions {
+        let place = match a.place.as_deref() {
+            None => crate::plugins::PluginPlace::Card,
+            Some(name) => crate::plugins::PluginPlace::named(name).ok_or(Refusal::Newer)?,
+        };
+        actions.push(crate::plugins::PluginAction { key: format!("{id}.{}", a.key), label: a.label, place });
     }
     Ok(Manifest {
         id,
@@ -469,6 +617,10 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         experimental: raw.experimental.unwrap_or(true),
         hooks,
         controls,
+        brush_controls,
+        actions,
+        kinds,
+        permissions,
         files,
     })
 }
@@ -487,9 +639,17 @@ fn code_refused(manifest: &Manifest, path: &str, data: &[u8]) -> Option<Refusal>
         let refused = read.map_err(|why| log::warn!("a filter's code was refused: {why}")).is_err();
         return refused.then_some(Refusal::FilterCode);
     }
+    if manifest.hooks.contains(&Hook::Picker) && path == PICTURE_CODE {
+        let text = std::str::from_utf8(data).map_err(|e| e.to_string());
+        let read = text.and_then(|text| procraft_gpu::read_picture(text).map(|_| ()));
+        let refused = read.map_err(|why| log::warn!("a picture's code was refused: {why}")).is_err();
+        return refused.then_some(Refusal::Code);
+    }
     let code = manifest.holds.contains(&PluginPart::Hooks) && path == MODULE;
-    let controls = !manifest.controls.is_empty();
-    (code && !plugin_run::can_run(data, &manifest.hooks, controls)).then_some(Refusal::Code)
+    let (controls, actions, kinds) =
+        (!manifest.controls.is_empty(), !manifest.actions.is_empty(), !manifest.kinds.is_empty());
+    (code && !plugin_run::can_act(data, &manifest.hooks, controls, actions, &manifest.permissions, kinds))
+        .then_some(Refusal::Code)
 }
 
 /// `bytes` read as a plugin file. Every entry is checked by what it claims before any is read,
@@ -610,15 +770,45 @@ pub(crate) fn keep(dir: &Path, package: &Package) -> Result<PathBuf, Refusal> {
         let _ = std::fs::remove_dir_all(&stage);
         return Err(Refusal::NotKept);
     }
-    // other versions go, now this one stands
+    // other versions go, now this one stands; what it keeps beside them stays
     if let Ok(versions) = std::fs::read_dir(&home) {
         for version in versions.flatten() {
-            if version.file_name().to_str() != Some(package.manifest.version.as_str()) {
+            let name = version.file_name();
+            let other = name.to_str().is_some_and(|v| v != package.manifest.version && v != CHOSEN && v != KEPT);
+            if other {
                 let _ = std::fs::remove_dir_all(version.path());
             }
         }
     }
     Ok(folder)
+}
+
+/// Where the file picked for `key`, a control of plugin `id` kept in `dir`, is kept (a sound as a
+/// WAV file), and the name it was picked by beside it. They go with the plugin.
+pub(crate) fn chosen_paths(dir: &Path, id: &str, key: &str) -> (PathBuf, PathBuf) {
+    let folder = dir.join(id).join(CHOSEN);
+    (folder.join(format!("{key}.wav")), folder.join(format!("{key}.name")))
+}
+
+/// What plugin `id`, kept in `dir`, keeps of its own, if anything holds up.
+pub(crate) fn read_kept(dir: &Path, id: &str) -> Option<Vec<u8>> {
+    read_capped(&dir.join(id).join(KEPT), plugin_run::MOST_KEPT)
+}
+
+/// Keeps `data` for plugin `id`, kept in `dir`, whole: written beside, then moved into place, so a
+/// start finds what it kept before or now, never part of it. It goes with the plugin. False if it
+/// couldn't be (the plugin is gone, say).
+pub(crate) fn write_kept(dir: &Path, id: &str, data: &[u8]) -> bool {
+    let home = dir.join(id);
+    if data.len() > plugin_run::MOST_KEPT || !home.is_dir() {
+        return false;
+    }
+    let beside = spare(&home, KEPT);
+    let moved = write_new(&beside, data).and_then(|()| std::fs::rename(&beside, home.join(KEPT)));
+    if moved.is_err() {
+        let _ = std::fs::remove_file(&beside);
+    }
+    moved.map_err(|e| log::warn!("couldn't keep what a plugin keeps: {e}")).is_ok()
 }
 
 /// Takes plugin `id`'s folder out of `dir`: gone from the next read on, even if what is moved
@@ -690,6 +880,13 @@ pub(crate) fn read_code(dir: &Path, id: &str, version: &str) -> Option<(Vec<Hook
     let folder = dir.join(id).join(version);
     let manifest = read_folder(&folder, id, version)?;
     Some((manifest.hooks, read_capped(&folder.join(MODULE), MOST_MODULE)?))
+}
+
+/// The picture's code of the picker `id` at `version` in `dir`, if it holds up as it did.
+pub(crate) fn read_picture_code(dir: &Path, id: &str, version: &str) -> Option<String> {
+    let folder = dir.join(id).join(version);
+    read_folder(&folder, id, version)?;
+    String::from_utf8(read_capped(&folder.join(PICTURE_CODE), MOST_SHADER)?).ok()
 }
 
 /// The manifest and the code of the filter `id` at `version` in `dir`, if all of it holds up as it
@@ -835,6 +1032,16 @@ pub(crate) fn read_all(dir: &Path) -> Vec<Manifest> {
         let Ok(versions) = std::fs::read_dir(entry.path()) else { continue };
         let mut newest: Option<Manifest> = None;
         for version in versions.flatten() {
+            // the files picked for its controls and what it keeps, beside its versions; what was
+            // left half written goes
+            let name = version.file_name();
+            if name == CHOSEN || name == KEPT {
+                continue;
+            }
+            if name.to_str().is_some_and(|n| n.starts_with('.')) {
+                let _ = std::fs::remove_file(version.path());
+                continue;
+            }
             let folder = version.path();
             let found = version.file_name().to_str().and_then(|v| {
                 let plain = version.file_type().is_ok_and(|kind| kind.is_dir());
@@ -1223,6 +1430,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_slider_names_every_step_or_none() {
+        let named = with(a_filter(), "/controls/0/step", json!(0.5));
+        let named = with(named, "/controls/0/starts", json!(0));
+        let mut named = with(named, "/controls/0/least", json!(0));
+        named["controls"][0]["most"] = json!(1);
+        named["controls"][0]["names"] = json!(["Off", "Half", "All"]);
+        let slider = slider_of(&read_package(&a_filter_file(&named)).unwrap());
+        assert_eq!(slider.names, ["Off", "Half", "All"]);
+        for names in [
+            json!(["Off", "All"]),
+            json!(["Off", "", "All"]),
+            json!(["Off", "Ha\u{200B}lf", "All"]),
+            json!(["Off", "x".repeat(17), "All"]),
+        ] {
+            let mut wrong = named.clone();
+            wrong["controls"][0]["names"] = names.clone();
+            assert_eq!(refusal(&a_filter_file(&wrong)), Refusal::Described, "{names}");
+        }
+    }
+
+    #[test]
     fn a_start_out_of_range_comes_in() {
         let high = with(a_filter(), "/controls/0/starts", json!(40));
         assert_eq!(slider_of(&read_package(&a_filter_file(&high)).unwrap()).starts, 1.0);
@@ -1269,6 +1497,74 @@ pub(crate) mod tests {
             }]),
         );
         assert_eq!(refusal(&a_filter_file(&at_least)), Refusal::Described);
+    }
+
+    #[test]
+    fn a_plugin_s_rows_in_the_brush_studio_are_choices_kept_with_each_brush() {
+        let module = crate::plugin_run::tests::position_module("", "(i64.const 0)");
+        let mut manifest = coded("org.example.rows", &module);
+        manifest["brush_controls"] = json!([{ "key": "kind", "label": "Kind", "choices": ["One", "Two", "Three"] }]);
+        let package = read_package(&pack(&manifest, &[(MODULE, module.as_slice())])).unwrap();
+        assert_eq!(
+            package.manifest.brush_controls,
+            [PluginBrushControl {
+                key: "plugin:org.example.rows:kind".to_owned(),
+                label: "Kind".to_owned(),
+                choices: vec!["One".to_owned(), "Two".to_owned(), "Three".to_owned()],
+            }]
+        );
+        for wrong in [
+            json!([{ "key": "kind", "label": "Kind", "choices": ["Only"] }]),
+            json!([{ "key": "Kind", "label": "Kind", "choices": ["One", "Two"] }]),
+            json!([{ "key": "kind", "label": "", "choices": ["One", "Two"] }]),
+            json!([{ "key": "kind", "label": "Kind", "choices": ["One", "x".repeat(25)] }]),
+            json!([{ "key": "a", "label": "A", "choices": ["1", "2"] }, { "key": "a", "label": "A", "choices": ["1", "2"] }]),
+        ] {
+            let mut odd = manifest.clone();
+            odd["brush_controls"] = wrong.clone();
+            assert_eq!(refusal(&pack(&odd, &[(MODULE, module.as_slice())])), Refusal::Described, "{wrong}");
+        }
+        // a filter has no way to read them
+        let mut filter = a_filter();
+        filter["brush_controls"] = json!([{ "key": "k", "label": "K", "choices": ["1", "2"] }]);
+        assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
+    }
+
+    #[test]
+    fn file_controls_take_sounds_and_only_code_has_them() {
+        let sound = json!({ "key": "own", "type": "file", "label": "Own sound", "accepts": "sound" });
+        // a filter can't use a file
+        let filter = with(a_filter(), "/controls", json!([sound.clone()]));
+        assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
+        // code can: up to eight, besides eight others
+        let module = crate::plugin_run::tests::position_module(
+            r#"(func (export "procraft_control") (param i32 f32))"#,
+            "(i64.const 0)",
+        );
+        let mut manifest = coded("org.example.sounds", &module);
+        let mut controls: Vec<Value> = (0..MOST_FILES)
+            .map(|i| json!({ "key": format!("f{i}"), "type": "file", "label": "A", "accepts": "sound" }))
+            .collect();
+        controls.extend((0..MOST_CONTROLS).map(|i| json!({ "key": format!("k{i}"), "type": "switch", "label": "A" })));
+        manifest["controls"] = json!(controls);
+        let package = read_package(&pack(&manifest, &[(MODULE, module.as_slice())])).unwrap();
+        let PluginControl::File { control } = &package.manifest.controls[0] else { panic!() };
+        assert_eq!(
+            (control.key.as_str(), control.accepts, control.chosen.as_deref()),
+            ("org.example.sounds.f0", PluginFileKind::Sound, None)
+        );
+        let mut more = manifest.clone();
+        more["controls"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "key": "f9", "type": "file", "label": "A", "accepts": "sound" }));
+        assert_eq!(refusal(&pack(&more, &[(MODULE, module.as_slice())])), Refusal::Described);
+        // a kind it doesn't take is a newer app's; none said, or taking an old setting, is wrong
+        for (accepts, why) in [(json!("picture"), Refusal::Newer), (Value::Null, Refusal::Described)] {
+            let mut odd = manifest.clone();
+            odd["controls"] = json!([{ "key": "f", "type": "file", "label": "A", "accepts": accepts }]);
+            assert_eq!(refusal(&pack(&odd, &[(MODULE, module.as_slice())])), why);
+        }
     }
 
     #[test]
@@ -1354,14 +1650,130 @@ pub(crate) mod tests {
         };
         // a hook or an interface this app doesn't have is for a newer one
         assert_eq!(of("/hooks", json!(["position", "layers"])), Refusal::Newer);
-        assert_eq!(of("/compat/procraft/interface", json!(2)), Refusal::Newer);
+        assert_eq!(of("/compat/procraft/interface", json!(4)), Refusal::Newer);
         assert_eq!(of("/hooks", json!([])), Refusal::Described);
         assert_eq!(of("/hooks", json!(["position", "position"])), Refusal::Described);
         assert_eq!(of("/compat/procraft", json!({ "min_app": "0.0.1" })), Refusal::Described);
-        // nor may it ask for anything
+        // nor ask for what this app doesn't give
         assert_eq!(of("/permissions", json!(["files"])), Refusal::Permissions);
         // and a part that isn't one yet is for a newer one too
         assert_eq!(of("/holds", json!(["module"])), Refusal::Newer);
+    }
+
+    #[test]
+    fn a_plugin_lists_what_it_does_when_tapped_and_what_that_reaches() {
+        let module = wat::parse_str(crate::plugin_run::tests::ACTS).unwrap();
+        let acting = || {
+            let mut manifest = coded("org.example.plugin", &module);
+            manifest["compat"]["procraft"]["interface"] = json!(2);
+            manifest["hooks"] = json!([]);
+            manifest["permissions"] = json!(["artwork.write"]);
+            manifest["actions"] = json!([{ "key": "grid", "label": "Add a grid layer" }]);
+            manifest
+        };
+        let package = read_package(&a_coded_file(&acting(), &module)).unwrap();
+        let grid = crate::plugins::PluginAction {
+            key: "org.example.plugin.grid".to_owned(),
+            label: "Add a grid layer".to_owned(),
+            place: crate::plugins::PluginPlace::Card,
+        };
+        assert_eq!(package.manifest.actions, [grid]);
+        assert_eq!(package.manifest.permissions, [crate::plugin_commands::PluginPermission::ArtworkWrite]);
+        let of = |path: &str, value: Value| refusal(&a_coded_file(&with(acting(), path, value), &module));
+        // what it imports needs its permission
+        assert_eq!(of("/permissions", json!([])), Refusal::Code);
+        // one this app doesn't give is refused, one asked twice isn't written right
+        assert_eq!(of("/permissions", json!(["artwork.write", "network"])), Refusal::Permissions);
+        assert_eq!(of("/permissions", json!(["artwork.write", "artwork.write"])), Refusal::Described);
+        // with no hooks and no actions it does nothing
+        assert_eq!(of("/actions", json!([])), Refusal::Described);
+        // each key once, words to show, and not too many
+        let twice = json!([{ "key": "a", "label": "A" }, { "key": "a", "label": "B" }]);
+        assert_eq!(of("/actions", twice), Refusal::Described);
+        assert_eq!(of("/actions", json!([{ "key": "a", "label": " " }])), Refusal::Described);
+        let many: Vec<Value> = (0..9).map(|i| json!({ "key": format!("a{i}"), "label": "A" })).collect();
+        assert_eq!(of("/actions", json!(many)), Refusal::Described);
+        // listed in the Adjustments menu too; a place this app doesn't have is for a newer one
+        let placed = |place: &str| {
+            let mut manifest = acting();
+            manifest["actions"][0]["place"] = json!(place);
+            read_package(&a_coded_file(&manifest, &module))
+        };
+        let package = placed("adjustments").unwrap();
+        assert_eq!(package.manifest.actions[0].place, crate::plugins::PluginPlace::Adjustments);
+        for (name, place) in
+            [("layer", crate::plugins::PluginPlace::Layer), ("frame", crate::plugins::PluginPlace::Frame)]
+        {
+            assert_eq!(placed(name).unwrap().manifest.actions[0].place, place);
+        }
+        assert_eq!(placed("toolbar").err(), Some(Refusal::Newer));
+        // a filter neither acts nor reaches anything, nor code written before there were actions
+        let filter = with(a_filter(), "/permissions", json!(["brush"]));
+        assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
+        assert_eq!(of("/compat/procraft/interface", json!(1)), Refusal::Described);
+    }
+
+    /// A picker plugin's file: its module and its picture's code (`picture`, if any).
+    pub(crate) fn picker_file(id: &str, picture: Option<&str>) -> Vec<u8> {
+        let module = wat::parse_str(crate::plugin_run::tests::PICKS).unwrap();
+        let mut manifest = coded(id, &module);
+        manifest["hooks"] = json!(["picker"]);
+        let mut files: Vec<(&str, &[u8])> = vec![(MODULE, &module)];
+        if let Some(text) = picture {
+            let listed = json!({ "path": PICTURE_CODE, "sha256": sha256(text.as_bytes()), "size": text.len() });
+            manifest["files"].as_array_mut().unwrap().push(listed);
+            files.push((PICTURE_CODE, text.as_bytes()));
+        }
+        pack(&manifest, &files)
+    }
+
+    #[test]
+    fn a_picker_brings_its_picture_and_only_a_picker_has_one() {
+        let picture = crate::plugin_run::tests::PICTURE;
+        let package = read_package(&picker_file("org.example.picker", Some(picture))).unwrap();
+        assert_eq!(package.manifest.hooks, [Hook::Picker]);
+        // without its picture it isn't written right, nor with code that isn't a picture
+        assert_eq!(refusal(&picker_file("org.example.picker", None)), Refusal::Described);
+        let reaches = "fn picture(at: vec2<f32>) -> vec4<f32> { return layer_at(at); }";
+        assert_eq!(refusal(&picker_file("org.example.picker", Some(reaches))), Refusal::Code);
+        // and a plugin on another hook can't bring one
+        let module = a_module();
+        let mut manifest = coded("org.example.plugin", &module);
+        let listed = json!({ "path": PICTURE_CODE, "sha256": sha256(picture.as_bytes()), "size": picture.len() });
+        manifest["files"].as_array_mut().unwrap().push(listed);
+        let file = pack(&manifest, &[(MODULE, &module), (PICTURE_CODE, picture.as_bytes())]);
+        assert_eq!(refusal(&file), Refusal::Described);
+    }
+
+    /// A plugin that makes dots (`DOTS`), its kinds as `kinds` says.
+    pub(crate) fn dots_file(id: &str, kinds: Value) -> Vec<u8> {
+        let module = wat::parse_str(crate::plugin_run::tests::DOTS).unwrap();
+        let mut manifest = coded(id, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        manifest["hooks"] = json!([]);
+        manifest["kinds"] = kinds;
+        pack(&manifest, &[(MODULE, &module)])
+    }
+
+    #[test]
+    fn a_plugin_lists_the_kinds_of_artwork_it_makes() {
+        let dots = json!([{ "key": "dots", "label": "Dots" }]);
+        let package = read_package(&dots_file("org.example.dots", dots)).unwrap();
+        let kind =
+            crate::plugin_canvas::PluginKind { key: "org.example.dots.dots".to_owned(), label: "Dots".to_owned() };
+        assert_eq!(package.manifest.kinds, [kind]);
+        // each key once, words to show, not too many
+        let twice = json!([{ "key": "a", "label": "A" }, { "key": "a", "label": "B" }]);
+        assert_eq!(refusal(&dots_file("org.example.dots", twice)), Refusal::Described);
+        assert_eq!(refusal(&dots_file("org.example.dots", json!([{ "key": "a", "label": "" }]))), Refusal::Described);
+        let many: Vec<Value> = (0..5).map(|i| json!({ "key": format!("k{i}"), "label": "K" })).collect();
+        assert_eq!(refusal(&dots_file("org.example.dots", json!(many))), Refusal::Described);
+        // and code that makes none can't say it does
+        let module = a_module();
+        let mut manifest = coded("org.example.plugin", &module);
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        manifest["kinds"] = json!([{ "key": "dots", "label": "Dots" }]);
+        assert_eq!(refusal(&a_coded_file(&manifest, &module)), Refusal::Code);
     }
 
     #[test]

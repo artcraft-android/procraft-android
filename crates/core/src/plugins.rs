@@ -11,9 +11,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::KeyCombo;
 use crate::hooks::Hooks;
 use crate::plugin_file::{self, Added, Manifest, Refusal};
-use crate::plugin_run::{Running, Stop};
+use crate::plugin_run::{Hook, Running, Stop};
 
 /// A setting the app used to have and a plugin now brings: what it was kept under, as it started
 /// (a switch off is 0), and its name. Its value stays there for the plugin, whose control says so.
@@ -111,14 +112,78 @@ pub struct PluginSlider {
     pub unit: String,
     /// What it reads at its least, if not that ("Off").
     pub at_least: Option<String>,
+    /// A name for each step from its least, read in place of the number (none: the numbers).
+    pub names: Vec<String>,
     /// Its value goes in as it moves; otherwise as it lets go, which what changes the page needs.
     pub live: bool,
+}
+
+/// What a file control takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PluginFileKind {
+    /// A sound: a recording, kept as a WAV file.
+    Sound,
+}
+
+/// A file someone picks, kept with the plugin; `chosen` is the name it was picked by, if one is.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginFile {
+    pub key: String,
+    pub label: String,
+    pub accepts: PluginFileKind,
+    pub chosen: Option<String>,
+}
+
+/// Something a plugin does when its row is tapped: `key` is `<id>.<key>`. Its card lists it, and
+/// `place` may list it somewhere else too.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginAction {
+    pub key: String,
+    pub label: String,
+    pub place: PluginPlace,
+}
+
+/// Where else a plugin's action is listed, beside its card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PluginPlace {
+    /// Only on its card.
+    Card,
+    /// In the Adjustments menu's Plugins list, with the filters.
+    Adjustments,
+    /// In the current layer's options, after the app's own.
+    Layer,
+    /// In Animation Assist's frame options, after the app's own; run with that frame's layer
+    /// current.
+    Frame,
+}
+
+impl PluginPlace {
+    /// The place a manifest names; none for a name this app doesn't have.
+    pub(crate) fn named(name: &str) -> Option<PluginPlace> {
+        match name {
+            "card" => Some(PluginPlace::Card),
+            "adjustments" => Some(PluginPlace::Adjustments),
+            "layer" => Some(PluginPlace::Layer),
+            "frame" => Some(PluginPlace::Frame),
+            _ => None,
+        }
+    }
+}
+
+/// A row a plugin adds to the brush studio's Properties: a choice of a few, by their place, kept
+/// with each brush under `key` (`plugin:<id>:<key>`; 0 the first choice, as a brush starts).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginBrushControl {
+    pub key: String,
+    pub label: String,
+    pub choices: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Enum)]
 pub enum PluginControl {
     Switch { control: PluginSwitch },
     Slider { control: PluginSlider },
+    File { control: PluginFile },
 }
 
 /// One as its page shows it.
@@ -142,6 +207,13 @@ pub struct PluginInfo {
     pub problem: Option<String>,
     /// What its card shows, while it is on. A filter's own are on its panel.
     pub controls: Vec<PluginControl>,
+    /// Rows it adds to the brush studio, while it is on.
+    pub brush_controls: Vec<PluginBrushControl>,
+    /// What it does when tapped, while it is on, and what it may reach then.
+    pub actions: Vec<PluginAction>,
+    /// The kinds of artwork it makes, while it is on (the gallery's + lists them).
+    pub kinds: Vec<crate::PluginKind>,
+    pub permissions: Vec<crate::plugin_commands::PluginPermission>,
 }
 
 impl PluginInfo {
@@ -165,6 +237,7 @@ impl PluginControl {
         match self {
             PluginControl::Switch { control } => &control.key,
             PluginControl::Slider { control } => &control.key,
+            PluginControl::File { control } => &control.key,
         }
     }
 
@@ -181,6 +254,8 @@ impl PluginControl {
                     control.value = control.stepped(read);
                 }
             }
+            // what was picked is kept with the plugin, not with the settings
+            PluginControl::File { .. } => {}
         }
     }
 
@@ -189,6 +264,7 @@ impl PluginControl {
         match self {
             PluginControl::Switch { control } => control.on = control.starts,
             PluginControl::Slider { control } => control.value = control.starts,
+            PluginControl::File { .. } => {}
         }
     }
 
@@ -197,6 +273,7 @@ impl PluginControl {
         match self {
             PluginControl::Switch { control } => f32::from(u8::from(control.on)),
             PluginControl::Slider { control } => control.value,
+            PluginControl::File { control } => f32::from(u8::from(control.chosen.is_some())),
         }
     }
 
@@ -205,6 +282,7 @@ impl PluginControl {
         match self {
             PluginControl::Switch { control } => control.on.to_string(),
             PluginControl::Slider { control } => control.value.to_string(),
+            PluginControl::File { control } => control.chosen.is_some().to_string(),
         }
     }
 
@@ -214,6 +292,9 @@ impl PluginControl {
             (PluginControl::Switch { control }, PluginControl::Switch { control: from }) => control.on = from.on,
             (PluginControl::Slider { control }, PluginControl::Slider { control: from }) => {
                 control.value = control.stepped(from.value);
+            }
+            (PluginControl::File { control }, PluginControl::File { control: from }) => {
+                control.chosen.clone_from(&from.chosen)
             }
             _ => {}
         }
@@ -249,6 +330,10 @@ pub fn plugin_slider_shown(slider: PluginSlider, value: f32) -> String {
     if let Some(text) = slider.at_least.as_ref().filter(|_| value <= slider.least) {
         return text.clone();
     }
+    let place = ((value - slider.least) / slider.step).round();
+    if let Some(name) = (place >= 0.0).then_some(place as usize).and_then(|i| slider.names.get(i)) {
+        return name.clone();
+    }
     let step = slider.step * slider.shown_times;
     let whole = |v: f32| (v - v.round()).abs() < 1e-3;
     let places = if whole(step) {
@@ -275,6 +360,18 @@ pub fn plugin_file_most_bytes() -> u64 {
 
 /// `manifest` as a list entry. One that only adds a filter starts on, as that changes nothing
 /// already there; any other starts off, for someone to turn on.
+/// The names of the files picked for `plugin`'s file controls, as kept in `store`.
+fn read_chosen(store: &std::path::Path, plugin: &mut PluginInfo) {
+    let id = plugin.id.clone();
+    for control in &mut plugin.controls {
+        if let PluginControl::File { control } = control {
+            let (file, name) = plugin_file::chosen_paths(store, &id, &control.key);
+            let named = || std::fs::read_to_string(&name).ok().map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+            control.chosen = file.is_file().then(|| named().unwrap_or_else(|| "Recording".to_owned()));
+        }
+    }
+}
+
 fn from_file(manifest: Manifest) -> PluginInfo {
     let only_filter = manifest.holds == [PluginPart::Filter];
     PluginInfo {
@@ -290,6 +387,10 @@ fn from_file(manifest: Manifest) -> PluginInfo {
         on: only_filter,
         problem: None,
         controls: if only_filter { Vec::new() } else { manifest.controls },
+        brush_controls: manifest.brush_controls,
+        actions: manifest.actions,
+        kinds: manifest.kinds,
+        permissions: manifest.permissions,
     }
 }
 
@@ -298,8 +399,20 @@ fn can_do(manifest: &Manifest) -> String {
     let filter = manifest.holds.contains(&PluginPart::Filter);
     let adds =
         filter.then_some("This plugin adds a filter to Adjustments, which changes only the layer you use it on.");
-    let sentences: Vec<&str> = adds.into_iter().chain(manifest.hooks.iter().map(|hook| hook.sentence())).collect();
-    let reach = if filter { "your files or the internet" } else { "your files, your layers or the internet" };
+    let sentences: Vec<&str> = adds
+        .into_iter()
+        .chain(manifest.hooks.iter().map(|hook| hook.sentence()))
+        .chain(manifest.permissions.iter().map(|permission| permission.sentence()))
+        .collect();
+    let artwork = manifest.permissions.iter().any(|p| {
+        matches!(
+            p,
+            crate::plugin_commands::PluginPermission::ArtworkRead
+                | crate::plugin_commands::PluginPermission::ArtworkWrite
+        )
+    });
+    let reach =
+        if filter || artwork { "your files or the internet" } else { "your files, your layers or the internet" };
     format!("{} It can't reach {reach}.", sentences.join(" "))
 }
 
@@ -348,6 +461,22 @@ pub struct Plugins {
     store: Option<PathBuf>,
     /// The plugins that are on, running.
     hooks: Arc<Hooks>,
+    /// A plugin's panel showing, with the copy of its code that showed it.
+    panel: Mutex<Option<OpenPanel>>,
+}
+
+/// A plugin's panel open: whose, what it shows, and the copy of its code its touches go to (under a
+/// lock of its own: what the panel shows is read on every frame, while a touch may take seconds).
+struct OpenPanel {
+    id: String,
+    shows: crate::PluginPanel,
+    running: Arc<Mutex<Running>>,
+}
+
+impl std::fmt::Debug for OpenPanel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenPanel").field("id", &self.id).field("shows", &self.shows).finish_non_exhaustive()
+    }
 }
 
 impl Plugins {
@@ -372,6 +501,7 @@ impl Plugins {
             for plugin in &mut files {
                 plugin.problem = plugin_file::stopped_why(store, &plugin.id);
                 plugin.on &= plugin.problem.is_none();
+                read_chosen(store, plugin);
             }
         }
         // what the app added starts off until someone turns it on, whatever it holds
@@ -379,7 +509,8 @@ impl Plugins {
             plugin.on &= !added.iter().any(|added| added.off && added.id == plugin.id);
         }
         let list = Listed { files, moved: Vec::new(), notice_asked: false, flagged: HashSet::new(), added };
-        Arc::new(Plugins { list: Mutex::new(list), hooks: Arc::new(Hooks::kept_in(store.clone())), store })
+        let hooks = Arc::new(Hooks::kept_in(store.clone()));
+        Arc::new(Plugins { list: Mutex::new(list), hooks, store, panel: Mutex::new(None) })
     }
 
     /// Adds each of `files`, which the app comes with, the first time it comes with it: as if
@@ -444,6 +575,19 @@ impl Plugins {
         }
     }
 
+    /// `id` off its hooks, and its panel closed.
+    fn take_off(&self, id: &str) {
+        self.hooks.take_off(id);
+        let mut panel = self.open_panel();
+        if panel.as_ref().is_some_and(|open| open.id == id) {
+            *panel = None;
+        }
+    }
+
+    fn open_panel(&self) -> MutexGuard<'_, Option<OpenPanel>> {
+        self.panel.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Puts `plugin` on its hooks, if it has code, is on and isn't there yet. One that can't start
     /// goes off, and says why.
     fn start(&self, plugin: &mut PluginInfo) {
@@ -452,16 +596,99 @@ impl Plugins {
         }
         let values: Vec<f32> = plugin.controls.iter().map(PluginControl::number).collect();
         let store = self.store.as_deref();
-        let code = store.and_then(|store| plugin_file::read_code(store, &plugin.id, &plugin.version));
-        let started = code
-            .ok_or(Stop::Damaged)
-            .and_then(|(hooks, bytes)| Ok((Running::start_on(&bytes, &values, &hooks)?, hooks)));
-        match started {
-            Ok((running, hooks)) => self.hooks.put_on(plugin.id.clone(), running, &hooks),
+        match self.start_code(&plugin.id, &plugin.version, &values, &plugin.permissions) {
+            Ok((running, hooks)) => {
+                self.hooks.put_on(plugin.id.clone(), running, &hooks);
+                // a copy of its own for its events
+                if hooks.iter().any(|h| matches!(h, Hook::StrokeKept | Hook::LayerAdded))
+                    && let Ok((events, _)) = self.start_code(&plugin.id, &plugin.version, &values, &plugin.permissions)
+                {
+                    self.hooks.give_events(&plugin.id, events);
+                }
+                self.hooks.brush_keys(&plugin.id, plugin.brush_controls.iter().map(|c| c.key.clone()).collect());
+                // a picker's picture, for the sessions to draw
+                if hooks.contains(&Hook::Picker)
+                    && let Some(text) =
+                        store.and_then(|store| plugin_file::read_picture_code(store, &plugin.id, &plugin.version))
+                {
+                    self.hooks.give_picture(&plugin.id, text);
+                }
+                // the files picked for it, handed over
+                for (at, control) in plugin.controls.iter().enumerate() {
+                    if let (Some(store), PluginControl::File { control }) = (store, control)
+                        && control.chosen.is_some()
+                        && let Ok(bytes) = std::fs::read(plugin_file::chosen_paths(store, &plugin.id, &control.key).0)
+                    {
+                        self.hooks.give_file(&plugin.id, at, Some(&bytes));
+                    }
+                }
+            }
             Err(stop) => {
                 self.hooks.failed(&plugin.id, stop);
                 plugin.on = false;
                 plugin.problem = Some(stop.text().to_owned());
+            }
+        }
+    }
+
+    /// The code of plugin `id` at `version` started, told `values`, what it keeps and (on the key
+    /// hook) the app's shortcuts, reaching what `permissions` give; with its hooks.
+    fn start_code(
+        &self,
+        id: &str,
+        version: &str,
+        values: &[f32],
+        permissions: &[crate::plugin_commands::PluginPermission],
+    ) -> Result<(Running, Vec<Hook>), Stop> {
+        let store = self.store.as_deref().ok_or(Stop::Damaged)?;
+        let (hooks, bytes) = plugin_file::read_code(store, id, version).ok_or(Stop::Damaged)?;
+        let kept = plugin_file::read_kept(store, id);
+        Ok((Running::start_told(&bytes, values, &hooks, permissions, kept.as_deref())?, hooks))
+    }
+
+    /// What `running`, a copy of `id`'s code that has just acted, says to keep: kept with the
+    /// plugin, and handed to its other copies.
+    fn keep_from(&self, id: &str, running: &mut Running) -> Result<(), Stop> {
+        if let Some(data) = running.take_keep()? {
+            if let Some(store) = &self.store {
+                plugin_file::write_kept(store, id, &data);
+            }
+            self.hooks.give_kept(id, &data);
+        }
+        Ok(())
+    }
+
+    /// What a copy of `id`'s code showing the panel (`running`) answered a touch or a key press
+    /// with: the panel shown changed, or closed, unless another took its place meanwhile. False once
+    /// it is closed.
+    fn panel_answered(
+        &self,
+        id: &str,
+        running: &Arc<Mutex<Running>>,
+        answer: Result<(Option<crate::PluginPanel>, bool), Stop>,
+    ) -> bool {
+        let mut open = self.open_panel();
+        let same = open.as_ref().is_some_and(|panel| Arc::ptr_eq(&panel.running, running));
+        match answer {
+            Ok((shows, false)) => {
+                if let (true, Some(shows), Some(panel)) = (same, shows, open.as_mut()) {
+                    panel.shows = shows;
+                }
+                same
+            }
+            Ok((_, true)) => {
+                if same {
+                    *open = None;
+                }
+                false
+            }
+            Err(stop) => {
+                if same {
+                    *open = None;
+                }
+                drop(open);
+                self.hooks.stopped(id, stop);
+                false
             }
         }
     }
@@ -498,7 +725,9 @@ impl Plugins {
     /// Each value as a line of a settings file, its key and then what [`Plugins::read_kept`] reads.
     pub fn kept_lines(&self) -> Vec<String> {
         let list = self.listed();
-        let values = list.files.iter().flat_map(|p| &p.controls).map(|c| format!("{} {}", c.key(), c.kept()));
+        // (a file picked is kept with its plugin)
+        let values = list.files.iter().flat_map(|p| &p.controls).filter(|c| !matches!(c, PluginControl::File { .. }));
+        let values = values.map(|c| format!("{} {}", c.key(), c.kept()));
         let flags = list.files.iter().map(|p| format!("{} {}", p.on_key, p.on));
         values.chain(flags).chain(list.moved.iter().map(|(key, value)| format!("{key} {value}"))).collect()
     }
@@ -513,6 +742,7 @@ impl Plugins {
         let (id, version) = (&package.manifest.id, &package.manifest.version);
         let manifest = plugin_file::read_folder(&folder, id, version).ok_or(Refusal::NotKept)?;
         let mut fresh = from_file(manifest);
+        read_chosen(store, &mut fresh);
         let mut list = self.listed();
         fresh.on &= !list.added_off(&fresh.id);
         // a moved setting read back goes to the plugin that takes it over
@@ -532,7 +762,7 @@ impl Plugins {
                 }
                 fresh.on = old.on;
                 // what stopped gets its chance with the new file
-                self.hooks.take_off(&fresh.id);
+                self.take_off(&fresh.id);
                 plugin_file::clear_stopped(store, &fresh.id);
                 self.start(&mut fresh);
                 *old = fresh;
@@ -581,7 +811,7 @@ impl Plugins {
         if let Some(store) = &self.store {
             plugin_file::note_stopped(store, id, why);
         }
-        self.hooks.take_off(id);
+        self.take_off(id);
         if let Some(filter) = self.listed().files.iter_mut().find(|p| p.id == id) {
             filter.on = false;
             filter.problem = Some(why.to_owned());
@@ -630,6 +860,13 @@ impl Plugins {
     /// What the Plugins page shows: every plugin imported.
     pub fn plugins(&self) -> Vec<PluginInfo> {
         self.listed().files.clone()
+    }
+
+    /// The actions listed in `place` now, of the plugins that are on.
+    pub fn actions_in(&self, place: PluginPlace) -> Vec<PluginAction> {
+        let list = self.listed();
+        let on = list.files.iter().filter(|p| p.on && p.problem.is_none());
+        on.flat_map(|p| p.actions.iter().filter(|a| a.place == place).cloned()).collect()
     }
 
     /// The filters that can be opened now: the Adjustments menu's, which has none to show with none
@@ -712,7 +949,7 @@ impl Plugins {
                 control.on = on;
                 Some(())
             }
-            PluginControl::Slider { .. } => None,
+            _ => None,
         })
         .is_some()
     }
@@ -728,6 +965,210 @@ impl Plugins {
         })
     }
 
+    /// The file control kept under `key` takes the sound `wav` (a WAV file's bytes) picked by `name`:
+    /// kept with its plugin (a minute of it at most, in one channel) for its plugin to play. False
+    /// if there is no such control, the plugins can't be kept, or `wav` is no sound this reads.
+    pub fn set_sound_file(&self, key: String, name: String, wav: Vec<u8>) -> bool {
+        let Some(store) = self.store.as_deref() else { return false };
+        let Some((samples, rate)) = crate::sound_file::read_wav(&wav) else { return false };
+        let name: String = name.chars().filter(|c| !c.is_control()).take(80).collect();
+        let name = if name.trim().is_empty() { "Recording".to_owned() } else { name.trim().to_owned() };
+        let mut list = self.listed();
+        let Some((plugin, at)) = list.control_mut(&key) else { return false };
+        let id = plugin.id.clone();
+        let Some(PluginControl::File { control }) = plugin.controls.get_mut(at) else { return false };
+        let (file, named) = plugin_file::chosen_paths(store, &id, &key);
+        let kept_wav = crate::sound_file::write_wav(&samples, rate);
+        let written =
+            |tmp: &std::path::Path| std::fs::write(tmp, &kept_wav).map_err(|e| crate::project::file_error("saving", e));
+        let kept = file.parent().is_some_and(|folder| std::fs::create_dir_all(folder).is_ok())
+            && crate::project::write_atomically(&file, written).is_ok()
+            && std::fs::write(&named, &name).is_ok();
+        if !kept {
+            log::warn!("a sound for {key} couldn't be kept");
+            return false;
+        }
+        control.chosen = Some(name);
+        self.hooks.control(&id, at, 1.0);
+        self.hooks.give_file(&id, at, Some(&kept_wav));
+        true
+    }
+
+    /// The file control kept under `key` lets its file go. False if there is no such control.
+    pub fn clear_file(&self, key: String) -> bool {
+        let mut list = self.listed();
+        let Some((plugin, at)) = list.control_mut(&key) else { return false };
+        let id = plugin.id.clone();
+        let Some(PluginControl::File { control }) = plugin.controls.get_mut(at) else { return false };
+        if let Some(store) = self.store.as_deref() {
+            let (file, named) = plugin_file::chosen_paths(store, &id, &key);
+            let _ = std::fs::remove_file(&file);
+            let _ = std::fs::remove_file(&named);
+        }
+        control.chosen = None;
+        self.hooks.control(&id, at, 0.0);
+        self.hooks.give_file(&id, at, None);
+        true
+    }
+
+    /// Runs the action `key` (`<id>.<key>`) of a plugin that is on, on the artwork `session`: what
+    /// it changes is one step undo takes back. It runs in a copy of the plugin of its own, told its
+    /// controls, so its hooks go on meanwhile. A long call, not for the main thread. False if no
+    /// plugin on has it, or the plugin stopped (it goes off, and says why).
+    pub fn run_action(&self, key: String, session: Arc<crate::CanvasSession>) -> bool {
+        let found = {
+            let list = self.listed();
+            list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
+                let index = p.actions.iter().position(|a| a.key == key)?;
+                let values: Vec<f32> = p.controls.iter().map(PluginControl::number).collect();
+                Some((p.id.clone(), p.version.clone(), index, values, p.permissions.clone()))
+            })
+        };
+        let Some((id, version, index, values, permissions)) = found else { return false };
+        // another action closes a panel open
+        *self.open_panel() = None;
+        let started = self.start_code(&id, &version, &values, &permissions);
+        let ran = started.and_then(|(mut running, _)| {
+            let step = session.plugin_step();
+            let ran = running.action(index, Arc::clone(&session));
+            drop(step);
+            ran?;
+            self.keep_from(&id, &mut running)?;
+            Ok(running)
+        });
+        match ran {
+            Ok(mut running) => {
+                // a panel it showed stays open, with this copy of its code
+                if let (Some(shows), false) = running.take_panel() {
+                    let running = Arc::new(Mutex::new(running));
+                    *self.open_panel() = Some(OpenPanel { id, shows, running });
+                }
+                true
+            }
+            Err(stop) => {
+                // (the list takes it off when next read)
+                self.hooks.stopped(&id, stop);
+                false
+            }
+        }
+    }
+
+    /// The kinds of artwork the plugins on make, for the gallery's +.
+    pub fn kinds(&self) -> Vec<crate::PluginKind> {
+        let list = self.listed();
+        let on = list.files.iter().filter(|p| p.on && p.problem.is_none());
+        on.flat_map(|p| p.kinds.iter().cloned()).collect()
+    }
+
+    /// An artwork of kind `kind` (`<id>.<key>`) opened, in a copy of its plugin's code of its own:
+    /// a new one `width` × `height`, or the one its saved `data` holds. None if no plugin on makes
+    /// that kind, or it couldn't (one that stops goes off, and says why).
+    pub fn open_canvas(
+        &self,
+        kind: String,
+        width: u32,
+        height: u32,
+        data: Option<Vec<u8>>,
+    ) -> Option<Arc<crate::PluginCanvas>> {
+        let found = {
+            let list = self.listed();
+            list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
+                p.kinds.iter().any(|k| k.key == kind).then(|| {
+                    let values: Vec<f32> = p.controls.iter().map(PluginControl::number).collect();
+                    (p.id.clone(), p.version.clone(), values, p.permissions.clone())
+                })
+            })
+        };
+        let (id, version, values, permissions) = found?;
+        let running = match self.start_code(&id, &version, &values, &permissions) {
+            Ok((running, _)) => running,
+            Err(stop) => {
+                self.hooks.stopped(&id, stop);
+                return None;
+            }
+        };
+        match crate::PluginCanvas::open(id.clone(), Arc::clone(&self.hooks), running, width, height, data.as_deref()) {
+            Ok(canvas) => {
+                let canvas = Arc::new(canvas);
+                // told its plugin's controls as they change
+                self.hooks.keep_canvas(&id, &canvas);
+                Some(canvas)
+            }
+            Err(stop) => {
+                if let Some(stop) = stop {
+                    self.hooks.stopped(&id, stop);
+                }
+                None
+            }
+        }
+    }
+
+    /// The panel a plugin's action showed, while it is open.
+    pub fn panel(&self) -> Option<crate::PluginPanel> {
+        self.open_panel().as_ref().map(|open| open.shows.clone())
+    }
+
+    /// Row `row` of the panel open touched with `value` (a slider's, a switch's 1 or 0, a choice's
+    /// place, 1 for a button), on the artwork `session`: the plugin is told, and what it changes is
+    /// one step undo takes back. It may show the panel changed, or close it. A long call, not for the
+    /// main thread. False once the panel is closed (by the plugin, or as it stopped).
+    pub fn panel_touched(&self, row: u32, value: f32, session: Arc<crate::CanvasSession>) -> bool {
+        let row = row as usize;
+        // the touch shows at once, and the code is fetched to be told
+        let (id, running, value) = {
+            let mut open = self.open_panel();
+            let Some(panel) = open.as_mut() else { return false };
+            let Some(value) = crate::plugin_panel::touched(&panel.shows, row, value) else { return true };
+            panel.shows = crate::plugin_panel::with_value(panel.shows.clone(), row, value);
+            (panel.id.clone(), Arc::clone(&panel.running), value)
+        };
+        let mut code = running.lock().unwrap_or_else(|e| e.into_inner());
+        let step = session.plugin_step();
+        let ran = code.panel_event(row, value, Arc::clone(&session));
+        drop(step);
+        let answer = ran.and_then(|()| {
+            let shown = code.take_panel();
+            self.keep_from(&id, &mut code)?;
+            Ok(shown)
+        });
+        drop(code);
+        // what it answered, unless that panel was closed meanwhile (or another took its place)
+        self.panel_answered(&id, &running, answer)
+    }
+
+    /// The key `press` (its key named as [`crate::key_shortcut`] takes it) while the panel open asks
+    /// for one: told to its plugin, on the artwork `session`, as a touch on it is (it may show the
+    /// panel changed, or close it). The panel asked for that press alone, and asks again for another.
+    /// A long call, not for the main thread. False if no panel open asked for it.
+    pub fn panel_key(&self, press: KeyCombo, session: Arc<crate::CanvasSession>) -> bool {
+        let press = KeyCombo::of(&press.key, press.command, press.shift, press.alt);
+        let (id, running) = {
+            let mut open = self.open_panel();
+            let Some(panel) = open.as_mut().filter(|panel| panel.shows.key_press && press.named_plainly()) else {
+                return false;
+            };
+            panel.shows.key_press = false;
+            (panel.id.clone(), Arc::clone(&panel.running))
+        };
+        let mut code = running.lock().unwrap_or_else(|e| e.into_inner());
+        let step = session.plugin_step();
+        let ran = code.panel_key(&press, Arc::clone(&session));
+        drop(step);
+        let answer = ran.and_then(|()| {
+            let shown = code.take_panel();
+            self.keep_from(&id, &mut code)?;
+            Ok(shown)
+        });
+        drop(code);
+        self.panel_answered(&id, &running, answer);
+        true
+    }
+
+    /// The panel open closed (its close button, or a tap away from it).
+    pub fn close_panel(&self) {
+        *self.open_panel() = None;
+    }
+
     /// Turns a plugin on or off; false if no file is `id`. It goes on its hooks or off them at once,
     /// no restart: off them the app is as it was, and its values wait for it. One that can't start
     /// stays off, and says why.
@@ -739,7 +1180,7 @@ impl Plugins {
         if let Some(store) = &self.store {
             plugin_file::clear_stopped(store, &id);
         }
-        self.hooks.take_off(&id);
+        self.take_off(&id);
         self.start(plugin);
         true
     }
@@ -789,7 +1230,7 @@ impl Plugins {
         {
             return None;
         }
-        self.hooks.take_off(&id);
+        self.take_off(&id);
         let gone = list.files.remove(at);
         list.flagged.remove(&id);
         // one the app added stays written down, so it isn't added again; imported again, it is as
@@ -811,6 +1252,88 @@ impl Plugins {
     /// as measured.
     pub fn interface_scale(&self, width: f32, height: f32) -> f32 {
         self.hooks().interface_scale(width, height)
+    }
+
+    /// Whether a plugin draws in-betweens: Animation Assist's frame options then offer In-between
+    /// ([`crate::CanvasSession::add_inbetween`]).
+    pub fn tweens(&self) -> bool {
+        self.hooks().tweens()
+    }
+
+    /// Whether a plugin makes the sound of the stroke being drawn: the app plays
+    /// [`crate::CanvasSession::stroke_sound`] while one does.
+    pub fn makes_stroke_sound(&self) -> bool {
+        self.hooks().makes_stroke_sound()
+    }
+
+    /// Whether a plugin on draws the colour panel's Classic square its own way: its picture
+    /// ([`crate::CanvasSession::picker_picture`]) and where touches land on it.
+    pub fn picker_on(&self) -> bool {
+        self.hooks().picker().is_some()
+    }
+
+    /// The saturation and brightness the picker plugin says point (`x`, `y`) of the Classic square
+    /// picks (0..1, y down): `[s, v]`, or none with no picker plugin on.
+    pub fn picker_pick(&self, x: f32, y: f32) -> Option<Vec<f32>> {
+        self.hooks().picker_pick(x, y).map(|(s, v)| vec![s, v])
+    }
+
+    /// Where the picker plugin says saturation `s` and brightness `v` sit on the Classic square
+    /// (0..1, y down): `[x, y]`, or none with no picker plugin on.
+    pub fn picker_point(&self, s: f32, v: f32) -> Option<Vec<f32>> {
+        self.hooks().picker_point(s, v).map(|(x, y)| vec![x, y])
+    }
+
+    /// Whether a plugin has the colour panel's Classic show a triangle (saturation and brightness
+    /// between the pure hue, white and black) in place of its square.
+    pub fn colour_triangle(&self) -> bool {
+        self.hooks().colour_triangle()
+    }
+
+    /// Whether a plugin sets brushes' settings at random: the brush studio shows Randomise.
+    pub fn randomises_brushes(&self) -> bool {
+        self.hooks().randomises_brushes()
+    }
+
+    /// The accent (0xRRGGBB), the blue of what is chosen and switched on, if a plugin gives the
+    /// interface another; none: as measured.
+    pub fn accent_colour(&self) -> Option<u32> {
+        self.hooks().interface_colour(0)
+    }
+
+    /// A hardware keyboard's `press` on the canvas (its key named as [`crate::key_shortcut`] takes
+    /// it) as a plugin rebinding keys takes it: itself, another press, or none at all (it does
+    /// nothing). With none on, itself.
+    pub fn key_press(&self, press: KeyCombo) -> Option<KeyCombo> {
+        let press = KeyCombo::of(&press.key, press.command, press.shift, press.alt);
+        if !press.named_plainly() {
+            return Some(press);
+        }
+        self.hooks().key_shortcut(press)
+    }
+
+    /// The shortcut on a press: what [`crate::key_shortcut`] says of the press a plugin rebinding
+    /// keys takes it as ([`Plugins::key_press`]).
+    pub fn key_shortcut(
+        &self,
+        key: String,
+        command: bool,
+        shift: bool,
+        alt: bool,
+        transforming: bool,
+    ) -> Option<crate::KeyShortcut> {
+        let press = self.key_press(KeyCombo { key, command, shift, alt })?;
+        crate::key_shortcut(press.key, press.command, press.shift, press.alt, transforming)
+    }
+
+    /// The keyboard shortcuts' list as [`crate::key_shortcut_list`] has it, with the keys a plugin
+    /// rebinding them says do each now.
+    pub fn key_shortcut_list(&self, desktop: bool, mac: bool) -> Vec<crate::ShortcutGroup> {
+        let hooks = self.hooks();
+        if !hooks.rebinds_keys() {
+            return crate::key_shortcut_list(desktop, mac);
+        }
+        crate::keys::shortcut_list_now(desktop, mac, |press| hooks.key_shortcut_keys(press))
     }
 }
 
@@ -835,6 +1358,7 @@ mod tests {
             shown_times: 100.0,
             unit: "%".to_owned(),
             at_least: None,
+            names: Vec::new(),
             live: false,
         }
     }
@@ -852,6 +1376,7 @@ mod tests {
             shown_times: 1.0,
             unit: " px".to_owned(),
             at_least: Some("Off".to_owned()),
+            names: Vec::new(),
             live: false,
         }
     }
@@ -864,6 +1389,10 @@ mod tests {
     /// One from elsewhere: nothing in the app asks about it.
     fn stranger() -> PluginInfo {
         PluginInfo {
+            brush_controls: Vec::new(),
+            actions: Vec::new(),
+            kinds: Vec::new(),
+            permissions: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),
@@ -896,6 +1425,7 @@ mod tests {
                         shown_times: 1.0,
                         unit: " px".to_owned(),
                         at_least: None,
+                        names: Vec::new(),
                         live: true,
                     },
                 },
@@ -1012,6 +1542,15 @@ mod tests {
     }
 
     #[test]
+    fn a_slider_can_name_each_step() {
+        let names = ["By brush", "Eraser", "Pencil"].map(str::to_owned).to_vec();
+        let sound = PluginSlider { least: 0.0, most: 2.0, step: 1.0, at_least: None, names, ..gap_slider() };
+        assert_eq!(plugin_slider_shown(sound.clone(), 0.0), "By brush");
+        assert_eq!(plugin_slider_shown(sound.clone(), 1.2), "Eraser");
+        assert_eq!(plugin_slider_shown(sound, 2.0), "Pencil");
+    }
+
+    #[test]
     fn a_count_is_kept_as_a_whole_number() {
         assert!(plugin_slider_whole(gap_slider()));
         assert!(!plugin_slider_whole(size_slider()));
@@ -1047,6 +1586,7 @@ mod tests {
             shown_times: 1.0,
             unit: String::new(),
             at_least: None,
+            names: Vec::new(),
             live: false,
         };
         for slider in [bad(5.0, 1.0, 1.0), bad(1.0, 1.0, 0.0), bad(0.0, 1.0, -1.0), bad(f32::NAN, f32::NAN, f32::NAN)] {
@@ -1434,6 +1974,35 @@ mod tests {
     }
 
     #[test]
+    fn an_update_keeps_what_the_plugin_keeps_and_the_files_picked_for_it() {
+        let dir = store("update-kept");
+        let plugins = at(&dir);
+        let id = "org.example.plugin";
+        assert_eq!(plugins.install(slider_file(id, "cut", "1.2.0")), None);
+        let store = std::path::Path::new(&dir);
+        assert_eq!(plugin_file::read_kept(store, id), None);
+        assert!(plugin_file::write_kept(store, id, b"bound"));
+        let (picked, _) = plugin_file::chosen_paths(store, id, "sound");
+        std::fs::create_dir_all(picked.parent().unwrap()).unwrap();
+        std::fs::write(&picked, b"RIFF").unwrap();
+        assert_eq!(plugins.install(slider_file(id, "cut", "1.3.0")), None);
+        assert_eq!(plugin_file::read_kept(store, id).as_deref(), Some(&b"bound"[..]));
+        assert!(picked.is_file(), "the file picked stays");
+        // a start reads it as it was, the files beside its version passed over
+        let next = at(&dir);
+        assert_eq!(next.plugins().len(), 1);
+        assert_eq!(next.plugins()[0].version, "1.3.0");
+        // too much isn't kept, nor anything for a plugin that isn't there
+        assert!(!plugin_file::write_kept(store, id, &vec![0; crate::plugin_run::MOST_KEPT + 1]));
+        assert!(!plugin_file::write_kept(store, "org.example.gone", b"x"));
+        assert_eq!(plugin_file::read_kept(store, id).as_deref(), Some(&b"bound"[..]));
+        // it goes with the plugin
+        assert!(plugins.remove(id.to_owned()).is_some());
+        assert_eq!(plugin_file::read_kept(store, id), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_refused_file_leaves_nothing_behind() {
         let dir = store("refused");
         let plugins = at(&dir);
@@ -1458,6 +2027,7 @@ mod tests {
     const EYEDROPPER: &str = "io.github.artcraftandroid.eyedropper-layer";
     const PASTE: &str = "io.github.artcraftandroid.paste-into-masks";
     const TOUCH: &str = "io.github.artcraftandroid.touch-offset";
+    const COLOUR: &str = "io.github.artcraftandroid.interface-colour";
 
     /// The app's plugins kept in `dir`, what it comes with added.
     fn app_at(dir: &str) -> Arc<Plugins> {
@@ -1538,6 +2108,72 @@ mod tests {
     }
 
     #[test]
+    fn an_artwork_of_a_plugin_s_kind_takes_touches_draws_saves_and_loads() {
+        let dir = store("canvas-kind");
+        let plugins = Plugins::with_store(dir.clone());
+        let id = "org.example.dots";
+        let file = crate::plugin_file::tests::dots_file(id, serde_json::json!([{ "key": "dots", "label": "Dots" }]));
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.kinds().is_empty(), "off until turned on");
+        assert!(plugins.set_on(id.to_owned(), true));
+        let kind = format!("{id}.dots");
+        assert_eq!(plugins.kinds(), [crate::PluginKind { key: kind.clone(), label: "Dots".to_owned() }]);
+        let canvas = plugins.open_canvas(kind.clone(), 40, 30, None).expect("opened");
+        assert_eq!((canvas.width(), canvas.height()), (40, 30));
+        let red_at = |c: &crate::PluginCanvas, x: usize, y: usize| {
+            let rgba = c.picture();
+            rgba[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4] == [255, 0, 0, 255]
+        };
+        assert!(!red_at(&canvas, 20, 15), "nothing yet");
+        assert!(canvas.touch(0, 20.0, 15.0, 1.0));
+        assert!(red_at(&canvas, 20, 15) && !red_at(&canvas, 2, 2));
+        // what it saved goes back, as undo does
+        let saved = canvas.save().expect("saved");
+        assert_eq!(saved.len(), 8);
+        assert!(canvas.touch(0, 6.0, 6.0, 1.0));
+        assert!(red_at(&canvas, 6, 6) && !red_at(&canvas, 20, 15));
+        assert!(canvas.load(saved.clone()));
+        assert!(red_at(&canvas, 20, 15) && !red_at(&canvas, 6, 6));
+        // and opens as it was
+        let again = plugins.open_canvas(kind.clone(), 40, 30, Some(saved)).expect("reopened");
+        assert!(red_at(&again, 20, 15));
+        // a kind no plugin on makes opens nothing
+        assert!(plugins.open_canvas(format!("{id}.other"), 40, 30, None).is_none());
+        assert!(plugins.set_on(id.to_owned(), false));
+        assert!(plugins.open_canvas(kind, 40, 30, None).is_none());
+        assert!(plugins.kinds().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugin_whose_artwork_crashes_goes_off_and_says_why() {
+        let dir = store("canvas-crash");
+        let plugins = Plugins::with_store(dir.clone());
+        let id = "org.example.dots";
+        let touch = "(f32.store (i32.const 0) (local.get 1)) (f32.store (i32.const 4) (local.get 2)) (i32.const 1))";
+        let text = crate::plugin_run::tests::DOTS.replace(touch, "(unreachable))");
+        assert_ne!(text, crate::plugin_run::tests::DOTS);
+        let module = wat::parse_str(text).unwrap();
+        let mut manifest = crate::plugin_file::tests::coded(id, &module);
+        manifest["compat"]["procraft"]["interface"] = serde_json::json!(2);
+        manifest["hooks"] = serde_json::json!([]);
+        manifest["kinds"] = serde_json::json!([{ "key": "dots", "label": "Dots" }]);
+        let file = crate::plugin_file::tests::pack(&manifest, &[(crate::plugin_run::MODULE, &module)]);
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.set_on(id.to_owned(), true));
+        let canvas = plugins.open_canvas(format!("{id}.dots"), 40, 30, None).unwrap();
+        assert!(!canvas.touch(0, 5.0, 5.0, 1.0));
+        assert_eq!(canvas.problem().as_deref(), Some("Switched off: it crashed."));
+        let card = plugins.plugins().into_iter().find(|p| p.id == id).unwrap();
+        assert!(!card.on);
+        assert_eq!(card.problem.as_deref(), Some("Switched off: it crashed."));
+        // and it takes nothing more
+        assert!(!canvas.touch(0, 6.0, 6.0, 1.0));
+        assert!(canvas.save().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn each_the_app_added_runs_as_any_imported() {
         let dir = store("bundled-run");
         let plugins = app_at(&dir);
@@ -1553,7 +2189,7 @@ mod tests {
                 assert!(plugins.hooks().is_on(&card.id), "{}", card.name);
             }
         }
-        assert_eq!(plugins.filters().len(), 3);
+        assert_eq!(plugins.filters().len(), 4);
         // each does what it says, by its controls
         assert_eq!(plugins.set_slider(format!("{TOUCH}.x"), 10.0), Some(10.0));
         assert_eq!(landing(&plugins), (UNTOUCHED.0 + 10.0, UNTOUCHED.1));
@@ -1565,12 +2201,22 @@ mod tests {
         assert!(plugins.hooks().paste_mask());
         assert_eq!(plugins.set_slider("fill_gap".to_owned(), 4.0), Some(4.0));
         assert!(plugins.hooks().fill_mask());
+        // the accent as it was at the slider's start, then red
+        assert_eq!(plugins.accent_colour(), Some(0x0076FD));
+        assert!(plugins.set_slider(format!("{COLOUR}.hue"), 0.0).is_some());
+        assert_eq!(plugins.accent_colour(), Some(0xFD0000));
+        assert!(plugins.set_slider(format!("{COLOUR}.saturation"), 0.0).is_some());
+        assert_eq!(plugins.accent_colour(), Some(0xFDFDFD));
+        // the triangle draws Classic, and says where a touch lands: its right corner is the pure hue
+        assert!(plugins.picker_on());
+        let corner = plugins.picker_pick(0.933, 0.5).unwrap();
+        assert!(corner.iter().all(|share| (share - 1.0).abs() < 1e-3), "{corner:?}");
         // kept, so through a restart
         let next = app_at(&dir);
         read_lines(&next, &plugins.kept_lines());
         assert_eq!(next.plugins(), plugins.plugins());
         assert_eq!(landing(&next), (UNTOUCHED.0 + 10.0, UNTOUCHED.1));
-        assert_eq!(next.filters().len(), 3);
+        assert_eq!(next.filters().len(), 4);
         // and off again, none does
         for card in plugins.plugins() {
             assert!(plugins.set_on(card.id, false));
@@ -1578,6 +2224,8 @@ mod tests {
         assert!(plugins.filters().is_empty());
         assert_eq!(landing(&plugins), UNTOUCHED);
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
+        assert_eq!(plugins.accent_colour(), None);
+        assert!(!plugins.picker_on());
         assert!(!plugins.hooks().pick_layer() && !plugins.hooks().paste_mask() && !plugins.hooks().fill_mask());
         let _ = std::fs::remove_dir_all(&dir);
     }

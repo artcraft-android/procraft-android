@@ -67,7 +67,8 @@ pub enum KeyShortcut {
 /// The shortcut on `key`, if any: a letter or digit (either case), "[", "]", ";", "space",
 /// "delete", "backspace", or an arrow ("left", "right", "up", "down"); `command` is Ctrl (⌘), and
 /// the arrows nudge only while `transforming`. Ctrl and Alt together are AltGr typing a key, so
-/// they count as neither.
+/// they count as neither. A plugin may take a press as another first:
+/// [`crate::Plugins::key_shortcut`].
 ///
 /// With the command key: Z undoes (with Shift redoes), C, X and V copy, cut and paste the layer,
 /// A copies the canvas, B opens Color Balance, U Hue, Saturation, Brightness, D deselects, J
@@ -244,6 +245,62 @@ pub struct KeyCombo {
     pub alt: bool,
 }
 
+/// The most characters a key's name has ("backspace").
+const MOST_KEY_NAME: usize = 16;
+
+impl KeyCombo {
+    /// The press, its key named as [`key_shortcut`] takes it (lowercase).
+    pub(crate) fn of(key: &str, command: bool, shift: bool, alt: bool) -> KeyCombo {
+        KeyCombo { key: key.to_lowercase(), command, shift, alt }
+    }
+
+    /// Whether its key is a name a press can have: a few printable ASCII characters, lowercase, no
+    /// `+` (that key is "plus") and no space (that key is "space").
+    pub(crate) fn named_plainly(&self) -> bool {
+        let fits = |c: char| c.is_ascii_graphic() && !c.is_ascii_uppercase() && c != '+';
+        (1..=MOST_KEY_NAME).contains(&self.key.len()) && self.key.chars().all(fits)
+    }
+
+    /// The press as plugins are told it, and write it: its modifiers in this order, each with a `+`
+    /// after it, then its key: "command+shift+z", "shift+]", "space".
+    pub(crate) fn text(&self) -> String {
+        let mods = [(self.command, "command+"), (self.shift, "shift+"), (self.alt, "alt+")];
+        let mut text: String = mods.iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect();
+        text.push_str(&self.key);
+        text
+    }
+
+    /// The press `text` writes (as [`KeyCombo::text`] does, its modifiers in any order), if it is
+    /// one.
+    pub(crate) fn read(text: &str) -> Option<KeyCombo> {
+        let (mods, key) = text.rsplit_once('+').unwrap_or(("", text));
+        let mut combo = KeyCombo { key: key.to_owned(), command: false, shift: false, alt: false };
+        for m in mods.split('+').filter(|_| !mods.is_empty()) {
+            let held = match m {
+                "command" => &mut combo.command,
+                "shift" => &mut combo.shift,
+                "alt" => &mut combo.alt,
+                _ => return None,
+            };
+            if std::mem::replace(held, true) {
+                return None;
+            }
+        }
+        combo.named_plainly().then_some(combo)
+    }
+
+    /// Presses as plugins write a list of them: each as [`KeyCombo::text`], a space between.
+    pub(crate) fn read_all(text: &str) -> Option<Vec<KeyCombo>> {
+        text.split(' ').filter(|t| !t.is_empty()).map(KeyCombo::read).collect()
+    }
+
+    /// The press written out for the platform, as the shortcuts' list writes it: "Ctrl+Shift+Z",
+    /// or a Mac's "⇧⌘Z" if `mac`.
+    pub(crate) fn label(&self, mac: bool) -> String {
+        press_label(self.command, self.shift, self.alt, &self.key, mac)
+    }
+}
+
 /// A row of the keyboard shortcuts' list: its keys written out for the platform (`keys`), the
 /// presses that do it (`combos`, none for a drag), and what it does.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -271,25 +328,42 @@ const fn command(key: &'static str) -> Press {
     (true, false, false, key)
 }
 
-/// A row of the list's table: the presses (none for a drag, written as `drag`), what they do, and
-/// whether only the desktop has them.
+/// A row of the list's table: the presses (none for a drag, written as `drag`, the keys it holds
+/// as `holds`), what they do, and whether only the desktop has them. Where its presses each do
+/// something of their own (one smaller, one bigger), `each` says what, for a plugin to rebind each
+/// by itself; where the app's own work needs its keys as they are (held, they move the view), it is
+/// `fixed`, and no plugin rebinds it. A drag is fixed.
 struct Entry {
     presses: &'static [Press],
     drag: &'static str,
+    holds: &'static [Press],
     does: &'static str,
+    each: &'static [&'static str],
     desktop: bool,
+    fixed: bool,
 }
 
 const fn entry(presses: &'static [Press], does: &'static str) -> Entry {
-    Entry { presses, drag: "", does, desktop: false }
+    Entry { presses, drag: "", holds: &[], does, each: &[], desktop: false, fixed: false }
 }
 
 const fn desktop(presses: &'static [Press], does: &'static str) -> Entry {
-    Entry { presses, drag: "", does, desktop: true }
+    Entry { desktop: true, ..entry(presses, does) }
 }
 
-const fn drag(keys: &'static str, does: &'static str) -> Entry {
-    Entry { presses: &[], drag: keys, does, desktop: true }
+const fn drag(keys: &'static str, holds: &'static [Press], does: &'static str) -> Entry {
+    Entry { presses: &[], drag: keys, holds, does, each: &[], desktop: true, fixed: true }
+}
+
+impl Entry {
+    /// What each of its presses does by itself.
+    const fn each(self, each: &'static [&'static str]) -> Entry {
+        Entry { each, ..self }
+    }
+
+    const fn fixed(self) -> Entry {
+        Entry { fixed: true, ..self }
+    }
 }
 
 /// The list, by group ("{command}" in a drag's keys: the platform's command key).
@@ -320,7 +394,14 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
             entry(&[command("b")], "Color Balance"),
             entry(&[command(";")], "Perspective guide on or off"),
             entry(&[alone("x")], "Swap the colours"),
-            entry(&[alone("left"), alone("right"), alone("up"), alone("down")], "Transforming: move it a pixel"),
+            entry(&[alone("left"), alone("right"), alone("up"), alone("down")], "Transforming: move it a pixel").each(
+                &[
+                    "Transforming: move it left",
+                    "Transforming: move it right",
+                    "Transforming: move it up",
+                    "Transforming: move it down",
+                ],
+            ),
         ],
     ),
     (
@@ -336,21 +417,23 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
     (
         "Brush size",
         &[
-            entry(&[command("["), command("]")], "Smaller or bigger by 1%"),
-            entry(&[alone("["), alone("]")], "By 5%"),
-            entry(&[(false, true, false, "["), (false, true, false, "]")], "By 10%"),
+            entry(&[command("["), command("]")], "Smaller or bigger by 1%").each(&["Smaller by 1%", "Bigger by 1%"]),
+            entry(&[alone("["), alone("]")], "By 5%").each(&["Smaller by 5%", "Bigger by 5%"]),
+            entry(&[(false, true, false, "["), (false, true, false, "]")], "By 10%")
+                .each(&["Smaller by 10%", "Bigger by 10%"]),
         ],
     ),
     (
         "View",
         &[
             entry(&[command("g")], "Grey view, to check values"),
-            desktop(&[command("="), command("-")], "Zoom in or out"),
+            desktop(&[command("="), command("-")], "Zoom in or out").each(&["Zoom in", "Zoom out"]),
             desktop(&[command("0")], "Fit the canvas"),
-            drag("{command}Space and drag", "Zoom"),
-            desktop(&[alone("r"), (false, true, false, "r")], "Turn the canvas 15° (with Shift, back)"),
-            drag("R and drag", "Turn the canvas (with Shift, in 15° steps)"),
-            desktop(&[alone("escape")], "Close what is open, or set the canvas upright"),
+            drag("{command}Space and drag", &[command("space")], "Zoom"),
+            desktop(&[alone("r"), (false, true, false, "r")], "Turn the canvas 15° (with Shift, back)").fixed(),
+            drag("R and drag", &[alone("r")], "Turn the canvas (with Shift, in 15° steps)"),
+            desktop(&[alone("escape")], "Close what is open, or set the canvas upright").fixed(),
+            desktop(&[alone("f11")], "Full screen, or back to a window").fixed(),
         ],
     ),
     (
@@ -380,12 +463,13 @@ fn key_label(key: &str, mac: bool) -> String {
         ("space", _) => "Space".into(),
         ("=", _) => "+".into(),
         ("-", _) => "−".into(),
+        ("plus", _) => "+".into(),
         _ => key.to_uppercase(),
     }
 }
 
 /// A press written out: "Ctrl+Shift+Z", or on a Mac "⇧⌘Z" (its modifiers in its own order).
-fn press_label(&(command, shift, alt, key): &Press, mac: bool) -> String {
+fn press_label(command: bool, shift: bool, alt: bool, key: &str, mac: bool) -> String {
     let key = key_label(key, mac);
     if mac {
         let mods = [(alt, "⌥"), (shift, "⇧"), (command, "⌘")];
@@ -400,34 +484,87 @@ fn press_label(&(command, shift, alt, key): &Press, mac: bool) -> String {
     }
 }
 
+fn combo(&(command, shift, alt, key): &Press) -> KeyCombo {
+    KeyCombo { key: key.into(), command, shift, alt }
+}
+
 /// The keyboard shortcuts, grouped, as a list to show: the canvas's (as [`key_shortcut`] has
 /// them), with the desktop's own too (its files, zooming and turning the view) if `desktop`; the
-/// keys written as a Mac's (⌘, ⇧, ⌥) if `mac`, else "Ctrl+", "Shift+", "Alt+".
+/// keys written as a Mac's (⌘, ⇧, ⌥) if `mac`, else "Ctrl+", "Shift+", "Alt+". With a plugin
+/// rebinding keys, [`crate::Plugins::key_shortcut_list`] shows them as they are now.
 #[uniffi::export]
 pub fn key_shortcut_list(desktop: bool, mac: bool) -> Vec<ShortcutGroup> {
+    shortcut_list_now(desktop, mac, |_| None)
+}
+
+/// The list as [`key_shortcut_list`] has it, each press of a row a plugin may rebind replaced by
+/// the presses `now` says do what it did (none: still it). A row left with no press goes.
+pub(crate) fn shortcut_list_now(
+    desktop: bool,
+    mac: bool,
+    mut now: impl FnMut(&KeyCombo) -> Option<Vec<KeyCombo>>,
+) -> Vec<ShortcutGroup> {
     SHORTCUTS
         .iter()
         .filter_map(|(heading, entries)| {
             let rows: Vec<ShortcutRow> = entries
                 .iter()
                 .filter(|e| desktop || !e.desktop)
-                .map(|e| {
-                    let keys = if e.presses.is_empty() {
-                        e.drag.replace("{command}", if mac { "⌘" } else { "Ctrl+" })
-                    } else {
-                        e.presses.iter().map(|p| press_label(p, mac)).collect::<Vec<_>>().join("  ")
-                    };
-                    let combos = e
-                        .presses
-                        .iter()
-                        .map(|&(command, shift, alt, key)| KeyCombo { key: key.into(), command, shift, alt })
-                        .collect();
-                    ShortcutRow { keys, combos, does: e.does.into() }
+                .filter_map(|e| {
+                    if e.presses.is_empty() {
+                        let keys = e.drag.replace("{command}", if mac { "⌘" } else { "Ctrl+" });
+                        return Some(ShortcutRow { keys, combos: Vec::new(), does: e.does.into() });
+                    }
+                    let mut combos: Vec<KeyCombo> = Vec::new();
+                    for press in e.presses.iter().map(combo) {
+                        let doing = if e.fixed { None } else { now(&press) };
+                        for c in doing.unwrap_or_else(|| vec![press]) {
+                            if !combos.contains(&c) {
+                                combos.push(c);
+                            }
+                        }
+                    }
+                    let keys = combos.iter().map(|c| c.label(mac)).collect::<Vec<_>>().join("  ");
+                    (!combos.is_empty()).then(|| ShortcutRow { keys, combos, does: e.does.into() })
                 })
                 .collect();
             (!rows.is_empty()).then(|| ShortcutGroup { heading: (*heading).into(), rows })
         })
         .collect()
+}
+
+/// Whether the app's shortcuts are the desktop's (its files, zooming and turning the view, which a
+/// plugin is told of too), as the platform this is built for has them.
+pub(crate) const DESKTOP: bool = !cfg!(any(target_os = "android", target_os = "ios"));
+/// Whether presses the core writes out itself (a plugin's panel's) are a Mac's (⌘, ⇧, ⌥), as the
+/// platform this is built for writes them.
+pub(crate) const MAC: bool = cfg!(any(target_os = "macos", target_os = "ios"));
+
+/// The shortcuts as a plugin on the `key_shortcut` hook is told them: a line each, of its group,
+/// what it does, its presses (each as [`KeyCombo::text`] writes it, a space between) and whether the
+/// app keeps its keys as they are (1) or a plugin may rebind them (0), a tab between each; the
+/// desktop's own too if `desktop`. A row whose presses each do something of their own is a line for
+/// each press; a drag is the keys it holds, kept.
+pub(crate) fn shortcuts_told(desktop: bool) -> String {
+    let mut told = String::new();
+    for (heading, entries) in SHORTCUTS {
+        for e in entries.iter().filter(|e| desktop || !e.desktop) {
+            let mut line = |does: &str, presses: &[Press], fixed: bool| {
+                let presses: Vec<String> = presses.iter().map(|p| combo(p).text()).collect();
+                told.push_str(&format!("{heading}\t{does}\t{}\t{}\n", presses.join(" "), u8::from(fixed)));
+            };
+            if e.presses.is_empty() {
+                line(e.does, e.holds, true);
+            } else if e.each.len() == e.presses.len() {
+                for (does, press) in e.each.iter().zip(e.presses) {
+                    line(does, std::slice::from_ref(press), e.fixed);
+                }
+            } else {
+                line(e.does, e.presses, e.fixed);
+            }
+        }
+    }
+    told
 }
 
 #[cfg(test)]
@@ -496,6 +633,75 @@ mod tests {
         assert_eq!(row("Save as").keys, "⇧⌘S");
         assert_eq!(row("Zoom").keys, "⌘Space and drag");
         assert!(row("Zoom").combos.is_empty());
+    }
+
+    #[test]
+    fn a_press_is_written_as_plugins_are_told_it_and_read_back() {
+        let redo = KeyCombo::of("Z", true, true, false);
+        assert_eq!(redo.text(), "command+shift+z");
+        assert_eq!(KeyCombo::read("shift+command+z"), Some(redo.clone()));
+        assert_eq!(KeyCombo::read("alt+shift+]"), Some(KeyCombo::of("]", false, true, true)));
+        assert_eq!(KeyCombo::read("space"), Some(KeyCombo::of("space", false, false, false)));
+        assert_eq!(KeyCombo::read("command+plus").map(|c| c.label(false)), Some("Ctrl++".to_owned()));
+        for wrong in ["", "Z", "ctrl+z", "shift+shift+a", "command+", "+", "a b", "backspacebackspace", "é"] {
+            assert_eq!(KeyCombo::read(wrong), None, "{wrong:?}");
+        }
+        assert_eq!(
+            KeyCombo::read_all("command+z  j"),
+            Some(vec![KeyCombo::of("z", true, false, false), KeyCombo::of("j", false, false, false)])
+        );
+        assert_eq!(KeyCombo::read_all(""), Some(Vec::new()));
+        assert_eq!(KeyCombo::read_all("j nonsense+x"), None);
+        assert_eq!(redo.label(true), "⇧⌘Z");
+    }
+
+    #[test]
+    fn a_plugin_is_told_each_shortcut_it_may_rebind_by_itself() {
+        let told = shortcuts_told(false);
+        let lines: Vec<Vec<&str>> = told.lines().map(|l| l.split('\t').collect()).collect();
+        assert!(lines.iter().all(|fields| fields.len() == 4), "{told}");
+        let line = |does: &str| lines.iter().find(|f| f[1] == does).cloned();
+        assert_eq!(line("Undo"), Some(vec!["Edit", "Undo", "command+z", "0"]));
+        assert_eq!(line("Duplicate the layer"), Some(vec!["Edit", "Duplicate the layer", "j command+j", "0"]));
+        // presses that each do something of their own are each a line
+        assert_eq!(line("Smaller by 1%"), Some(vec!["Brush size", "Smaller by 1%", "command+[", "0"]));
+        assert_eq!(line("Bigger by 10%"), Some(vec!["Brush size", "Bigger by 10%", "shift+]", "0"]));
+        assert_eq!(line("Transforming: move it up").map(|f| f[2]), Some("up"));
+        assert_eq!(line("Smaller or bigger by 1%"), None);
+        // the desktop's own only on the desktop, its turning keys and drags kept as they are
+        assert_eq!(line("Save"), None);
+        let desktop = shortcuts_told(true);
+        assert!(desktop.contains("Files\tSave as\tcommand+shift+s\t0\n"), "{desktop}");
+        assert!(desktop.contains("View\tZoom in\tcommand+=\t0\n"), "{desktop}");
+        assert!(desktop.contains("View\tTurn the canvas 15° (with Shift, back)\tr shift+r\t1\n"), "{desktop}");
+        assert!(desktop.contains("View\tZoom\tcommand+space\t1\n"), "{desktop}");
+        assert!(desktop.contains("View\tFull screen, or back to a window\tf11\t1\n"), "{desktop}");
+        // each press told reads back as one
+        for fields in desktop.lines().map(|l| l.split('\t').collect::<Vec<_>>()) {
+            assert!(KeyCombo::read_all(fields[2]).is_some_and(|p| !p.is_empty()), "{fields:?}");
+        }
+    }
+
+    #[test]
+    fn the_list_shows_the_keys_a_plugin_says_do_each_now() {
+        let y = KeyCombo::of("y", true, false, false);
+        let list = shortcut_list_now(true, false, |press| match press.text().as_str() {
+            "command+z" => Some(vec![y.clone()]),
+            // both of duplicate's keys gone: the row goes
+            "j" | "command+j" => Some(Vec::new()),
+            // a kept key is never asked about
+            "r" => panic!("asked about R"),
+            _ => None,
+        });
+        let row = |does: &str| list.iter().flat_map(|g| &g.rows).find(|r| r.does == does).cloned();
+        let undo = row("Undo").unwrap();
+        assert_eq!((undo.keys.as_str(), undo.combos.as_slice()), ("Ctrl+Y", std::slice::from_ref(&y)));
+        assert_eq!(row("Duplicate the layer"), None);
+        assert_eq!(row("Redo").map(|r| r.keys), Some("Ctrl+Shift+Z".to_owned()));
+        assert_eq!(row("Zoom").map(|r| r.keys), Some("Ctrl+Space and drag".to_owned()));
+        assert!(row("Turn the canvas 15° (with Shift, back)").is_some());
+        // none rebound: as the plain list has it
+        assert_eq!(shortcut_list_now(false, true, |_| None), key_shortcut_list(false, true));
     }
 
     #[test]

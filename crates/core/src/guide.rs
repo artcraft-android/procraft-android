@@ -186,7 +186,10 @@ impl State {
     }
 
     fn guide_info(&self) -> GuideInfo {
-        let g = &self.doc.guide;
+        // radial symmetry's lines as a plugin has them, if one says
+        let mut seen = self.doc.guide.clone();
+        seen.radial = self.hooks.as_ref().and_then(|hooks| hooks.radial_segments());
+        let g = &seen;
         let look = g.look();
         let dpi = self.dpi();
         let to_screen = self.view.map_or(Affine::scale(1.0), |v| v.to_screen());

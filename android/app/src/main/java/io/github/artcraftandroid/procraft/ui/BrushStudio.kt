@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -115,7 +116,7 @@ private val StudioCard get() = if (Pc.light) Color(0xFFE5E5E5) else Color(0xFF31
 private val PreviewCardFill get() = if (Pc.light) Color(0xFFE8E8E8) else Color(0xFF2A2A2A)
 private val PreviewCardEdge get() = if (Pc.light) Color(0xFFD0D0D0) else Color(0xFF4A4A4A)
 private val PreviewCardName get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFC5C5C5)
-private val StudioDone = Color(0xFF0190FF)
+private val StudioDone get() = Pc.tinted(Color(0xFF0190FF))
 
 /** Where the settings start below the drawing pad (points from the top). */
 private val PadHeight = 510.dp
@@ -411,6 +412,20 @@ private val CombineListLeft = 368.dp
 @Composable
 private fun StudioParts(vm: CanvasViewModel) {
     var cards by remember { mutableStateOf(false) }
+    // Uncombine, asking first
+    var parting by remember { mutableStateOf<Unit?>(null) }
+    Alert(
+        parting,
+        title = { "Uncombine these brushes?" },
+        message = { "The pair becomes two brushes again, side by side in the set. It can't be undone." },
+        action = "Uncombine",
+        destructive = false,
+        onCancel = { parting = null },
+        onAction = {
+            parting = null
+            vm.uncombineStudio()
+        },
+    )
     var list by remember { mutableStateOf(false) }
     var at by remember { mutableStateOf(IntOffset.Zero) }
     var rowY by remember { mutableFloatStateOf(0f) }
@@ -454,6 +469,15 @@ private fun StudioParts(vm: CanvasViewModel) {
                     Icon(PcIcons.ChevronRight, contentDescription = null, tint = StudioDim, modifier = Modifier.size(24.dp))
                 }
                 PartCard(vm, 1, "Secondary", second = true)
+                Box(
+                    Modifier.fillMaxWidth().height(CombineRow).tap {
+                        cards = false
+                        parting = Unit
+                    }.padding(start = 11.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text("Uncombine", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+                }
             }
         }
     }
@@ -593,7 +617,9 @@ fun BrushStudio(vm: CanvasViewModel) {
 @Composable
 private fun Studio(vm: CanvasViewModel) {
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    Box(Modifier.fillMaxSize().background(StudioBack).pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } }) {
+    BoxWithConstraints(
+        Modifier.fillMaxSize().background(StudioBack).pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } },
+    ) {
         if (landscape) {
             // the pages listed by name on a card, the settings beside them, the pad on the right
             Row(Modifier.fillMaxSize()) {
@@ -603,10 +629,13 @@ private fun Studio(vm: CanvasViewModel) {
                 StudioPad(vm, Modifier.fillMaxSize())
             }
         } else {
+            // a short screen (a split window, or a tablet held upright) gives the pad at most 45%
+            // of its height, so the settings under it always have room to show and scroll
+            val pad = if (maxHeight * 0.45f < PadHeight) maxHeight * 0.45f else PadHeight
             Row(Modifier.fillMaxSize()) {
                 StudioRail(vm)
                 Column(Modifier.fillMaxSize()) {
-                    StudioPad(vm, Modifier.fillMaxWidth().height(PadHeight))
+                    StudioPad(vm, Modifier.fillMaxWidth().height(pad))
                     Box(Modifier.fillMaxWidth().height(1.dp).background(StudioLine))
                     StudioSettings(vm, Modifier.fillMaxSize())
                 }
@@ -691,6 +720,14 @@ private fun StudioPad(vm: CanvasViewModel, modifier: Modifier) {
             Text("Drawing Pad", color = StudioButtonInk, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
         }
         Row(Modifier.align(Alignment.TopEnd).padding(top = 20.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+            // a plugin's: the brush set at random
+            if (vm.randomisesBrushes) {
+                Box(Modifier.height(43.dp).clip(CircleShape).background(StudioButton).border(1.dp, StudioButtonEdge, CircleShape)
+                    .tap { vm.randomiseStudio() }.padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
+                    Text("Randomise", color = StudioButtonInk, fontSize = 17.sp, maxLines = 1)
+                }
+                Spacer(Modifier.width(13.dp))
+            }
             Box(Modifier.size(73.dp, 43.dp).clip(CircleShape).background(StudioButton).border(1.dp, StudioButtonEdge, CircleShape).tap { vm.closeStudio(keep = false) },
                 contentAlignment = Alignment.Center) {
                 Text("Cancel", color = StudioButtonInk, fontSize = 17.sp, maxLines = 1)
@@ -729,6 +766,15 @@ private fun StudioSettings(vm: CanvasViewModel, modifier: Modifier) {
                 StudioControlView(vm, control)
                 above = control
             }
+        }
+        // the rows plugins that are on add to Properties, each under its own label
+        if (tab.name == "Properties") for (row in vm.pluginBrushControls()) {
+            Spacer(Modifier.height(gap(above, Edge.TITLE)))
+            Text(row.label, color = StudioHeader, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 8.dp))
+            val control = StudioControl.Choice(row.key, row.choices)
+            Spacer(Modifier.height(gap(Edge.TITLE, control)))
+            StudioControlView(vm, control)
+            above = control
         }
     }
 }
@@ -867,6 +913,31 @@ private fun BrushNameHeading(vm: CanvasViewModel) {
 @Composable
 private fun AboutBrush(vm: CanvasViewModel) {
     val about = vm.studioAbout
+    // each asks first: neither can be undone (true a new reset point, false a reset)
+    var asking by remember { mutableStateOf<Boolean?>(null) }
+    Alert(
+        asking?.takeIf { it },
+        title = { "New reset point?" },
+        message = { "Resetting the brush will bring it back to how it is now. It can't be undone." },
+        action = "Make",
+        destructive = false,
+        onCancel = { asking = null },
+        onAction = {
+            asking = null
+            vm.newResetPoint()
+        },
+    )
+    Alert(
+        asking?.takeIf { !it },
+        title = { "Reset this brush?" },
+        message = { "It goes back to its last reset point, or to how it came. It can't be undone." },
+        action = "Reset",
+        onCancel = { asking = null },
+        onAction = {
+            asking = null
+            vm.resetStudio()
+        },
+    )
     Column(Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().height(295.dp).clip(RoundedCornerShape(20.dp)).background(AboutCard), horizontalAlignment = Alignment.CenterHorizontally) {
             Spacer(Modifier.height(30.dp))
@@ -888,7 +959,7 @@ private fun AboutBrush(vm: CanvasViewModel) {
         }
         Spacer(Modifier.height(25.dp))
         Box(
-            Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(22.dp)).background(AboutCard).tap { vm.newResetPoint() }.padding(start = 15.dp),
+            Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(22.dp)).background(AboutCard).tap { asking = true }.padding(start = 15.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text("Create new reset point", color = AboutRowInk, fontSize = 17.sp, maxLines = 1)
@@ -896,7 +967,7 @@ private fun AboutBrush(vm: CanvasViewModel) {
         Spacer(Modifier.height(11.dp))
         val made = about?.resetMade
         Column(
-            Modifier.fillMaxWidth().height(if (made != null) 69.dp else 44.dp).clip(RoundedCornerShape(22.dp)).background(AboutCard).tap { vm.resetStudio() }
+            Modifier.fillMaxWidth().height(if (made != null) 69.dp else 44.dp).clip(RoundedCornerShape(22.dp)).background(AboutCard).tap { asking = false }
                 .padding(start = 15.dp),
             verticalArrangement = Arrangement.Center,
         ) {

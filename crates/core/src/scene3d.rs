@@ -1070,7 +1070,7 @@ impl CanvasSession {
         if w == 0 || h == 0 || image.rgba.len() != w as usize * h as usize * 4 {
             return false;
         }
-        if !self.shared.lock().scene_shown() || self.add_layer() == 0 {
+        if !self.shared.lock().scene_shown() || self.add_layer_quietly() == 0 {
             return false;
         }
         let mut guard = self.shared.lock();

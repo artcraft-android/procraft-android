@@ -32,6 +32,15 @@ impl Source {
         Some(Source { id: image_id(&pixels), pixels: Arc::new(pixels) })
     }
 
+    /// The image from pixels already shared (not copied), or none if it isn't `TEXTURE_SIZE`
+    /// square.
+    pub fn shared(pixels: Arc<Vec<u8>>) -> Option<Source> {
+        if pixels.len() != TEXTURE_SIZE * TEXTURE_SIZE {
+            return None;
+        }
+        Some(Source { id: image_id(&pixels), pixels })
+    }
+
     /// The pixels as text (base64), to keep with a brush.
     pub fn to_text(&self) -> String {
         crate::base64::encode(&self.pixels)
@@ -326,9 +335,12 @@ pub fn combine_modes() -> Vec<(u32, &'static str)> {
         B::Overlay,
         B::HardMix,
         B::Difference,
+        B::Subtract,
+        B::Divide,
     ]
     .iter()
     .map(|m| (m.id(), m.name()))
+    .chain([(GRAIN_LINEAR_HEIGHT, "Linear Height")])
     .collect()
 }
 
@@ -428,6 +440,22 @@ pub struct Grain {
     pub scale: f32,
     /// How strongly the grain shows, 0..1.
     pub depth: f32,
+}
+
+/// How far a stock grain's stand-in is tiled smaller, or larger, than its scale, at most (see
+/// [`Brush::grain_tile`]): past these the stand-in's own pattern would show more than its features.
+const STAND_IN_TILE_LEAST: f32 = 0.125;
+const STAND_IN_TILE_MOST: f32 = 4.0;
+
+/// A stand-in's tile against the scale for a stock grain's feature size `theirs` and our grain's
+/// `ours` (see [`Brush::grain_tile`]).
+fn stand_in_tile(theirs: Option<f32>, ours: Option<f32>) -> f32 {
+    match (theirs, ours) {
+        (Some(theirs), Some(ours)) if ours > 0.0 && theirs.is_finite() => {
+            (theirs / ours).clamp(STAND_IN_TILE_LEAST, STAND_IN_TILE_MOST)
+        }
+        _ => 1.0,
+    }
 }
 
 /// A moving grain's tile, cropped (not following the stamp's size), for each of the scale as
@@ -685,8 +713,8 @@ impl Brush {
         Brush {
             name: "Round Pen".to_owned(),
             spacing: 0.08,
-            streamline: 0.35,
-            pressure_smoothing: 0.2,
+            streamline: 0.015,
+            pressure_smoothing: 0.0,
             hardness: 0.92,
             min_size: 1.0,
             max_size: 120.0,
@@ -761,6 +789,14 @@ impl Brush {
         own.chain(others.flat_map(Brush::full_grains)).collect()
     }
 
+    /// Whether its grain, fixed to the canvas, goes on stamp by stamp, each stamp combined with it
+    /// as it lands and as deep as that stamp's depth (the depth's pressure curve, its jitter and its
+    /// least), rather than once over the whole stroke: as another app's brush that textures each
+    /// stamp does. Only a brush file of another app's sets it.
+    pub fn grain_each_stamp(&self) -> bool {
+        self.grain.mode == GrainMode::Texturized && self.setting("grain_each_stamp") >= 0.5
+    }
+
     /// The grain's tile on the canvas (pixels): fixed to the canvas, a brush file's image is as
     /// wide as the file's own times its scale over root two; else what the grain says.
     pub fn grain_tile(&self) -> f32 {
@@ -768,8 +804,29 @@ impl Brush {
             Some(f) if self.grain.mode == GrainMode::Texturized && f.width > 0 => {
                 f.width as f32 * self.grain.file_scale() / std::f32::consts::SQRT_2
             }
-            _ => self.grain.scale,
+            _ => self.grain.scale * self.stand_in_tile(),
         }
+    }
+
+    /// How a stock grain's stand-in is tiled against the scale, so that its features come out the
+    /// size the stock image's would at a tile that size: their feature size there over ours, as
+    /// measured, held to an eighth to four times. 1 for any other grain, or where either isn't
+    /// known.
+    fn stand_in_tile(&self) -> f32 {
+        let (Some(stock), Some(index)) = (&self.stock.grain, self.grain.image) else { return 1.0 };
+        // a pattern drawn to the stock image's own proportions: fixed to the canvas, the tile that
+        // image would have, as wide as it times the file's scale over root two, as a brush file's
+        // own image is; moving, read as the image is stamp by stamp, whose tile doesn't go by its
+        // width
+        if let Some(width) = crate::textures::drawn_to_stock_width(index) {
+            if self.grain.mode == GrainMode::Moving {
+                return 1.0;
+            }
+            return width * self.grain.file_scale() / std::f32::consts::SQRT_2 / self.grain.scale.max(1e-3);
+        }
+        let theirs = crate::textures::stock_grain_features(&stock.name)
+            .map(|levels| crate::textures::feature_at_tile(&levels, self.grain.scale));
+        stand_in_tile(theirs, crate::textures::grain_feature(index))
     }
 
     /// The brush as a file whose grain image is `width` pixels wide keeps it: the same tile, by a
@@ -842,6 +899,31 @@ mod tests {
         let mut b = Brush::round_pen();
         b.grain.mode = GrainMode::Texturized;
         assert_eq!(b.as_second().grain.mode, GrainMode::Moving);
+    }
+
+    #[test]
+    fn a_stock_grain_s_stand_in_is_tiled_to_the_stock_image_s_feature_size() {
+        // finer features than ours: tiled smaller, as far as an eighth; coarser: larger, as far as
+        // four times; unknown: as the scale says
+        assert_eq!(stand_in_tile(Some(0.002), Some(0.004)), 0.5);
+        assert_eq!(stand_in_tile(Some(0.0004), Some(0.004)), STAND_IN_TILE_LEAST);
+        assert_eq!(stand_in_tile(Some(0.1), Some(0.01)), STAND_IN_TILE_MOST);
+        assert_eq!(stand_in_tile(None, Some(0.01)), 1.0);
+        assert_eq!(stand_in_tile(Some(0.01), None), 1.0);
+        // only a stock grain's stand-in: our own grain, or one named in no table, keeps its scale
+        let mut b = Brush::round_pen();
+        b.grain = Grain { image: Some(crate::textures::grain::FINE_NOISE), scale: 300.0, ..Grain::default() };
+        assert_eq!(b.grain_tile(), 300.0);
+        b.stock.grain = Some(StockImage { name: "no such grain.png".into(), inverted: false });
+        assert_eq!(b.grain_tile(), 300.0);
+        // a pattern drawn to a stock image's proportions: that image's tile (2048 pixels wide at a
+        // file scale of 0.1024: 148 pixels)
+        b.grain.image = Some(crate::textures::grain::GRAPH_PAPER);
+        b.grain.scale = 81.92;
+        assert!((b.grain_tile() - 2048.0 * 0.1024 / std::f32::consts::SQRT_2).abs() < 0.01, "{}", b.grain_tile());
+        // moving, it goes by the moving grain's own tile, as the image's would
+        b.grain.mode = GrainMode::Moving;
+        assert_eq!(b.grain_tile(), 81.92);
     }
 
     #[test]

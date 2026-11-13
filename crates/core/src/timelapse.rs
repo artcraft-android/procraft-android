@@ -100,7 +100,22 @@ pub fn time_lapse_picks(frames: u32, seconds: Option<u32>) -> Vec<u32> {
 pub struct TimeLapse {
     dir: PathBuf,
     state: Mutex<State>,
+    /// A frame or its note couldn't be written (the disk full, say): [`Problem`], as a number.
+    problem: std::sync::atomic::AtomicU8,
 }
+
+/// Where the time-lapse stands with writing: all written, or a write failed and not yet told, or
+/// told (not again until a write works).
+#[repr(u8)]
+enum Problem {
+    Fine = 0,
+    Untold = 1,
+    Told = 2,
+}
+
+/// What [`TimeLapse::take_problem`] says.
+const PROBLEM_TEXT: &str =
+    "The time-lapse couldn't be kept. The disk may be full: replay and export leave out what wasn't kept.";
 
 struct State {
     /// Frames kept so far, and the last picture's hash (a picture the same as it isn't kept).
@@ -128,7 +143,11 @@ impl TimeLapse {
     #[uniffi::constructor]
     pub fn new(artwork: String) -> Arc<TimeLapse> {
         let dir = Path::new(&artwork).join("timelapse");
-        let lapse = TimeLapse { dir, state: Mutex::new(State { count: 0, last: None, taking: None }) };
+        let lapse = TimeLapse {
+            dir,
+            state: Mutex::new(State { count: 0, last: None, taking: None }),
+            problem: std::sync::atomic::AtomicU8::new(Problem::Fine as u8),
+        };
         // the frames in its videos, then the pictures after them
         let end = lapse.clips_on_disk().and_then(|k| k.ends.last().copied()).unwrap_or(0);
         let after = frame_files(&lapse.dir).iter().filter(|f| frame_index(f).is_some_and(|i| i >= end)).count();
@@ -340,18 +359,44 @@ impl TimeLapse {
         match written {
             Ok(()) => {
                 st.count += 1;
+                self.problem.store(Problem::Fine as u8, std::sync::atomic::Ordering::Relaxed);
                 true
             }
             Err(e) => {
                 log::warn!("keeping a time-lapse frame: {e}");
+                self.failed();
                 false
             }
         }
+    }
+
+    /// A write failed: to be told, unless it was and nothing has been written since.
+    fn failed(&self) {
+        let _ = self.problem.compare_exchange(
+            Problem::Fine as u8,
+            Problem::Untold as u8,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 }
 
 #[uniffi::export]
 impl TimeLapse {
+    /// What to tell, once, when the time-lapse couldn't be written (the disk full, say); none
+    /// otherwise, and none again until a write has worked and another failed.
+    pub fn take_problem(&self) -> Option<String> {
+        self.problem
+            .compare_exchange(
+                Problem::Untold as u8,
+                Problem::Told as u8,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+            .then(|| PROBLEM_TEXT.to_owned())
+    }
+
     /// Frame `i`, straight RGBA (opaque); none if there is no such frame.
     pub fn frame(&self, i: u32) -> Option<ThumbnailImage> {
         let picture = image::open(self.frame_path(i)).ok()?.to_rgba8();
@@ -677,6 +722,7 @@ impl TimeLapse {
         });
         if let Err(e) = written {
             log::warn!("keeping the time-lapse's videos: {e}");
+            self.failed();
         }
     }
 
@@ -843,6 +889,34 @@ mod tests {
         // asked to delete what was recorded, it goes too
         t.purge();
         assert!(!dir.join("set-aside-0-segment-1.mp4").exists());
+        let _ = fs::remove_dir_all(&artwork);
+    }
+
+    #[test]
+    fn a_time_lapse_that_cant_be_kept_is_told_once_until_kept_again() {
+        let artwork = std::env::temp_dir().join(format!("procraft-unkept-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&artwork);
+        fs::create_dir_all(&artwork).unwrap();
+        let t = TimeLapse::new(artwork.to_string_lossy().into_owned());
+        // a file where its folder goes: nothing can be written
+        let dir = artwork.join("timelapse");
+        let _ = fs::remove_dir_all(&dir);
+        fs::write(&dir, b"in the way").unwrap();
+        let red = [255u8, 0, 0, 255].repeat(16);
+        let blue = [0u8, 0, 255, 255].repeat(16);
+        assert!(!t.record(red.clone(), 4, 4));
+        assert!(t.take_problem().is_some(), "told");
+        assert!(!t.record(blue.clone(), 4, 4));
+        assert_eq!(t.take_problem(), None, "once");
+        // room again: kept, and a later failure is told again
+        fs::remove_file(&dir).unwrap();
+        assert!(t.record(red, 4, 4));
+        assert_eq!(t.take_problem(), None);
+        fs::remove_dir_all(&dir).unwrap();
+        fs::write(&dir, b"in the way").unwrap();
+        assert!(!t.record(blue, 4, 4));
+        assert!(t.take_problem().is_some(), "told again");
+        let _ = fs::remove_file(&dir);
         let _ = fs::remove_dir_all(&artwork);
     }
 
