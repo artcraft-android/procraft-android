@@ -69,7 +69,6 @@ import io.github.artcraftandroid.procraft.core.TransformKind
 import io.github.artcraftandroid.procraft.gallery.PALETTE_SLOTS
 import io.github.artcraftandroid.procraft.gallery.Palette
 import io.github.artcraftandroid.procraft.core.blendModes
-import io.github.artcraftandroid.procraft.core.keyShortcut as sharedKeyShortcut
 import io.github.artcraftandroid.procraft.core.brushBlendModes
 import io.github.artcraftandroid.procraft.core.grainBlendModes
 import kotlinx.coroutines.Dispatchers
@@ -3025,27 +3024,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * A key of a hardware keyboard on the canvas ([ctrl] the command key): true if it is a
-     * shortcut, done. Typing in a text field never comes here.
+     * shortcut, done (as a plugin rebinding keys takes it), or the key a plugin's panel asked for.
+     * Typing in a text field never comes here.
      */
     fun keyShortcut(keyCode: Int, ctrl: Boolean, shift: Boolean, alt: Boolean): Boolean {
         if (screen != Screen.CANVAS || session == null) return false
         // the key as the shared shortcuts name it (crates/core keys.rs), which say what it does
-        val name = when (keyCode) {
-            in android.view.KeyEvent.KEYCODE_A..android.view.KeyEvent.KEYCODE_Z -> ('a' + (keyCode - android.view.KeyEvent.KEYCODE_A)).toString()
-            in android.view.KeyEvent.KEYCODE_0..android.view.KeyEvent.KEYCODE_9 -> ('0' + (keyCode - android.view.KeyEvent.KEYCODE_0)).toString()
-            android.view.KeyEvent.KEYCODE_LEFT_BRACKET -> "["
-            android.view.KeyEvent.KEYCODE_RIGHT_BRACKET -> "]"
-            android.view.KeyEvent.KEYCODE_SEMICOLON -> ";"
-            android.view.KeyEvent.KEYCODE_SPACE -> "space"
-            android.view.KeyEvent.KEYCODE_DEL -> "backspace"
-            android.view.KeyEvent.KEYCODE_FORWARD_DEL -> "delete"
-            android.view.KeyEvent.KEYCODE_DPAD_LEFT -> "left"
-            android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> "right"
-            android.view.KeyEvent.KEYCODE_DPAD_UP -> "up"
-            android.view.KeyEvent.KEYCODE_DPAD_DOWN -> "down"
-            else -> return false
+        val name = keyName(keyCode) ?: return false
+        if (pluginPanel?.keyPress == true) {
+            pluginPanelKey(io.github.artcraftandroid.procraft.core.KeyCombo(name, ctrl, shift, alt))
+            return true
         }
-        when (val shortcut = sharedKeyShortcut(name, ctrl, shift, alt, transforming) ?: return false) {
+        when (val shortcut = plugins.keyShortcut(name, ctrl, shift, alt, transforming) ?: return false) {
             KeyShortcut.Undo -> undo()
             KeyShortcut.Redo -> redo()
             KeyShortcut.CopyLayer -> copyLayer()
@@ -3074,6 +3064,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             is KeyShortcut.Nudge -> session?.transformArrow(shortcut.dx, shortcut.dy)?.let { transformMoved(it) }
         }
         return true
+    }
+
+    /** The key [press] a plugin's panel asked for: told to the plugin off the main thread (it acts as a touch on the panel does), the panel shown as it answers. It asked for that press alone. */
+    private fun pluginPanelKey(press: io.github.artcraftandroid.procraft.core.KeyCombo) {
+        val s = session ?: return
+        pluginPanel = pluginPanel?.copy(keyPress = false)
+        viewModelScope.launch {
+            withContext(Dispatchers.Default) { plugins.panelKey(press, s) }
+            pluginPanel = plugins.panel()
+            s.takeFailure()?.let { showNotice(it) }
+            readPlugins()
+            refresh()
+        }
     }
 
     /** Alt on a hardware keyboard went down or up: held it is □ held; it taps nothing, being in the system's own shortcuts. */
