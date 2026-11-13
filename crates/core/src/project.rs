@@ -335,6 +335,18 @@ impl crate::State {
                     if !changed_now.contains(&id) && known.contains_key(&id) && layer_path(dir, id).exists() {
                         continue;
                     }
+                    // its file couldn't be read (the layer shows empty): never written over until
+                    // the layer is painted on, and then kept aside first
+                    if self.unreadable.contains(&id) {
+                        if !changed_now.contains(&id) {
+                            continue;
+                        }
+                        let (from, to) = (layer_path(dir, id), unreadable_path(dir, id));
+                        if from.exists() && !to.exists() {
+                            fs::copy(&from, &to).map_err(|e| file_error("keeping a layer's unreadable file", e))?;
+                        }
+                        self.unreadable.remove(&id);
+                    }
                     let read = canvas.start_reading_layer(gpu, id).map_err(|e| file_error("reading a layer", e))?;
                     let after: usize = reading.iter().map(|(_, r): &(LayerId, procraft_gpu::Readback)| r.bytes()).sum();
                     if after + read.bytes() <= READ_AFTER_LOCK {
@@ -376,6 +388,16 @@ impl crate::State {
                     Opened::Png(_) => None,
                 });
             }
+        }
+        // one whose file couldn't be read, deleted: its file kept aside before the save tidies it
+        // away
+        let gone: Vec<LayerId> = self.unreadable.iter().copied().filter(|id| self.doc.layer(*id).is_none()).collect();
+        for id in gone {
+            let (from, to) = (layer_path(dir, id), unreadable_path(dir, id));
+            if from.exists() && !to.exists() {
+                fs::copy(&from, &to).map_err(|e| file_error("keeping a layer's unreadable file", e))?;
+            }
+            self.unreadable.remove(&id);
         }
         let gpu = self.gpu.clone();
         let reference_picture = self.reference_picture.clone();
@@ -732,15 +754,20 @@ impl CanvasSession {
         let doc = file.document.repaired();
         // each layer's file as it is, decoded as it goes to the GPU
         let mut pngs = Vec::new();
+        let mut unread = Vec::new();
         for layer in doc.layers() {
             let path = layer_path(&dir, layer.id);
             // a layer with no file is empty
             if !path.exists() {
                 continue;
             }
-            match fs::read(&path) {
+            // (tried twice: the file is there)
+            match fs::read(&path).or_else(|_| fs::read(&path)) {
                 Ok(bytes) => pngs.push((layer.id, Opened::Png(bytes))),
-                Err(e) => log::error!("layer {:?}: {e}", layer.id),
+                Err(e) => {
+                    log::error!("layer {:?}: {e}", layer.id);
+                    unread.push(layer.id);
+                }
             }
         }
         let scene = file.model.as_ref().map(|m| crate::scene3d::open_saved_model(&dir, m)).transpose()?;
@@ -755,6 +782,7 @@ impl CanvasSession {
         {
             let mut st = session.shared.lock();
             st.pending_pixels = pngs;
+            st.layers_unread(unread);
             st.info = file.info;
             st.saved_view = file.view;
             st.scene = scene;
@@ -1382,18 +1410,43 @@ pub(crate) fn opened(layers: Vec<(LayerId, Vec<u8>)>) -> Vec<(LayerId, Opened)> 
     layers.into_iter().map(|(id, rgba)| (id, Opened::Pixels(rgba))).collect()
 }
 
-/// Waiting layers' pixels, `width` × `height`; one that can't be read is left out.
-pub(crate) fn opened_pixels(layers: Vec<(LayerId, Opened)>, width: u32, height: u32) -> Vec<(LayerId, Vec<u8>)> {
-    layers
+/// Waiting layers' pixels, `width` × `height`, and the layers that couldn't be read (left out).
+pub(crate) fn opened_pixels(
+    layers: Vec<(LayerId, Opened)>,
+    width: u32,
+    height: u32,
+) -> (Vec<(LayerId, Vec<u8>)>, Vec<LayerId>) {
+    let mut unread = Vec::new();
+    let pixels = layers
         .into_iter()
         .filter_map(|(id, layer)| match layer.pixels(width, height) {
             Ok(rgba) => Some((id, rgba)),
             Err(e) => {
                 log::error!("layer {id:?}: {e}");
+                unread.push(id);
                 None
             }
         })
-        .collect()
+        .collect();
+    (pixels, unread)
+}
+
+/// The layers named `names` couldn't be read, as the app tells it.
+pub(crate) fn unreadable_said(names: &[String]) -> String {
+    match names {
+        [one] => format!("The layer “{one}” couldn't be read and shows empty. Its file is kept as it was."),
+        _ => format!(
+            "{} layers couldn't be read and show empty: {}. Their files are kept as they were.",
+            names.len(),
+            names.join(", ")
+        ),
+    }
+}
+
+/// Where a layer's file that couldn't be read is kept once the layer is painted on: beside the
+/// layers (whose folder a save tidies), never written over.
+pub(crate) fn unreadable_path(dir: &Path, id: LayerId) -> PathBuf {
+    dir.join(format!("unreadable-{}.png", id.0))
 }
 
 /// A PNG's RGBA8 pixels, which must be `width` × `height`.

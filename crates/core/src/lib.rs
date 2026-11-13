@@ -539,6 +539,11 @@ pub(crate) struct State {
     pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
     /// The canvas couldn't be made from these pixels (a failure elsewhere doesn't stop the next try).
     pub(crate) canvas_failed: bool,
+    /// Layers whose saved files couldn't be read (shown empty): a save leaves each file as it is
+    /// until the layer is painted on, and then keeps the file aside before writing the new one.
+    pub(crate) unreadable: std::collections::HashSet<procraft_engine::document::LayerId>,
+    /// Those of them not told of yet (see [`CanvasSession::take_failure`]).
+    pub(crate) unreadable_untold: Vec<procraft_engine::document::LayerId>,
     /// Let go of (see [`CanvasSession::release_canvas`]): no canvas is made again.
     pub(crate) closed: bool,
     /// A model open to paint on, in place of the flat canvas (the document is its current
@@ -899,6 +904,16 @@ impl State {
         self.sliders.entry((tool, set, index)).or_insert(start)
     }
 
+    /// Layers `ids`' files couldn't be read: they show empty, saves leave their files, and the
+    /// app is told.
+    pub(crate) fn layers_unread(&mut self, ids: Vec<procraft_engine::document::LayerId>) {
+        for id in ids {
+            if self.unreadable.insert(id) {
+                self.unreadable_untold.push(id);
+            }
+        }
+    }
+
     /// Creates the canvas once there is a GPU.
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) fn ensure_canvas(&mut self) {
@@ -908,7 +923,13 @@ impl State {
         }
         let Some(gpu) = self.gpu.as_ref() else { return };
         let (w, h) = (self.doc.width(), self.doc.height());
-        let pixels = project::opened_pixels(std::mem::take(&mut self.pending_pixels), w, h);
+        let (pixels, unread) = project::opened_pixels(std::mem::take(&mut self.pending_pixels), w, h);
+        // (its fields, as the GPU is borrowed: see [`State::layers_unread`])
+        for id in unread {
+            if self.unreadable.insert(id) {
+                self.unreadable_untold.push(id);
+            }
+        }
         let doc = &self.doc;
         // every layer up as it was read, or no canvas: one the GPU had no memory for would show
         // empty, and be saved so once painted on
@@ -1181,6 +1202,7 @@ impl Shared {
                 c.set_resident_budget(budget);
                 let mut waiting = std::collections::BTreeMap::new();
                 let mut at = 0;
+                let mut unread = Vec::new();
                 for (i, read) in receive {
                     waiting.insert(i, read);
                     while let Some(read) = waiting.remove(&at) {
@@ -1207,13 +1229,17 @@ impl Shared {
                                     }
                                 }?;
                             }
-                            Some(Err(e)) => log::error!("layer {id:?}: {e}"),
+                            Some(Err(e)) => {
+                                log::error!("layer {id:?}: {e}");
+                                unread.push(*id);
+                            }
                         }
                     }
                 }
                 c.fill_rest(&gpu, &doc);
                 // as read: not changed
                 c.take_changed();
+                self.lock().layers_unread(unread);
                 log::info!(
                     "canvas made in {} ms: {} layers, {} kept compressed, {} KB of copies of the rest",
                     started.elapsed().as_millis(),
@@ -1425,6 +1451,8 @@ impl CanvasSession {
             name,
             pending_pixels: project::opened(pixels),
             canvas_failed: false,
+            unreadable: std::collections::HashSet::new(),
+            unreadable_untold: Vec::new(),
             closed: false,
             fit_insets: [0.0; 4],
             backdrops: Vec::new(),

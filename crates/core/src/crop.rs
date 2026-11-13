@@ -146,6 +146,16 @@ impl CanvasSession {
     pub fn take_failure(&self) -> Option<String> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // layers whose files couldn't be read as the artwork opened (shown empty, their files kept)
+        if !st.unreadable_untold.is_empty() {
+            let names: Vec<String> = std::mem::take(&mut st.unreadable_untold)
+                .into_iter()
+                .filter_map(|id| st.doc.layer(id).map(|l| l.name.clone()))
+                .collect();
+            if !names.is_empty() {
+                return Some(crate::project::unreadable_said(&names));
+            }
+        }
         if st.gpu.as_ref().is_some_and(Gpu::is_lost) && !std::mem::replace(&mut st.crop_edit.lost_told, true) {
             st.crop_edit.failure = None;
             return Some(LOST_SAID.to_owned());

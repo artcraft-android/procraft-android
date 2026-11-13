@@ -2766,7 +2766,7 @@ impl State {
         let mut old = TextureSet {
             doc: std::mem::replace(&mut self.doc, Document::new(1, 1)),
             canvas: self.canvas.take(),
-            pending: crate::project::opened_pixels(std::mem::take(&mut self.pending_pixels), side, side),
+            pending: crate::project::opened_pixels(std::mem::take(&mut self.pending_pixels), side, side).0,
             fill: None,
         };
         if let Some(gpu) = self.gpu.as_ref() {
@@ -3122,7 +3122,7 @@ impl State {
         let mut old = TextureSet {
             doc: std::mem::replace(&mut self.doc, set.doc),
             canvas: std::mem::replace(&mut self.canvas, set.canvas),
-            pending: crate::project::opened_pixels(pending, w, h),
+            pending: crate::project::opened_pixels(pending, w, h).0,
             fill: None,
         };
         if let Some(gpu) = self.gpu.as_ref() {

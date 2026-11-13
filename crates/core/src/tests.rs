@@ -1438,6 +1438,82 @@ fn artworks_save_and_open() {
 }
 
 #[test]
+fn a_layer_whose_file_cannot_be_read_is_never_saved_over_and_is_kept_aside_once_painted_on_or_deleted() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_color(0.0, 1.0, 0.0);
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let bottom = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    let top = s.add_layer();
+    s.stroke_begin(PointerKind::Finger, vec![sample(70.0, 70.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let dir = std::env::temp_dir().join(format!("procraft-unreadable-{}", std::process::id()));
+    let path = dir.to_string_lossy().into_owned();
+    let file = dir.join("layers").join(format!("{bottom}.png"));
+    let aside = dir.join(format!("unreadable-{bottom}.png"));
+    let damaged = b"not a picture any more".to_vec();
+    // saved, then the bottom layer's file damaged from its start
+    let fresh = || {
+        let _ = std::fs::remove_dir_all(&dir);
+        s.save(path.clone()).unwrap();
+        std::fs::write(&file, &damaged).unwrap();
+    };
+    // opened and shown, its canvas made at once or as the render thread makes it
+    let shown = |threaded: bool| {
+        let opened = CanvasSession::open(path.clone()).unwrap();
+        {
+            let mut st = opened.shared.lock();
+            st.window_size = (100, 100);
+            st.view = Some(View::fit((100, 100), (100, 100)));
+            st.gpu = Some(Gpu::headless().unwrap());
+        }
+        if threaded {
+            opened.shared.make_canvas();
+        } else {
+            opened.shared.lock().ensure_canvas();
+        }
+        assert!(opened.shared.lock().canvas.is_some());
+        opened
+    };
+    let paint = |s: &CanvasSession, layer: u64| {
+        assert!(s.select_layer(layer));
+        s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    // the layer shows empty; another painted on and saved: its file is left as it was
+    for threaded in [false, true] {
+        fresh();
+        let opened = shown(threaded);
+        // (white: the paper shows through), and the app told, once
+        assert_eq!(pixel(&opened, 30, 30), [255; 4]);
+        let told = opened.take_failure().unwrap_or_default();
+        assert!(told.contains("couldn't be read") && told.contains("kept"), "{told}");
+        assert_eq!(opened.take_failure(), None);
+        paint(&opened, top);
+        opened.save(path.clone()).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), damaged, "left as it was ({threaded})");
+        assert!(!aside.exists());
+    }
+    // painted on itself: the file kept aside first, the new picture written
+    fresh();
+    let opened = shown(true);
+    paint(&opened, bottom);
+    opened.save(path.clone()).unwrap();
+    assert_eq!(std::fs::read(&aside).unwrap(), damaged);
+    assert_ne!(std::fs::read(&file).unwrap(), damaged);
+    assert_ne!(pixel(&shown(true), 50, 50), [255; 4], "the new picture opens");
+    // deleted: kept aside before the save tidies its file away
+    fresh();
+    let opened = shown(false);
+    assert!(opened.delete_layer(bottom));
+    opened.save(path.clone()).unwrap();
+    assert!(!file.exists());
+    assert_eq!(std::fs::read(&aside).unwrap(), damaged);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn straight_alpha_undoes_premultiplying() {
     let px = crate::project::straight_alpha(&[64, 32, 0, 128, 0, 0, 0, 0, 255, 255, 255, 255]);
     assert_eq!(px, vec![128, 64, 0, 128, 0, 0, 0, 0, 255, 255, 255, 255]);
@@ -4201,7 +4277,7 @@ fn saves_before_and_after_a_crop_leave_nothing_beside_and_open_at_the_new_size()
     assert_eq!((opened.info().width, opened.info().height), (40, 30));
     // each layer's file read at that size
     let pending = std::mem::take(&mut opened.shared.lock().pending_pixels);
-    assert_eq!(crate::project::opened_pixels(pending, 40, 30).len(), s.layers().len());
+    assert_eq!(crate::project::opened_pixels(pending, 40, 30).0.len(), s.layers().len());
 }
 
 #[test]
@@ -4585,7 +4661,7 @@ fn saves_at_the_same_time_keep_the_layers_whole() {
         let st = back.shared.lock();
         (st.pending_pixels.clone(), st.doc.width(), st.doc.height())
     };
-    let pending = crate::project::opened_pixels(pending, w, h);
+    let pending = crate::project::opened_pixels(pending, w, h).0;
     assert!(!pending.is_empty());
     let painted = pending.iter().map(|(_, px)| px.chunks(4).filter(|p| p[3] > 0).count()).sum::<usize>();
     assert!(painted > 5000, "{painted}");
