@@ -2006,6 +2006,21 @@ mod tests {
     }
 
     #[test]
+    fn a_stock_tip_only_older_brushes_name_stands_in_as_faint_as_it_is() {
+        // no brush the other app comes with names this tip (older brushes and people's own still
+        // do): unmeasured, it stood in as our bright chunk, so a dual brush's second drawn with it
+        // built up solid and passed its first through uncut
+        let tip = Texture::Stock { name: "Gouache-Drop-3.jpg".to_owned(), inverted: false };
+        let (_, source, _) = shape_for(&tip);
+        let pixels = source.expect("retoned to its measured tones").pixels;
+        let mean = pixels.iter().map(|&v| f32::from(v)).sum::<f32>() / pixels.len() as f32 / 255.0;
+        assert!(mean < 0.1, "{mean}");
+        // and a dual brush's second's own tip and grain are measured as its first's are
+        assert!(textures::stock_shape_tones("nightjar_secondary_shape.png", false).is_some());
+        assert!(textures::stock_grain_tones("lumita_secondary_grain.png").is_some());
+    }
+
+    #[test]
     fn a_stock_tip_named_for_a_brush_of_its_own_takes_its_outline_whatever_its_name_says() {
         // a bird's or a place's name says nothing of the tip ("ringtail" isn't a ring, nor
         // "starling" a star); a plain word does

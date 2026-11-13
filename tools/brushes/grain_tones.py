@@ -1,5 +1,7 @@
 """Writes the engine's tables of stock grain and shape tones (crates/engine/src/stock_tones.rs): for
-each grain image another app's brush files name instead of carrying it, the values at nine shares
+each grain image another app's brush files name instead of carrying it (every brush image its bundle
+holds: those its own brush files name, their seconds' too, and the rest by what their names say they
+are, as older brushes and other people's still name them), the values at nine shares
 of it (none, 5%, 10%, a quarter, half, three quarters, 90%, 95%, all); for each shape image, at
 every sixteenth, and each of 64 bands of its rows' mean value, top to bottom, and of its columns,
 left to right (means, so that a brush that inverts the image can have them inverted too). Measured as the engine reads an image (its luminance times its alpha, averaged
@@ -36,7 +38,8 @@ def fnv1a(text):
 
 
 def named_images(bundle, key):
-    """The images the bundle's brush files name under `key`, each once."""
+    """The images the bundle's brush files name under `key`, each once: a dual brush's second's as
+    well as its first's."""
     names = set()
     for folder, _, files in os.walk(bundle):
         for f in files:
@@ -44,20 +47,42 @@ def named_images(bundle, key):
                 continue
             try:
                 with zipfile.ZipFile(os.path.join(folder, f)) as z:
-                    archive = next(n for n in z.namelist() if n.endswith("Brush.archive"))
-                    p = plistlib.loads(z.read(archive))
-            except (StopIteration, zipfile.BadZipFile, plistlib.InvalidFileException, OSError):
+                    archives = [plistlib.loads(z.read(n)) for n in z.namelist() if n.endswith("Brush.archive")]
+            except (zipfile.BadZipFile, plistlib.InvalidFileException, OSError):
                 continue
-            objects = p.get("$objects", [])
-            top = next((o for o in objects if isinstance(o, dict) and "plotSpacing" in o), None)
-            if top is None:
-                continue
-            v = top.get(key)
-            if isinstance(v, plistlib.UID):
-                v = objects[v.data]
-            if isinstance(v, str) and v and v != "$null":
-                names.add(v)
+            for p in archives:
+                objects = p.get("$objects", [])
+                top = next((o for o in objects if isinstance(o, dict) and "plotSpacing" in o), None)
+                if top is None:
+                    continue
+                v = top.get(key)
+                if isinstance(v, plistlib.UID):
+                    v = objects[v.data]
+                if isinstance(v, str) and v and v != "$null":
+                    names.add(v)
     return names
+
+
+def unnamed_images(bundle, images):
+    """The brush images in the bundle no brush file of it names (older brushes and other people's
+    still do), by file name: those named as a shape, those named as a grain, and those whose names
+    say neither (measured both ways)."""
+    named = {base_name(n) for key in ("bundledShapePath", "bundledGrainPath") for n in named_images(bundle, key)}
+    shapes, grains = set(), set()
+    for name, path in images.items():
+        if name in named or "/brushes/images/" not in path.replace("\\", "/").lower():
+            continue
+        stem = name.rsplit(".", 1)[0]
+        if not stem.endswith("_grain"):
+            shapes.add(name)
+        if not stem.endswith("_shape"):
+            grains.add(name)
+    return shapes, grains
+
+
+def base_name(name):
+    """An image's file name in lower case, from the path a brush file names it by."""
+    return name.replace("\\", "/").split("/")[-1].lower()
 
 
 def images_by_name(bundle):
@@ -162,11 +187,11 @@ def shape_feature(path):
     return [feature_at(Image.fromarray(np.clip(g + 128.0, 0, 255).astype(np.uint8)))]
 
 
-def table(bundle, images, key, measure):
-    """One table: each image the brush files name under `key`, its hash and `measure` of it."""
+def table(bundle, images, key, measure, unnamed):
+    """One table: each image the brush files name under `key`, and those `unnamed` (file names),
+    its hash and `measure` of it."""
     out = []
-    for name in sorted(named_images(bundle, key)):
-        base = name.replace("\\", "/").split("/")[-1].lower()
+    for base in sorted({base_name(n) for n in named_images(bundle, key)} | unnamed):
         path = images.get(base)
         if path is None:
             continue
@@ -182,12 +207,13 @@ def body(rows):
 def main():
     bundle = sys.argv[1]
     images = images_by_name(bundle)
-    grains = table(bundle, images, "bundledGrainPath", lambda p: tones(p, SHARES))
-    shapes = table(bundle, images, "bundledShapePath", lambda p: tones(p, SHAPE_SHARES))
-    bands = table(bundle, images, "bundledShapePath", rows)
-    columns = table(bundle, images, "bundledShapePath", cols)
-    features = table(bundle, images, "bundledGrainPath", feature)
-    shape_features = table(bundle, images, "bundledShapePath", shape_feature)
+    other_shapes, other_grains = unnamed_images(bundle, images)
+    grains = table(bundle, images, "bundledGrainPath", lambda p: tones(p, SHARES), other_grains)
+    shapes = table(bundle, images, "bundledShapePath", lambda p: tones(p, SHAPE_SHARES), other_shapes)
+    bands = table(bundle, images, "bundledShapePath", rows, other_shapes)
+    columns = table(bundle, images, "bundledShapePath", cols, other_shapes)
+    features = table(bundle, images, "bundledGrainPath", feature, other_grains)
+    shape_features = table(bundle, images, "bundledShapePath", shape_feature, other_shapes)
     header = """//! Written by tools/brushes/grain_tones.py (don't edit by hand): the tones of the stock grains
 //! and shapes other apps' brush files name instead of carrying (see [`stock_grain_tones`] and
 //! [`stock_shape_tones`]), each the values at [`TONE_SHARES`] or [`SHAPE_TONE_SHARES`] of it, and
