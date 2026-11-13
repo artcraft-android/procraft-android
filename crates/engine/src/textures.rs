@@ -578,9 +578,59 @@ pub fn striped(pixels: &[u8], rows: &[u8; 64]) -> Vec<u8> {
     pixels.iter().enumerate().map(|(i, &v)| (f32::from(v) * at(i / n) / most).round().clamp(0.0, 255.0) as u8).collect()
 }
 
-fn stock_tones<const N: usize>(table: &[(u64, [u8; N])], name: &str) -> Option<[u8; N]> {
+fn stock_tones<T: Copy, const N: usize>(table: &[(u64, [T; N])], name: &str) -> Option<[T; N]> {
     let key = name_key(name);
     table.binary_search_by_key(&key, |&(k, _)| k).ok().and_then(|i| table.get(i)).map(|&(_, t)| t)
+}
+
+/// How many octaves of noise [`octave_grain`] lays together.
+pub const OCTAVES: usize = 8;
+
+/// How much of a stock grain's side our stand-in drawn by its octaves spans (see [`octave_grain`]):
+/// a quarter, its texels the image's pixels with the image at 1024 a side.
+pub const OCTAVE_SHARE: f32 = 0.25;
+
+/// How wide the stock grain a brush file names `name` is (pixels), and how strong each octave of
+/// [`octave_grain`]'s noise is (finest first) for it to vary as much at each size as that image
+/// does, as measured, if it is one we know.
+pub fn stock_grain_octaves(name: &str) -> Option<(f32, [f32; OCTAVES])> {
+    let [width, octaves @ ..] = stock_tones(crate::stock_tones::STOCK_GRAIN_OCTAVES, name)?;
+    Some((f32::from(width), octaves.map(|a| f32::from(a) / 10000.0)))
+}
+
+/// Whether our grain `index` stands in for a stock grain by the stock image's own octaves of noise
+/// (see [`octave_grain`]) where they were measured: papers and washes, whose fibres, veins and
+/// blotches, each at its own size, our patterns of them lack.
+pub fn drawn_by_octaves(index: u32) -> bool {
+    matches!(index, grain::SHEET | grain::WASH | grain::WORN)
+}
+
+/// Noise in [`OCTAVES`] octaves as `amplitudes` says (finest first: cells of 1, 2, 4 ... texels),
+/// each a random value at its cells' corners eased between them, wrapping round so it tiles; its
+/// values then moved onto `tones` (a stock grain's, at [`TONE_SHARES`]) keeping their order. A
+/// stand-in that varies as much at each size as the stock image it was measured from.
+pub fn octave_grain(amplitudes: &[f32; OCTAVES], tones: &[u8; 9]) -> Vec<u8> {
+    let n = TEXTURE_SIZE;
+    let raw: Vec<f32> = (0..n * n)
+        .map(|k| {
+            let (i, j) = ((k % n) as f32 + 0.5, (k / n) as f32 + 0.5);
+            amplitudes
+                .iter()
+                .enumerate()
+                .filter(|&(_, &amplitude)| amplitude > 0.0)
+                .map(|(octave, &amplitude)| {
+                    // (each cell's corner on a texel's middle: the finest octave is the texels'
+                    // own values)
+                    let cell = (1u32 << octave) as f32;
+                    let period = (n >> octave).max(1) as i32;
+                    let seed = 9001 + octave as u32 * 7919;
+                    amplitude * (value_noise(i / cell - 0.5, j / cell - 0.5, period, seed) - 0.5)
+                })
+                .sum()
+        })
+        .collect();
+    let spread: Vec<(f32, f32)> = tones.iter().zip(TONE_SHARES).map(|(&t, s)| (f32::from(t) / 255.0, s)).collect();
+    ranked(&raw, &spread)
 }
 
 /// The key the stock tables keep an image's measurements under: FNV-1a of its file's name in lower
@@ -2688,6 +2738,33 @@ mod tests {
         assert!(at(grain::SOFT_DOTS, 1.0 / 56.0, 0.0) < 140 && at(grain::SOFT_DOTS, 1.0 / 40.0, 0.0) > 170);
         assert!((share(grain::LABYRINTH) - 0.45).abs() < 0.02, "{}", share(grain::LABYRINTH));
         assert_eq!(drawn_to_stock_width(grain::SOFT_DOTS), Some(1792.0));
+    }
+
+    #[test]
+    fn a_paper_stands_in_varying_at_each_size_as_much_as_it_does() {
+        let (width, octaves) = stock_grain_octaves("Wax-Crayon-Paper.jpg").expect("measured");
+        assert_eq!(width, 2048.0);
+        let tones = stock_grain_tones("Wax-Crayon-Paper.jpg").expect("measured");
+        let pixels = octave_grain(&octaves, &tones);
+        let n = TEXTURE_SIZE;
+        let a: Vec<f32> = pixels.iter().map(|&v| f32::from(v) / 255.0).collect();
+        // how much it varies between softenings of `from` and `to` texels
+        let band = |from: f32, to: f32| {
+            let (fine, broad) = (gaussian_wrapped(&a, n, from), gaussian_wrapped(&a, n, to));
+            let d: Vec<f32> = fine.iter().zip(&broad).map(|(f, b)| f - b).collect();
+            let mean = d.iter().sum::<f32>() / d.len() as f32;
+            (d.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / d.len() as f32).sqrt()
+        };
+        // its veins and blotches, 4 to 64 texels: our paper sheet standing in for it had next to
+        // none (0.007 and 0.002), the paper as much as its fibres
+        assert!(band(4.0, 16.0) > 0.025, "{}", band(4.0, 16.0));
+        assert!(band(16.0, 64.0) > 0.015, "{}", band(16.0, 64.0));
+        // with the paper's own tones
+        let mean = a.iter().sum::<f32>() / a.len() as f32;
+        assert!((mean - 0.73).abs() < 0.02, "{mean}");
+        // only papers and washes stand in so
+        assert!(drawn_by_octaves(grain::SHEET) && drawn_by_octaves(grain::WASH));
+        assert!(!drawn_by_octaves(grain::CHARCOAL));
     }
 
     #[test]

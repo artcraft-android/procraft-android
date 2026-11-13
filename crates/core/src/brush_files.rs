@@ -1787,6 +1787,18 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             // one drawn to the stock image's proportions as it is drawn (measured smaller, the
             // stock image's fine lines and dots go grey, which would take the pattern's contrast)
             let source = image.and_then(|i| {
+                // a paper or a wash: noise as strong at each size as the stock image is, with its
+                // tones (tiled as a share of that image is)
+                if textures::drawn_by_octaves(i)
+                    && let (Some((_, octaves)), Some(tones)) =
+                        (textures::stock_grain_octaves(name), textures::stock_grain_tones(name))
+                {
+                    let mut pixels = textures::octave_grain(&octaves, &tones);
+                    if *inverted {
+                        pixels.iter_mut().for_each(|v| *v = 255 - *v);
+                    }
+                    return Source::new(pixels);
+                }
                 let pattern = textures::grains().into_iter().nth(i as usize)?;
                 let mut pixels = if textures::drawn_to_stock_size(i) {
                     pattern.pixels

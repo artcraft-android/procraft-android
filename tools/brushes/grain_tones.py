@@ -10,7 +10,9 @@ like itself (its autocorrelation at half), as a share of its side, at four level
 image at 1024, 512, 256 and 128 a side, no finer than its own), so that our stand-in can be tiled
 to match whatever size its tile is drawn; and each shape's texture's feature size, its outline
 taken away, so that our stand-in has marks as coarse. Each is keyed by a hash of its file's name, so the tables hold
-measurements only: neither the images nor their names.
+measurements only: neither the images nor their names. And each grain's width and the strength of
+each octave of our stand-in noise that makes it vary as much as the image does at each size, so
+that a stand-in for a paper or a wash has its fibres, veins and blotches each as strong.
 
 usage: python -I tools/brushes/grain_tones.py <that app's bundle folder>   (needs Pillow and numpy)
 """
@@ -187,6 +189,85 @@ def shape_feature(path):
     return [feature_at(Image.fromarray(np.clip(g + 128.0, 0, 255).astype(np.uint8)))]
 
 
+OCTAVES = 8
+OCTAVE_GRID = 1024
+OCTAVE_SIDE = 256
+
+
+def blur_wrapped(a, sigma):
+    """`a` softened by a Gaussian of `sigma` pixels, wrapping round (a grain tiles)."""
+    import numpy as np
+
+    if sigma <= 0:
+        return a
+    f = np.fft.fftfreq(a.shape[0])
+    g = np.exp(-2 * (np.pi * sigma) ** 2 * (f[:, None] ** 2 + f[None, :] ** 2))
+    return np.real(np.fft.ifft2(np.fft.fft2(a) * g))
+
+
+def octave_bands(a):
+    """How much `a` varies at each of OCTAVES sizes, finest first: the spread of what is left
+    between softenings of 0, 0.5, 1, 2 ... pixels."""
+    import numpy as np
+
+    sigmas = [0.0] + [2 ** k / 2 for k in range(OCTAVES)]
+    return np.array([(blur_wrapped(a, sigmas[k]) - blur_wrapped(a, sigmas[k + 1])).std() for k in range(OCTAVES)])
+
+
+def value_noise(n, cell, rng):
+    """Value noise as the engine draws an octave of a stand-in grain: a random value at each
+    corner of cells `cell` pixels wide, eased between them (smoothstep), wrapping round."""
+    import numpy as np
+
+    p = n // cell
+    lattice = rng.random((p, p))
+    x = (np.arange(n) + 0.5) / cell - 0.5
+    i0 = np.floor(x).astype(int)
+    t = x - i0
+    f = t * t * (3 - 2 * t)
+    i0 %= p
+    i1 = (i0 + 1) % p
+    top = lattice[i0][:, i0] * (1 - f)[None, :] + lattice[i0][:, i1] * f[None, :]
+    bottom = lattice[i1][:, i0] * (1 - f)[None, :] + lattice[i1][:, i1] * f[None, :]
+    return top * (1 - f)[:, None] + bottom * f[:, None]
+
+
+OCTAVE_RESPONSE = []
+
+
+def octave_response():
+    """How much each octave of the engine's stand-in noise (one at a time, cells 1, 2, 4 ... pixels)
+    varies at each size [`octave_bands`] measures: made once, from a fixed seed."""
+    import numpy as np
+
+    if not OCTAVE_RESPONSE:
+        rng = np.random.default_rng(1)
+        m = np.zeros((OCTAVES, OCTAVES))
+        for k in range(OCTAVES):
+            v = value_noise(OCTAVE_SIDE, 2 ** k, rng)
+            m[:, k] = octave_bands(v - v.mean())
+        OCTAVE_RESPONSE.append(m)
+    return OCTAVE_RESPONSE[0]
+
+
+def octaves(path):
+    """A grain's width in pixels, and how strong each octave of the engine's stand-in noise must be
+    (in 10000ths, finest first) for the noise to vary as much at each size as the image does, the
+    image averaged to OCTAVE_GRID a side (so that a stand-in's texels are its pixels at that size):
+    the spreads at each size add as variances, fitted without going below none."""
+    import numpy as np
+
+    im = values(path, None)
+    width = im.size[0]
+    a = np.asarray(im.resize((OCTAVE_GRID, OCTAVE_GRID), Image.Resampling.BOX), dtype=np.float64) / 255.0
+    target = octave_bands(a) ** 2
+    m = octave_response() ** 2
+    x = np.full(OCTAVES, target.mean() / max(m.mean(), 1e-12))
+    for _ in range(3000):
+        x *= (m.T @ target) / np.maximum(m.T @ (m @ x), 1e-18)
+    return [min(65535, width)] + [min(65535, round(float(np.sqrt(v)) * 10000)) for v in x]
+
+
 def table(bundle, images, key, measure, unnamed):
     """One table: each image the brush files name under `key`, and those `unnamed` (file names),
     its hash and `measure` of it."""
@@ -214,13 +295,15 @@ def main():
     columns = table(bundle, images, "bundledShapePath", cols, other_shapes)
     features = table(bundle, images, "bundledGrainPath", feature, other_grains)
     shape_features = table(bundle, images, "bundledShapePath", shape_feature, other_shapes)
+    grain_octaves = table(bundle, images, "bundledGrainPath", octaves, other_grains)
     header = """//! Written by tools/brushes/grain_tones.py (don't edit by hand): the tones of the stock grains
 //! and shapes other apps' brush files name instead of carrying (see [`stock_grain_tones`] and
 //! [`stock_shape_tones`]), each the values at [`TONE_SHARES`] or [`SHAPE_TONE_SHARES`] of it, and
 //! each band of a shape's rows' and columns' mean value (see [`stock_shape_rows`] and
-//! [`stock_shape_cols`]), each grain's feature size (see [`stock_grain_feature`]) and how
-//! coarse each shape's texture is (see [`stock_shape_feature`]), keyed by a hash of its file's
-//! name.
+//! [`stock_shape_cols`]), each grain's feature size (see [`stock_grain_feature`]), how
+//! coarse each shape's texture is (see [`stock_shape_feature`]) and each grain's width and the
+//! octaves our noise stands in for it by (see [`stock_grain_octaves`]), keyed by a hash of its
+//! file's name.
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
@@ -234,6 +317,7 @@ def main():
                 + "\n".join(f"    (0x{h:016x}, [{', '.join(str(v) for v in t)}])," for h, t in features) + "\n];\n")
         f.write("\npub(crate) const STOCK_SHAPE_FEATURES: &[(u64, [u16; 1])] = &[\n"
                 + "\n".join(f"    (0x{h:016x}, [{', '.join(str(v) for v in t)}])," for h, t in shape_features) + "\n];\n")
+        f.write(f"\npub(crate) const STOCK_GRAIN_OCTAVES: &[(u64, [u16; {OCTAVES + 1}])] = &[\n{body(grain_octaves)}\n];\n")
     print(f"{len(grains)} grains, {len(shapes)} shapes, {len(features)} grains' features and {len(shape_features)} shapes' measured")
 
 
