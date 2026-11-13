@@ -797,9 +797,14 @@ While the plugin is on, the Layers panel's + offers each kind beside a plain lay
   locked: it takes no strokes, and its data is left as it is through saves.
 - A file in another app's format, such as a layered PSD or the package format, has the layer as its
   pixels.
-- Only strokes change the layer. Clear, Fill, Invert, adjustments and transforms wait until it is
-  rasterized, as with a text layer. Rasterize makes it a plain layer, and so does merging another
-  layer into it, flipping the canvas or cropping it.
+- Only its strokes change the layer. With a plugin that changes its items (below), Clear deletes the
+  strokes a selection takes (all of them with nothing selected), the layer's options offer Recolour
+  and Apply Brush for them, Transform moves them as strokes, and flipping or cropping the canvas
+  moves every stroke with the pixels.
+- Fill, Invert and adjustments wait until it is rasterized, as with a text layer. Rasterize makes it
+  a plain layer, and so does merging another layer into it. Flipping or cropping the canvas does too
+  when its plugin can't move its items.
+- A stroke drawn inside a selection is kept with that selection and is always laid again inside it.
 - QuickShape doesn't snap a stroke on it.
 
 Its module exports:
@@ -811,6 +816,8 @@ procraft_layer_load(kind: i32, len: i32) -> i32  // a layer's data (none: a new 
 procraft_layer_add(len: i32) -> i32              // an item on that layer: 0 kept as drawn, 1 draw again
 procraft_layer_save() -> i32                     // the layer's data now: its length
 procraft_layer_draw() -> i32                     // the layer's items to draw: its length
+procraft_layer_select(len: i32) -> i32           // if it exports it: the ids a selection takes
+procraft_layer_edit(len: i32) -> i32             // if it exports it: changes to items, not 0 if made
 ```
 
 For each change, the app first hands over the layer's data with `procraft_layer_load`. `kind` is the
@@ -826,6 +833,21 @@ If the data afterwards is the same as before, nothing changes and no step is mad
 when the stroke changed what was drawn before, such as an eraser taking strokes away whole. An
 answer other than 0 or 1 stops the plugin.
 
+A plugin that exports both of the last two has its items selected and changed as items. Each item to
+draw then says the plugin's id for it (field 21, u32).
+
+- `procraft_layer_select` is handed the selection as a record. Fields 1 to 4 hold its box, x, y,
+  width and height (u32). Field 5 holds how much it takes of each pixel there, a byte each (0 none,
+  255 all), rows from the top. The plugin answers with the ids of the items it takes, as u32 each.
+- `procraft_layer_edit` is handed a record of changes, field 1 each. A change is a record too:
+  - field 1, the item's id (u32);
+  - field 2, u8 1 if the item goes;
+  - field 3, the fields the item takes in place of its own (an item record: a new colour, size,
+    brush or transform, say).
+
+  The plugin answers not 0 if anything changed. The app then asks for the data and the items to draw,
+  and lays the layer again as one step.
+
 An item is a record: fields one after another, each a 16-bit id, a 32-bit length and that many bytes,
 all little-endian. A reader passes over ids it doesn't know, so a later app can add fields. Ids from
 `0x8000` up are the plugin's own: the app ignores them in what it is handed back. The app writes:
@@ -840,6 +862,9 @@ all little-endian. A reader passes over ids it doesn't know, so a later app can 
 | 8 | The brush, whole, in the app's own words (keep it as it is) |
 | 9 | The brush's name, UTF-8 |
 | 10 to 16, 18 to 20 | What else the app needs to lay the stroke again as it was laid: its randomness, the pointer, the brush scale, the view, alpha lock, the app's smoothing and pressure, symmetry, how its samples came, when, and the brush's exact sizes |
+| 22 | Where it is laid, six 32-bit floats `a b c d e f`: each sample's (x, y) goes to (a·x + c·y + e, b·x + d·y + f), its brush scaled and its pen's lean turned with it. None: where it was drawn |
+| 23 | The smoothing it is laid with in place of its brush's own, 32-bit float, 0 to 1 |
+| 24 | The selection it was drawn inside, if any: its box (x, y, width, height, u32), then its coverage in runs, each a u32 count and the byte |
 
 The brush is kept as the brush library keeps one: the brush it came from among those the app comes
 with, and every setting changed from there. An item draws the same however the brush is changed
@@ -847,14 +872,26 @@ later, or if it's deleted. The items to draw are a record too. Field 1 holds a b
 first 0, the next 1 and so on, so each brush is there once. Field 2 holds an item, which names its
 brush by that number in field 17 (u32) in place of field 8.
 
-The kit's `layer` module writes all of this. Implement `kit::layer::Layer` (new, load, save, add an
-`Item`, draw into a `Drawn`) and add `kit::layers!(MyLayer)`. `Item` reads the tool, the width and the
-samples' points, and keeps the record as it came. `plugins/vector-layers` is one to start from. It
-keeps each brush once, and its card's Eraser chooses what the eraser does:
+The kit's `layer` module writes all of this. Implement `kit::layer::Layer` and add
+`kit::layers!(MyLayer)`:
 
-- Mask (as it starts) keeps an erasing stroke as an item that hides what is under it, so taking it
-  away later brings the strokes back.
-- Whole takes away every stroke the eraser's path comes within reach of, whole.
+- The trait's calls are new, load, save, add an `Item`, draw into a `Drawn`, and, if you want them,
+  select (an `Area`) and edit (`Change`s).
+- `Item` reads the tool, the width, the samples and where they are drawn (its transform applied, and
+  its symmetry's copies, `paths`). It cuts samples into a new item (`with_samples`), and keeps the
+  record as it came.
+
+`plugins/vector-layers` is one to start from. It keeps each brush once, and its card chooses what
+the eraser does, and what a selection takes:
+
+- Eraser: Mask (as it starts) keeps an erasing stroke as an item that hides what is under it, so
+  deleting it later brings the strokes back.
+- Eraser: Whole takes away every stroke the eraser's path comes within reach of, whole.
+- Eraser: Cut takes away the parts of strokes the eraser passes over. What is left of each becomes
+  strokes of its own, its samples as they were, cut where the eraser's edge crosses it.
+- Erasing reaches a stroke's symmetry copies as well as the stroke itself.
+- A selection takes the strokes wholly inside it. It takes those it touches too while "Selections
+  take touching strokes" is on, and masks too while "Selections take masks" is on.
 
 ## Filters
 
