@@ -119,7 +119,9 @@ extension CanvasModel {
 
     /// The key `name`'s shortcut, the shared shortcuts saying what it does; whether it has one.
     func runShortcut(_ name: String, command: Bool, shift: Bool, alt: Bool) -> Bool {
-        guard let shortcut = keyShortcut(key: name, command: command, shift: shift, alt: alt, transforming: transforming) else { return false }
+        // the arrows move what is transformed, or the strokes the selection takes
+        let nudges = transforming || !selection.takenBox.isEmpty
+        guard let shortcut = keyShortcut(key: name, command: command, shift: shift, alt: alt, transforming: nudges) else { return false }
         switch shortcut {
         case .undo: undo()
         case .redo: redo()
@@ -147,8 +149,12 @@ extension CanvasModel {
         case .greyView: session.setGreyView(on: !session.greyView())
         case let .brushSize(by): changeSize(min(max(size + by, 0), 1))
         case let .nudge(dx, dy):
-            if let moved = session.transformArrow(dx: dx, dy: dy) {
-                transform.moved(moved)
+            if transforming {
+                if let moved = session.transformArrow(dx: dx, dy: dy) {
+                    transform.moved(moved)
+                }
+            } else if session.nudgePluginItems(dx: dx, dy: dy) {
+                refresh()
             }
         }
         return true

@@ -76,6 +76,9 @@ final class SelectionTool {
     private(set) var thresholdDrag: (at: CGPoint, threshold: Float)?
     /// Where a colour selection's threshold starts.
     private(set) var threshold: Float
+    /// While the tool is open on a plugin's layer: the box round the strokes the selection takes
+    /// (four corners, x then y, canvas pixels), else empty.
+    private(set) var takenBox: [Float] = []
 
     /// A feather's work off the main thread, the newest amount when it gets there.
     @ObservationIgnored private let queue = DispatchQueue(label: "feather", qos: .userInitiated)
@@ -276,6 +279,16 @@ final class SelectionTool {
     func showLook() {
         let tint = model.selecting && kind == .automatic
         model.session.setSelectionDisplay(display: tint ? .tint : .stripes)
+        refreshTaken()
+    }
+
+    /// The box round the strokes the selection takes, read again while the tool is open.
+    func refreshTaken() {
+        let session = model.session
+        let box = model.selecting && session.hasSelection() ? session.takenPluginItemsBox() : []
+        if box != takenBox {
+            takenBox = box
+        }
     }
 }
 
@@ -429,10 +442,14 @@ struct SelectionOverlay: View {
         let drag = tool.shapeDrag
         let slid = tool.thresholdDrag
         let kind = tool.kind
-        if drag != nil || !path.isEmpty || slid != nil {
+        let taken = tool.takenBox
+        if drag != nil || !path.isEmpty || slid != nil || taken.count == 8 {
             let points = path.map { model.canvasToWindow($0) }
             ZStack(alignment: .top) {
                 Canvas { context, _ in
+                    if taken.count == 8 {
+                        drawTakenBox(context, taken)
+                    }
                     if let (a, b) = drag {
                         let r = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
                         dashed(context, kind == .ellipse ? Path(ellipseIn: r) : Path(r))
@@ -466,6 +483,21 @@ struct SelectionOverlay: View {
                 }
             }
             .allowsHitTesting(false)
+        }
+    }
+
+    /// The strokes the selection takes on a plugin's layer: their box, as the transform box shows
+    /// it (dashed edges, a node at each corner).
+    private func drawTakenBox(_ context: GraphicsContext, _ box: [Float]) {
+        let corners = (0 ..< 4).map { model.canvasToWindow(CGPoint(x: CGFloat(box[2 * $0]), y: CGFloat(box[2 * $0 + 1]))) }
+        var edge = Path()
+        edge.addLines(corners)
+        edge.closeSubpath()
+        let dash: [CGFloat] = [5, 5]
+        context.stroke(edge, with: .color(overlayDashGap), style: StrokeStyle(lineWidth: 1, dash: dash, dashPhase: 5))
+        context.stroke(edge, with: .color(overlayDash), style: StrokeStyle(lineWidth: 1, dash: dash, dashPhase: 0))
+        for c in corners {
+            node(context, at: c, color: nodeBlue, scale: 1)
         }
     }
 

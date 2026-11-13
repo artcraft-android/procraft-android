@@ -1494,6 +1494,10 @@ final class CanvasModel {
         layers = session.layers()
         followMaskColour()
         background = session.background()
+        // the strokes a selection takes on a plugin's layer may have moved, or be others now
+        if selecting {
+            selection.refreshTaken()
+        }
         // undoing may put the canvas back in another profile
         refreshCanvasSpace()
         if panel == .layers {

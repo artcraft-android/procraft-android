@@ -1,6 +1,6 @@
 import SwiftUI
 
-private let nodeBlue = Color(argb: 0xFF01_71EA)
+let nodeBlue = Color(argb: 0xFF01_71EA)
 private let rotateGreen = Color(argb: 0xFF00_E607)
 private let rotateLine = Color(argb: 0xFF00_E400)
 private let turnOrange = Color(argb: 0xFFFE_B800)
@@ -252,7 +252,7 @@ private struct BoxOnScreen {
 
 /// A node: a coloured dot on a white disc with a faint shadow, `scale` times its size (larger while
 /// held).
-private func node(_ context: GraphicsContext, at p: CGPoint, color: Color, scale: CGFloat) {
+func node(_ context: GraphicsContext, at p: CGPoint, color: Color, scale: CGFloat) {
     func disc(_ radius: CGFloat) -> Path {
         Path(ellipseIn: CGRect(x: p.x - radius, y: p.y - radius, width: radius * 2, height: radius * 2))
     }
