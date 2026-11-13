@@ -9672,7 +9672,11 @@ fn brush_images(gpu: &Gpu, label: &str, images: &[GrayImage]) -> wgpu::Texture {
     let n = TEXTURE_SIZE as u32;
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: n, height: n, depth_or_array_layers: (images.len() + SOURCE_SLOTS) as u32 },
+        size: wgpu::Extent3d {
+            width: n,
+            height: n,
+            depth_or_array_layers: gpu.array_layers((images.len() + SOURCE_SLOTS) as u32),
+        },
         mip_level_count: n.ilog2() + 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,

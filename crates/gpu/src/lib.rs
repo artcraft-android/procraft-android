@@ -63,6 +63,15 @@ fn backends_name(backends: wgpu::Backends) -> String {
     if names.is_empty() { format!("{backends:?}") } else { names.join(" or ") }
 }
 
+/// The layers an array texture of `n` is made with on OpenGL (ES): at least two (one makes a plain
+/// 2D texture), and never six or a multiple of it, which wgpu's OpenGL takes for a cube map (a
+/// square texture's): read as an array, that gave nothing (every brush shape and grain blank once
+/// there were 58 shapes and 8 spare layers).
+fn gl_array_layers(n: u32) -> u32 {
+    let n = n.max(2);
+    if n.is_multiple_of(6) { n + 1 } else { n }
+}
+
 /// Whether a GPU named `name` on `backend` needs its canvas textures uncompressed.
 fn keeps_textures_uncompressed(name: &str, backend: wgpu::Backend) -> bool {
     backend == wgpu::Backend::Vulkan && name.to_ascii_lowercase().contains("mali")
@@ -481,6 +490,12 @@ impl Gpu {
         if self.is_gl() { 2 } else { 1 }
     }
 
+    /// The layers a texture viewed as an array of `n` is made with: on OpenGL (ES) never a
+    /// multiple of six (see [`gl_array_layers`]); else `n`.
+    pub fn array_layers(&self, n: u32) -> u32 {
+        if self.is_gl() { gl_array_layers(n) } else { n.max(1) }
+    }
+
     /// Whether the device is OpenGL (ES)'s.
     pub fn is_gl(&self) -> bool {
         self.adapter.get_info().backend == wgpu::Backend::Gl
@@ -497,6 +512,12 @@ mod tests {
         if std::env::var_os("WGPU_BACKEND").is_none() {
             assert_eq!(super::Gpu::backends().last(), Some(&wgpu::Backends::GL));
         }
+    }
+
+    #[test]
+    fn array_textures_on_opengl_are_never_taken_for_cube_maps() {
+        use super::gl_array_layers;
+        assert_eq!([1, 2, 5, 6, 7, 12, 63, 66, 67].map(gl_array_layers), [2, 2, 5, 7, 7, 13, 63, 67, 67]);
     }
 
     #[test]
