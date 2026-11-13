@@ -2311,6 +2311,7 @@ impl Interface {
             Popover::Layers if self.background_pick.is_some() => self.background_panel(ctx, session, button, backdrops),
             Popover::Layers => {
                 self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
+                self.layers.layer_kinds = self.prefs.plugins.layer_kinds();
                 let shown = self.layers.show(ctx, &mut self.look, session, &mut self.colours, button, backdrops);
                 if let Some(key) = self.layers.run_action.take() {
                     self.run_plugin_action(ctx, session, key);

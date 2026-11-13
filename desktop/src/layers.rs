@@ -139,6 +139,8 @@ pub struct Layers {
     options_menu: Menu,
     /// The title's menu, and Delete's question.
     title_menu: Menu,
+    /// The +'s menu, while plugins add kinds of layer: a plain layer or one of each kind.
+    add_menu: Menu,
     deleting: Alert,
     /// Asked before a layer the meshes of a texture set share goes, and which.
     deleting_shared: Alert,
@@ -172,6 +174,8 @@ pub struct Layers {
     pub edit_text: Option<u64>,
     /// The plugins' actions for the current layer's options, and the one tapped there, to run.
     pub plugin_actions: Vec<procraft_core::PluginAction>,
+    /// The kinds of layer the plugins on add, which the + offers beside a plain layer.
+    pub layer_kinds: Vec<procraft_core::PluginKind>,
     pub run_action: Option<String>,
     /// Layer Opacity asked for the current layer (two fingers tapped on its row).
     pub layer_opacity: bool,
@@ -267,6 +271,7 @@ impl Layers {
         self.options = None;
         self.options_menu.close();
         self.title_menu.close();
+        self.add_menu.close();
         self.renaming = None;
         self.blend = None;
         self.press = None;
@@ -284,6 +289,7 @@ impl Layers {
     pub fn modal(&self) -> bool {
         self.options_menu.is_open()
             || self.title_menu.is_open()
+            || self.add_menu.is_open()
             || self.deleting.is_open()
             || self.deleting_shared.is_open()
             || self.locked.is_open()
@@ -374,6 +380,7 @@ impl Layers {
         let mut tapped: Option<&LayerInfo> = None;
         let mut blend_tapped: Option<u64> = None;
         let mut title = Rect::NOTHING;
+        let mut plus = Rect::NOTHING;
         // the only layer (masks aside) is cleared rather than deleted
         let alone = layers.iter().filter(|l| l.kind != LayerType::Mask).count() == 1;
 
@@ -389,12 +396,15 @@ impl Layers {
                 if title_tapped {
                     self.title_menu.open();
                 }
-                let plus = Rect::from_min_size(pos2(body.right() - 18.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
+                plus = Rect::from_min_size(pos2(body.right() - 18.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
                 look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
-                if ui.interact(plus, ui.scope_id().with("new layer"), Sense::click()).clicked()
-                    && session.add_layer() == 0
-                {
-                    crate::files::no_room(session);
+                if ui.interact(plus, ui.scope_id().with("new layer"), Sense::click()).clicked() {
+                    // with plugins' kinds of layer on, it asks which
+                    if !self.layer_kinds.is_empty() {
+                        self.add_menu.open();
+                    } else if session.add_layer() == 0 {
+                        crate::files::no_room(session);
+                    }
                 }
                 let list = Rect::from_min_max(
                     pos2(body.left() + 12.0, body.top() + HEADER_HEIGHT),
@@ -585,6 +595,7 @@ impl Layers {
             self.layer_options(ctx, look, session, l, rect, row_y, backdrops);
         }
         self.title_menu(ctx, look, session, title, any_picked, backdrops);
+        self.add_menu(ctx, look, session, plus, backdrops);
         // the title menu's Delete asks first
         // asked first; then, as measured, a locked one among them stops it, said why
         if self.deleting.show(ctx, look) == Some(Answer::Action) {
@@ -654,6 +665,49 @@ impl Layers {
                 }
             }
             _ => self.deleting.open("Delete these layers?", "Undo brings them back.", "Delete", Some(&icons::TRASH)),
+        }
+    }
+
+    /// The +'s menu, under it, while plugins add kinds of layer: a plain layer, then one of each
+    /// kind, named as its plugin names it.
+    fn add_menu(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        plus: Rect,
+        backdrops: &mut Vec<f32>,
+    ) {
+        if self.layer_kinds.is_empty() {
+            self.add_menu.close();
+        }
+        let ink = menu::INK;
+        let mut entries = vec![Entry::Item(&icons::MENU_NEW_SET, "Layer", ink)];
+        entries.extend(self.layer_kinds.iter().map(|k| Entry::Item(&icons::MENU_NEW_BRUSH, k.label.as_str(), ink)));
+        let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
+        let screen = ctx.content_rect();
+        let left = (plus.right() - size.x).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
+        let rect = Rect::from_min_size(pos2(left, plus.bottom().max(screen.top() + OPTIONS_TOP)), size);
+        let mut tapped = None;
+        self.add_menu.show(
+            ctx,
+            "layers add menu",
+            rect,
+            pos2(rect.right(), rect.top()),
+            menu::OVER_A_PANEL,
+            backdrops,
+            |ui| {
+                tapped = menu::entries(ui, look, rect, &entries);
+            },
+        );
+        let Some(at) = tapped.filter(|i| *i < entries.len()) else { return };
+        self.add_menu.close();
+        let added = match at.checked_sub(1).and_then(|k| self.layer_kinds.get(k)) {
+            Some(kind) => session.add_plugin_layer(kind.key.clone()),
+            None => session.add_layer(),
+        };
+        if added == 0 {
+            crate::files::no_room(session);
         }
     }
 
