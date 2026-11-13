@@ -73,6 +73,23 @@
 //!   RGBA8); `procraft_between_row(frame: i32, y: i32)` says row `y` of `frame` (0 this frame, 1 the
 //!   next) is there; `procraft_between_run() -> i32` draws the frame between (0: none);
 //!   `procraft_between_out(y: i32)` puts its row `y` there. A long call, on fuel by the area.
+//! - For the hook `key_shortcut` (a hardware keyboard's presses taken as others, the plugin's): a
+//!   press is written as text, its modifiers then its key ("command+shift+z", "space", see
+//!   [`crate::KeyCombo`]), into `procraft_key_buffer(len: i32) -> i32`; then
+//!   `procraft_key_shortcut(len: i32) -> i64` says what the press is taken as, and
+//!   `procraft_key_shortcut_keys(len: i32) -> i64` which presses now do what this one does by
+//!   default, for the shortcuts' list. Each answers 0 for as it is, below 0 for none, else where its
+//!   text is in its `memory` (low half) and how long (high half): one press, or presses with a
+//!   space between. `procraft_key_shortcuts(len: i32)`, if it has one, is told the app's shortcuts
+//!   as it starts (lines of the group, what it does, its presses and 1 if the app keeps its keys,
+//!   tab between: [`crate::keys::shortcuts_told`]).
+//! - `procraft_panel_key(len: i32) -> i32`: while its panel asks for a key press, the next one,
+//!   written as above into `procraft_key_buffer`; it acts as a touch on the panel does.
+//! - What a plugin keeps (interface 2, at most [`MOST_KEPT`] bytes, with its other files): after an
+//!   action, a touch on its panel or a key press its panel asked for, `procraft_keep() -> i64`, if it
+//!   has one, says what to keep from now on, packed as a key answer's text (below 0: nothing new).
+//!   Each copy of its code is told what it keeps as it starts, and whenever another copy keeps
+//!   something new: into `procraft_kept_buffer(len: i32) -> i32`, then `procraft_kept(len: i32)`.
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
 
@@ -198,6 +215,20 @@ const MOST_TOUCH_TIME: Duration = Duration::from_millis(250);
 /// What an action may spend and how long it may take: it does the plugin's work on the artwork.
 const ACTION_FUEL: u64 = 4_000_000_000;
 const MOST_ACTION_TIME: Duration = Duration::from_secs(20);
+pub(crate) const KEY_BUFFER: &str = "procraft_key_buffer";
+const KEY_SHORTCUT: &str = "procraft_key_shortcut";
+const KEY_SHORTCUT_KEYS: &str = "procraft_key_shortcut_keys";
+const KEY_SHORTCUTS: &str = "procraft_key_shortcuts";
+pub(crate) const PANEL_KEY: &str = "procraft_panel_key";
+const KEPT_BUFFER: &str = "procraft_kept_buffer";
+const KEPT: &str = "procraft_kept";
+const KEEP: &str = "procraft_keep";
+/// The most bytes a plugin keeps, and of the presses a key answer writes.
+pub(crate) const MOST_KEPT: usize = 64 << 10;
+const MOST_KEY_TEXT: usize = 4 << 10;
+/// What being told what it keeps, or the app's shortcuts, may spend, and how long it may take.
+const TOLD_FUEL: u64 = 20_000_000;
+const MOST_TOLD_TIME: Duration = Duration::from_secs(2);
 
 /// What a plugin may step into, by the name a manifest gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +254,8 @@ pub(crate) enum Hook {
     StrokeKept,
     /// Told each time a layer is added from the Layers panel, acting as an action does.
     LayerAdded,
+    /// A hardware keyboard's presses taken as others before the app's shortcuts see them.
+    KeyShortcut,
 }
 
 impl Hook {
@@ -247,6 +280,7 @@ impl Hook {
             "picker" => Some(Hook::Picker),
             "stroke_kept" => Some(Hook::StrokeKept),
             "layer_added" => Some(Hook::LayerAdded),
+            "key_shortcut" => Some(Hook::KeyShortcut),
             _ => None,
         }
     }
@@ -273,6 +307,7 @@ impl Hook {
             Hook::Picker => "This plugin can draw the colour panel's Classic picker its own way.",
             Hook::StrokeKept => "This plugin can act on your artwork each time you finish a stroke.",
             Hook::LayerAdded => "This plugin can act on your artwork each time you add a layer.",
+            Hook::KeyShortcut => "This plugin can change what your keyboard's keys do.",
         }
     }
 
@@ -295,6 +330,12 @@ impl Hook {
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
             Hook::StrokeKept | Hook::LayerAdded => exports(module, EVENT, &[ValType::I32], &[ValType::I32]),
+            Hook::KeyShortcut => {
+                exports(module, KEY_BUFFER, &[ValType::I32], &[ValType::I32])
+                    && exports(module, KEY_SHORTCUT, &[ValType::I32], &[ValType::I64])
+                    && exports(module, KEY_SHORTCUT_KEYS, &[ValType::I32], &[ValType::I64])
+                    && has_memory(module)
+            }
             Hook::Picker => {
                 exports(module, PICKER_PICK, &[ValType::F32, ValType::F32], &[ValType::I64])
                     && exports(module, PICKER_POINT, &[ValType::F32, ValType::F32], &[ValType::I64])
@@ -595,6 +636,41 @@ pub(crate) struct Running {
     panel_event: Option<TypedFunc<(i32, f32), i32>>,
     event: Option<TypedFunc<i32, i32>>,
     canvas: Option<CanvasCalls>,
+    key_buffer: Option<TypedFunc<i32, i32>>,
+    key_shortcut: Option<TypedFunc<i32, i64>>,
+    key_shortcut_keys: Option<TypedFunc<i32, i64>>,
+    key_shortcuts: Option<TypedFunc<i32, ()>>,
+    panel_key: Option<TypedFunc<i32, i32>>,
+    kept_buffer: Option<TypedFunc<i32, i32>>,
+    kept: Option<TypedFunc<i32, ()>>,
+    keep: Option<TypedFunc<(), i64>>,
+}
+
+/// Where a key answer's text is and how long, or what it says without one: as it is (none), or
+/// no press (an empty list).
+fn key_answer(store: &Store<Host>, memory: &Memory, packed: i64) -> Result<Option<Vec<u8>>, Stop> {
+    if packed == 0 {
+        return Ok(None);
+    }
+    if packed < 0 {
+        return Ok(Some(Vec::new()));
+    }
+    let (at, len) = (packed as u64 as u32 as usize, (packed as u64 >> 32) as usize);
+    if len > MOST_KEPT {
+        return Err(Stop::Nonsense);
+    }
+    let mut bytes = vec![0_u8; len];
+    memory.read(store, at, &mut bytes).map_err(|_| Stop::Nonsense)?;
+    Ok(Some(bytes))
+}
+
+/// The presses a key answer's text writes; one that writes none that hold up stops the plugin.
+fn presses(text: &[u8]) -> Result<Vec<crate::KeyCombo>, Stop> {
+    let text = std::str::from_utf8(text).map_err(|_| Stop::Nonsense)?;
+    if text.len() > MOST_KEY_TEXT {
+        return Err(Stop::Nonsense);
+    }
+    crate::KeyCombo::read_all(text).ok_or(Stop::Nonsense)
 }
 
 impl Running {
@@ -717,6 +793,14 @@ impl Running {
                     tool: instance.get_typed_func(&store, CANVAS_TOOL).ok(),
                 })
             })();
+            let key_buffer = instance.get_typed_func(&store, KEY_BUFFER).ok();
+            let key_shortcut = instance.get_typed_func(&store, KEY_SHORTCUT).ok();
+            let key_shortcut_keys = instance.get_typed_func(&store, KEY_SHORTCUT_KEYS).ok();
+            let key_shortcuts = instance.get_typed_func(&store, KEY_SHORTCUTS).ok();
+            let panel_key = instance.get_typed_func(&store, PANEL_KEY).ok();
+            let kept_buffer = instance.get_typed_func(&store, KEPT_BUFFER).ok();
+            let kept = instance.get_typed_func(&store, KEPT).ok();
+            let keep = instance.get_typed_func(&store, KEEP).ok();
             Ok(Running {
                 store,
                 position,
@@ -753,12 +837,150 @@ impl Running {
                 panel_event,
                 event,
                 canvas,
+                key_buffer,
+                key_shortcut,
+                key_shortcut_keys,
+                key_shortcuts,
+                panel_key,
+                kept_buffer,
+                kept,
+                keep,
             })
         })?;
         for (index, value) in controls.iter().enumerate() {
             running.control(index, *value)?;
         }
         Ok(running)
+    }
+
+    /// `bytes` started as [`Running::start_on`] does, told `controls`, what it `kept` (if it keeps
+    /// anything), and on the key hook the app's shortcuts.
+    pub(crate) fn start_told(
+        bytes: &[u8],
+        controls: &[f32],
+        hooks: &[Hook],
+        permissions: &[PluginPermission],
+        kept: Option<&[u8]>,
+    ) -> Result<Running, Stop> {
+        let mut running = Running::start_on(bytes, controls, hooks, permissions)?;
+        if let Some(kept) = kept {
+            running.give_kept(kept)?;
+        }
+        if hooks.contains(&Hook::KeyShortcut) {
+            running.tell_shortcuts(&crate::keys::shortcuts_told(crate::keys::DESKTOP))?;
+        }
+        Ok(running)
+    }
+
+    /// `text` written where its key buffer says, for a call that follows: its length.
+    fn hand_key_text(&mut self, text: &str) -> Result<i32, Stop> {
+        let Running { store, key_buffer, memory, .. } = self;
+        let (Some(buffer), Some(memory)) = (key_buffer.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let len = i32::try_from(text.len()).map_err(|_| Stop::Nonsense)?;
+        guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            let at = buffer.call(&mut *store, len).map_err(|e| stop_of(&e))?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, place, text.as_bytes()).map_err(|_| Stop::Nonsense)?;
+            Ok(len)
+        })
+    }
+
+    /// What the key hook answers for `press` (`keys`: which presses now do what it does by default,
+    /// else what it is taken as): none for as it is, else the presses.
+    fn key_call(&mut self, keys: bool, press: &crate::KeyCombo) -> Result<Option<Vec<crate::KeyCombo>>, Stop> {
+        let func = if keys { self.key_shortcut_keys } else { self.key_shortcut };
+        let (Some(func), Some(memory)) = (func, self.memory) else { return Ok(None) };
+        let len = self.hand_key_text(&press.text())?;
+        let store = &mut self.store;
+        let packed = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            func.call(&mut *store, len).map_err(|e| stop_of(&e))
+        })?;
+        key_answer(store, &memory, packed)?.map(|text| presses(&text)).transpose()
+    }
+
+    /// What it says `press` is taken as: as it is (none), another press, or no press at all (an
+    /// empty list). More than one press makes no sense.
+    pub(crate) fn key_shortcut(&mut self, press: &crate::KeyCombo) -> Result<Option<Vec<crate::KeyCombo>>, Stop> {
+        let taken = self.key_call(false, press)?;
+        if taken.as_ref().is_some_and(|presses| presses.len() > 1) {
+            return Err(Stop::Nonsense);
+        }
+        Ok(taken)
+    }
+
+    /// The presses it says now do what `press` does by default: as it is (none), or these (perhaps
+    /// none).
+    pub(crate) fn key_shortcut_keys(&mut self, press: &crate::KeyCombo) -> Result<Option<Vec<crate::KeyCombo>>, Stop> {
+        self.key_call(true, press)
+    }
+
+    /// Tells it the app's shortcuts (`told`, as [`crate::keys::shortcuts_told`] writes them), if it
+    /// listens.
+    fn tell_shortcuts(&mut self, told: &str) -> Result<(), Stop> {
+        if self.key_shortcuts.is_none() || self.key_buffer.is_none() || self.memory.is_none() {
+            return Ok(());
+        }
+        let len = self.hand_key_text(told)?;
+        let Running { store, key_shortcuts, .. } = self;
+        let Some(call) = key_shortcuts.as_ref() else { return Ok(()) };
+        let (mut left, until) = (TOLD_FUEL, Instant::now() + MOST_TOLD_TIME);
+        guarded(|| long_call(store, call, len, &mut left, until))
+    }
+
+    /// Whether its panel can be handed a key press: it exports what one goes through.
+    pub(crate) fn takes_keys(&self) -> bool {
+        self.panel_key.is_some() && self.key_buffer.is_some() && self.memory.is_some()
+    }
+
+    /// Tells it the key `press` its panel asked for, on the artwork `session`, as a long call (as a
+    /// touch on its panel is).
+    pub(crate) fn panel_key(
+        &mut self,
+        press: &crate::KeyCombo,
+        session: std::sync::Arc<crate::CanvasSession>,
+    ) -> Result<(), Stop> {
+        if !self.takes_keys() {
+            return Ok(());
+        }
+        let len = self.hand_key_text(&press.text())?;
+        let Running { store, panel_key, .. } = self;
+        let Some(panel_key) = panel_key.as_ref() else { return Ok(()) };
+        store.data_mut().session = Some(session as std::sync::Arc<dyn std::any::Any + Send + Sync>);
+        let (mut left, until) = (ACTION_FUEL, Instant::now() + MOST_ACTION_TIME);
+        let ran = guarded(|| long_call(store, panel_key, len, &mut left, until).map(|_| ()));
+        store.data_mut().session = None;
+        ran
+    }
+
+    /// Hands it what it keeps, if it listens.
+    pub(crate) fn give_kept(&mut self, data: &[u8]) -> Result<(), Stop> {
+        let Running { store, kept_buffer, kept, memory, .. } = self;
+        let (Some(buffer), Some(kept), Some(memory)) = (kept_buffer.as_ref(), kept.as_ref(), memory.as_ref()) else {
+            return Ok(());
+        };
+        let len = i32::try_from(data.len()).map_err(|_| Stop::Nonsense)?;
+        let (mut left, until) = (TOLD_FUEL, Instant::now() + MOST_TOLD_TIME);
+        guarded(|| {
+            let at = long_call(store, buffer, len, &mut left, until)?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, place, data).map_err(|_| Stop::Nonsense)?;
+            long_call(store, kept, len, &mut left, until)
+        })
+    }
+
+    /// What it says to keep from now on, if it has anything new to keep.
+    pub(crate) fn take_keep(&mut self) -> Result<Option<Vec<u8>>, Stop> {
+        let Running { store, keep, memory, .. } = self;
+        let (Some(keep), Some(memory)) = (keep.as_ref(), memory.as_ref()) else { return Ok(None) };
+        let (mut left, until) = (TOLD_FUEL, Instant::now() + MOST_TOLD_TIME);
+        let packed = guarded(|| long_call(store, keep, (), &mut left, until))?;
+        // (nothing new reads as "no press": an empty list)
+        if packed < 0 {
+            return Ok(None);
+        }
+        Ok(Some(key_answer(store, memory, packed)?.unwrap_or_default()))
     }
 
     /// Runs its action `index` on the artwork `session` (what its permissions give it to reach), as a

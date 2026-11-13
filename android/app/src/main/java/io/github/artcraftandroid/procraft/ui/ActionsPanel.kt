@@ -649,6 +649,7 @@ fun PluginPanelView(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                         is PanelRow.Switch -> ActionRowView(Toggle(row.label, row.on) { vm.touchPluginPanel(i, if (it) 1f else 0f) })
                         is PanelRow.Choice -> PanelChoiceRow(row) { vm.touchPluginPanel(i, it.toFloat()) }
                         is PanelRow.Button -> PluginActionRow(row.label) { vm.touchPluginPanel(i, 1f) }
+                        is PanelRow.Keys -> PanelKeysRow(row) { vm.touchPluginPanel(i, 1f) }
                     }
                 }
             }
@@ -692,6 +693,19 @@ private fun PanelChoiceRow(row: PanelRow.Choice, onPick: (Int) -> Unit) {
         Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
         Box(Modifier.weight(1f))
         Text(row.options.getOrElse(row.chosen.toInt()) { "" }, color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+    }
+}
+
+/** A row of keys on a plugin's panel: its label, the keys at its end as a file control's name is; tapped as a button is. */
+@Composable
+private fun PanelKeysRow(row: PanelRow.Keys, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().height(44.dp).clickable(onClick = onClick).padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        Box(Modifier.weight(1f))
+        Text(row.keys, color = Pc.SlideValue, fontSize = 15.sp, maxLines = 1, modifier = Modifier.padding(start = 12.dp))
     }
 }
 

@@ -48,6 +48,8 @@ const MOST_CONTROLS: usize = 8;
 const MOST_FILES: usize = 8;
 /// The folder in a plugin's home where the files picked for its file controls are kept.
 const CHOSEN: &str = "chosen";
+/// What a plugin's code keeps of its own (`procraft_keep`), a file in its home.
+const KEPT: &str = "kept";
 const MOST_HOOKS: usize = 8;
 /// The reason a stopped plugin gives, in bytes.
 const MOST_STOP_NOTE: usize = 200;
@@ -768,11 +770,11 @@ pub(crate) fn keep(dir: &Path, package: &Package) -> Result<PathBuf, Refusal> {
         let _ = std::fs::remove_dir_all(&stage);
         return Err(Refusal::NotKept);
     }
-    // other versions go, now this one stands; the files picked for its controls stay
+    // other versions go, now this one stands; what it keeps beside them stays
     if let Ok(versions) = std::fs::read_dir(&home) {
         for version in versions.flatten() {
             let name = version.file_name();
-            let other = name.to_str().is_some_and(|v| v != package.manifest.version && v != CHOSEN);
+            let other = name.to_str().is_some_and(|v| v != package.manifest.version && v != CHOSEN && v != KEPT);
             if other {
                 let _ = std::fs::remove_dir_all(version.path());
             }
@@ -781,8 +783,6 @@ pub(crate) fn keep(dir: &Path, package: &Package) -> Result<PathBuf, Refusal> {
     Ok(folder)
 }
 
-/// Takes plugin `id`'s folder out of `dir`: gone from the next read on, even if what is moved
-/// aside can't be deleted now (the next start tries again). False if it stays.
 /// Where the file picked for `key`, a control of plugin `id` kept in `dir`, is kept (a sound as a
 /// WAV file), and the name it was picked by beside it. They go with the plugin.
 pub(crate) fn chosen_paths(dir: &Path, id: &str, key: &str) -> (PathBuf, PathBuf) {
@@ -790,6 +790,29 @@ pub(crate) fn chosen_paths(dir: &Path, id: &str, key: &str) -> (PathBuf, PathBuf
     (folder.join(format!("{key}.wav")), folder.join(format!("{key}.name")))
 }
 
+/// What plugin `id`, kept in `dir`, keeps of its own, if anything holds up.
+pub(crate) fn read_kept(dir: &Path, id: &str) -> Option<Vec<u8>> {
+    read_capped(&dir.join(id).join(KEPT), plugin_run::MOST_KEPT)
+}
+
+/// Keeps `data` for plugin `id`, kept in `dir`, whole: written beside, then moved into place, so a
+/// start finds what it kept before or now, never part of it. It goes with the plugin. False if it
+/// couldn't be (the plugin is gone, say).
+pub(crate) fn write_kept(dir: &Path, id: &str, data: &[u8]) -> bool {
+    let home = dir.join(id);
+    if data.len() > plugin_run::MOST_KEPT || !home.is_dir() {
+        return false;
+    }
+    let beside = spare(&home, KEPT);
+    let moved = write_new(&beside, data).and_then(|()| std::fs::rename(&beside, home.join(KEPT)));
+    if moved.is_err() {
+        let _ = std::fs::remove_file(&beside);
+    }
+    moved.map_err(|e| log::warn!("couldn't keep what a plugin keeps: {e}")).is_ok()
+}
+
+/// Takes plugin `id`'s folder out of `dir`: gone from the next read on, even if what is moved
+/// aside can't be deleted now (the next start tries again). False if it stays.
 pub(crate) fn forget(dir: &Path, id: &str) -> bool {
     clear_stopped(dir, id);
     let home = dir.join(id);
@@ -1009,8 +1032,14 @@ pub(crate) fn read_all(dir: &Path) -> Vec<Manifest> {
         let Ok(versions) = std::fs::read_dir(entry.path()) else { continue };
         let mut newest: Option<Manifest> = None;
         for version in versions.flatten() {
-            // the files picked for its controls, beside its versions
-            if version.file_name() == CHOSEN {
+            // the files picked for its controls and what it keeps, beside its versions; what was
+            // left half written goes
+            let name = version.file_name();
+            if name == CHOSEN || name == KEPT {
+                continue;
+            }
+            if name.to_str().is_some_and(|n| n.starts_with('.')) {
+                let _ = std::fs::remove_file(version.path());
                 continue;
             }
             let folder = version.path();

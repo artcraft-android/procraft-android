@@ -20,7 +20,8 @@ A plugin holds one or both of these:
 
 The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with code and `gap-closing`
 the largest. `extract-lines`, `posterise` and `outline` are filters. `grid-layer` has an action,
-`colour-triangle` is a picker, and `vector-canvas` makes artworks of its own.
+`colour-triangle` is a picker, `vector-canvas` makes artworks of its own, and `keyboard-shortcuts`
+rebinds keys from a panel of its own and keeps what it binds.
 
 ## What you write
 
@@ -163,7 +164,8 @@ kit::position!(|x, y| (x + CONTROLS.get(0), y));
 
 The macros: `controls!` (with a closure, also told each control as it changes), `yes!` for hooks that
 only ask yes or no (`kit::yes!(procraft_pin_panels)`), `answer!` for a whole number, `position!`, `stroke_sound!` and
-`sound_prepare!`, `brush!` and `brush_control!`, `files!`, `inbetween!`, `quickshape_curve!` and `events!`. The
+`sound_prepare!`, `brush!` and `brush_control!`, `files!`, `inbetween!`, `quickshape_curve!`, `events!`,
+`key_shortcut!` and `key_shortcuts!`, `panel_key!` and `kept!` (the last four in `kit::keys`). The
 kit uses the standard library; for the smallest plugins, `default-features = false` keeps only
 `Controls`, `controls!`, `yes!`, `answer!` (a whole number) and `position!`, and the crate is `#![no_std]` with a panic handler of its own:
 
@@ -458,6 +460,52 @@ is one undo step of its own, after the stroke's or the layer's. What a plugin ch
 in an action, tells no plugin anything, so they can't set each other off. The kit's `events!` takes
 a `fn(kit::app::Event)`.
 
+### `key_shortcut`
+
+A hardware keyboard's presses on the canvas, taken as other presses before the app's shortcuts see
+them: the plugin holds the bindings, and the app's own shortcuts stay as they are. Typing in a text
+field never comes here. The module must export its `memory`.
+
+```
+procraft_key_buffer(len: i32) -> i32
+procraft_key_shortcut(len: i32) -> i64
+procraft_key_shortcut_keys(len: i32) -> i64
+procraft_key_shortcuts(len: i32)                 // if it exports it
+```
+
+A press is text: its modifiers, each with a `+` after it, then its key, as in `command+shift+z`,
+`shift+]` or `space`. The modifiers are `command` (Ctrl, or ⌘ on a Mac), `shift` and `alt`, in that
+order when the app writes them and in any order when the plugin does. The key is a letter or a digit,
+a sign (`[`, `]`, `;`, `,`, `.`, `/`, `\`, `'`, `` ` ``, `-`, `=`), or a word: `space`, `plus`,
+`delete`, `backspace`, `escape`, `left`, `right`, `up`, `down`, `f1` to `f12`. A key is at most 16
+characters, lowercase, without `+` or a space. A platform may not have every key.
+
+The app writes the press where `procraft_key_buffer` says `len` bytes go, then asks:
+
+- `procraft_key_shortcut`: what the press is taken as. 0 leaves it as it is; below 0 makes it no
+  press at all, so it does nothing; anything else is where the other press's text is in `memory`
+  (the low 32 bits) and how long it is (the high 32 bits). That press does what it does by default,
+  and isn't asked about again.
+- `procraft_key_shortcut_keys`: which presses now do what this press does by default, for the
+  keyboard shortcuts' list. 0: still this press; below 0: none (the list leaves the row out if it has
+  no press left); anything else: the presses' text, packed as above, a space between them.
+
+An answer whose text isn't a press stops the plugin, as does more than one press for
+`procraft_key_shortcut`. Only one plugin rebinds keys: the first on the hook, by id.
+
+`procraft_key_shortcuts`, if the module exports it, is told the app's shortcuts as the plugin starts,
+in every copy of its code, through `procraft_key_buffer` too. It's a line for each, of four fields a
+tab apart: its group (`Edit`), what it does (`Undo`), the presses that do it by default (a space
+between), and `1` if the app keeps those keys as they are (holding them moves the view, say) or `0` if
+they may be rebound. A row of the list whose presses each do something of their own (one smaller, one
+bigger) is a line for each press. The list is the platform's: a desktop's has its files, zooming and
+turning too.
+
+The kit's `key_shortcut!` takes two functions, from a `&kit::keys::Press` to a `kit::keys::Taken`
+(`AsItIs`, `As(press)` or `Nothing`) and to an `Option<Vec<Press>>`; `key_shortcuts!` takes a
+`fn(Vec<kit::keys::Shortcut>)`. The Keyboard shortcuts plugin the app comes with takes each key bound
+anew as its shortcut's first key as it came, and a key a shortcut no longer has as none.
+
 ### `quickshape_curve`
 
 A curve QuickShape may snap to. When a held stroke snaps, the app hands the plugin the stroke's points
@@ -521,6 +569,7 @@ own sound, or none. All of it is in the plugin, made sample by sample with a few
 | Steps for a pasted row | 10,000, and 64 for each pixel |
 | Steps for a fill | 20,000,000, and 1,024 for each pixel of its box, for at most 30 seconds |
 | A fill's box | 8,194 × 8,194 pixels in area |
+| What a plugin keeps | 64 KiB |
 
 A pen sends a sample every 4 ms at 240 Hz, so a `position` call has to be far quicker than that. Use a
 few hundred steps, not thousands.
@@ -528,7 +577,8 @@ few hundred steps, not thousands.
 A fill too big for the limit stays as it was, and the app says so.
 
 Code keeps its memory while the plugin is on, between calls. It starts afresh when the plugin is
-turned on, and on each start of the app, so anything it remembers lasts only that long.
+turned on, and on each start of the app, so anything it remembers lasts only that long, unless it
+keeps it (see [What a plugin keeps](#what-a-plugin-keeps)).
 
 ## Actions
 
@@ -617,6 +667,9 @@ some words, or a button. The plugin describes the panel as JSON text and hands i
 - A panel has 1 to 16 rows, and a choice has 1 to 8 options.
 - Labels and the title are at most 40 characters, an option at most 24, and words at most 400.
 - A field the app doesn't know, or a kind of row it doesn't have, makes the panel not hold up.
+- A `keys` row shows presses (written as for the [`key_shortcut`](#key_shortcut) hook) the way the
+  platform writes them, "Ctrl+Z" or "⌘Z", or "None" for none, and is tapped as a button is:
+  `{ "type": "keys", "label": "Undo", "keys": ["command+z"] }`. It has eight presses at most.
 - The panel shows once the action ends, and stays open in the same copy of the code.
 - Each touch calls the module's `procraft_panel_event(row: i32, value: f32) -> i32`, so a module
   with the `panel` permission has to export it. `row` is the row's place, from 0. The value is the
@@ -625,6 +678,13 @@ some words, or a button. The plugin describes the panel as JSON text and hands i
 - A touch can do what an action can, and what it changes is one step to undo. It can show the panel
   again, changed, or close it with `close_panel()`.
 - Done closes the panel. So does another action, or the plugin being turned off.
+- A panel with `"key_press": true` asks for the next key press: while it shows, that press goes to the
+  plugin rather than to the canvas, Escape too, as
+  `procraft_panel_key(len: i32) -> i32`, its text (as for the [`key_shortcut`](#key_shortcut) hook)
+  written where `procraft_key_buffer(len: i32) -> i32` says. It acts as a touch does. The panel asked
+  for that one press: to take another, show it again asking. A module whose panel asks needs both
+  functions, or the panel doesn't hold up. The kit's `panel_key!` writes the one, and
+  `key_shortcut!` or `key_buffer!` the other; `Panel::keys` and `Panel::key_press` write the JSON.
 
 The kit writes the JSON for you:
 
@@ -641,6 +701,27 @@ kit::panel!(|row, value| {
     }
 });
 ```
+
+### What a plugin keeps
+
+Code can keep a little of its own from one start to the next, such as what someone set on its panel:
+up to 64 KiB, kept with the plugin (an update keeps it, and it goes when the plugin is removed). A
+module that keeps something exports these:
+
+```
+procraft_keep() -> i64
+procraft_kept_buffer(len: i32) -> i32
+procraft_kept(len: i32)
+```
+
+After each of its actions, a touch on its panel and a key press its panel asked for, the app asks
+`procraft_keep`: below 0 for nothing new, otherwise where what to keep from now on is in `memory`
+and how long, packed as a `key_shortcut` answer is. Every copy of its code is told what it keeps as it
+starts, and again whenever another copy keeps something new: into `procraft_kept_buffer` (where `len`
+bytes go), then `procraft_kept`. So what a panel sets reaches the copy on its hooks at once. The kit's
+`kept!` takes a `fn(&[u8])`, and `kit::keys::keep(data)` hands the app something new.
+
+An older ProCraft keeps nothing: there a plugin starts each time with nothing kept.
 
 ## Artworks of its own
 
@@ -818,7 +899,9 @@ and have `Plugins::with_bundled` add none. What was added stays, as if imported.
 
 `interface` in `compat` is the version of all this: the hooks and what they call, the template around
 a filter's function, what a filter is given, the kinds of control, and the app's functions. Interface
-2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork. What a
+2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork; later,
+within it, the `key_shortcut` hook, panels that show keys or ask for a key press, and what a plugin
+keeps. What a
 hook calls stays as it's written here, and the app keeps every interface's template, so a plugin goes
 on working as it was written.
 

@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::CanvasSession;
 use crate::plugin_file;
 use crate::plugin_run::{Hook, Running, Stop};
 use crate::plugins::Plugins;
+use crate::{CanvasSession, KeyCombo};
 
 /// A plugin at work: a lock of its own, so a long call holds up nothing but it.
 type Shared = Arc<Mutex<Running>>;
@@ -324,6 +324,75 @@ impl Hooks {
             && self.through(Hook::PasteMask, false, |running, said| Ok(said | running.paste_mask()?))
     }
 
+    /// What the first plugin on `hook` answers to `ask`; none with none on it, or if it stops (it
+    /// comes off).
+    fn first_on<T>(&self, hook: Hook, ask: impl FnOnce(&mut Running) -> Result<T, Stop>) -> Option<T> {
+        if !self.has(hook) {
+            return None;
+        }
+        let mut working = self.working();
+        let at = working.on.iter().position(|plugin| plugin.hooks & hook.bit() != 0)?;
+        let answer = working.on.get(at).map(|plugin| ask(&mut at_work(&plugin.running)))?;
+        match answer {
+            Ok(said) => Some(said),
+            Err(stop) => {
+                let gone = working.on.remove(at);
+                self.note_stop(&mut working, gone.id, stop);
+                self.rehook(&working);
+                None
+            }
+        }
+    }
+
+    /// The key hook: what a hardware keyboard's `press` is taken as, as the first plugin on it says
+    /// (only one rebinds keys): itself, another press, or none at all.
+    pub(crate) fn key_shortcut(&self, press: KeyCombo) -> Option<KeyCombo> {
+        match self.first_on(Hook::KeyShortcut, |running| running.key_shortcut(&press)) {
+            Some(Some(taken)) => taken.into_iter().next(),
+            Some(None) | None => Some(press),
+        }
+    }
+
+    /// The key hook: the presses that now do what `press` does by default, as the first plugin on
+    /// it says; none: still `press`.
+    pub(crate) fn key_shortcut_keys(&self, press: &KeyCombo) -> Option<Vec<KeyCombo>> {
+        self.first_on(Hook::KeyShortcut, |running| running.key_shortcut_keys(press)).flatten()
+    }
+
+    /// Whether a plugin rebinds keys.
+    pub(crate) fn rebinds_keys(&self) -> bool {
+        self.has(Hook::KeyShortcut)
+    }
+
+    /// What `id` keeps handed to each copy of its code that is on, and its artworks open: another
+    /// copy (its panel's) kept it. One that stops comes off.
+    pub(crate) fn give_kept(&self, id: &str, data: &[u8]) {
+        {
+            let mut working = self.working();
+            if let Some(at) = working.on.iter().position(|p| p.id == id) {
+                if let Some(events) = working.on.get(at).and_then(|p| p.events.as_ref()) {
+                    let _ = at_work(events).give_kept(data);
+                }
+                let told = working.on.get(at).map(|p| at_work(&p.running).give_kept(data));
+                if let Some(Err(stop)) = told {
+                    let gone = working.on.remove(at);
+                    self.note_stop(&mut working, gone.id, stop);
+                    self.rehook(&working);
+                }
+            }
+        }
+        for canvas in self.canvases_of(id) {
+            canvas.give_kept(data);
+        }
+    }
+
+    /// `id`'s artworks open.
+    fn canvases_of(&self, id: &str) -> Vec<Arc<crate::PluginCanvas>> {
+        let mut canvases = self.canvases.lock().unwrap_or_else(|e| e.into_inner());
+        canvases.retain(|(_, canvas)| canvas.strong_count() > 0);
+        canvases.iter().filter(|(of, _)| of == id).filter_map(|(_, canvas)| canvas.upgrade()).collect()
+    }
+
     /// The plugins on `hook`, to be called with the list let go: a long call holds up only them.
     fn long_calls(&self, hook: Hook) -> Vec<(String, Shared)> {
         let working = self.working();
@@ -477,12 +546,7 @@ impl Hooks {
             }
         }
         // its artworks open too, once the list is let go (a canvas telling of a stop takes it)
-        let open: Vec<Arc<crate::PluginCanvas>> = {
-            let mut canvases = self.canvases.lock().unwrap_or_else(|e| e.into_inner());
-            canvases.retain(|(_, canvas)| canvas.strong_count() > 0);
-            canvases.iter().filter(|(of, _)| of == id).filter_map(|(_, canvas)| canvas.upgrade()).collect()
-        };
-        for canvas in open {
+        for canvas in self.canvases_of(id) {
             canvas.control(index, value);
         }
     }
@@ -974,6 +1038,85 @@ pub(crate) mod tests {
         assert!(plugins.panel().is_some());
         assert!(plugins.set_on(ID.to_owned(), false));
         assert_eq!(plugins.panel(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn combo(text: &str) -> KeyCombo {
+        KeyCombo::read(text).unwrap()
+    }
+
+    /// On the key hook: Q is taken as Ctrl+Z, N as nothing, X as something that is no press, and
+    /// anything else as it is.
+    const REBINDS: &str = r#"(module
+        (memory (export "memory") 1)
+        (data (i32.const 16) "command+z")
+        (data (i32.const 32) "ctrl+y")
+        (func (export "procraft_key_buffer") (param i32) (result i32) (i32.const 256))
+        (func (export "procraft_key_shortcut") (param $len i32) (result i64)
+            (if (i32.eq (local.get $len) (i32.const 1)) (then
+                (if (i32.eq (i32.load8_u (i32.const 256)) (i32.const 113))
+                    (then (return (i64.or (i64.shl (i64.const 9) (i64.const 32)) (i64.const 16)))))
+                (if (i32.eq (i32.load8_u (i32.const 256)) (i32.const 110))
+                    (then (return (i64.const -1))))
+                (if (i32.eq (i32.load8_u (i32.const 256)) (i32.const 120))
+                    (then (return (i64.or (i64.shl (i64.const 6) (i64.const 32)) (i64.const 32)))))))
+            (i64.const 0))
+        (func (export "procraft_key_shortcut_keys") (param i32) (result i64) (i64.const 0)))"#;
+
+    #[test]
+    fn a_press_goes_as_the_key_hook_says_and_one_that_is_no_press_stops_it() {
+        let dir = store("rebinds");
+        let module = wat::parse_str(REBINDS).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["key_shortcut"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert_eq!(plugins.key_press(combo("q")), Some(combo("q")), "off");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!(plugins.key_press(combo("q")), Some(combo("command+z")));
+        assert_eq!(plugins.key_press(combo("n")), None);
+        assert_eq!(plugins.key_press(combo("command+q")), Some(combo("command+q")));
+        // a key no press could have isn't asked about
+        assert_eq!(plugins.key_press(KeyCombo::of("a b", false, false, false)).map(|c| c.key), Some("a b".into()));
+        // what it took "x" as is no press: off it goes, and the press goes as it came
+        assert_eq!(plugins.key_press(combo("x")), Some(combo("x")));
+        assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it gave an answer that makes no sense."));
+        assert_eq!(plugins.key_press(combo("q")), Some(combo("q")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_panel_asking_for_a_key_shows_only_with_somewhere_for_it_to_go() {
+        let Some(s) = session() else { return };
+        let dir = store("key-panel");
+        let json = r#"{"title":"Keys","key_press":true,"rows":[{"type":"button","label":"Go"}]}"#;
+        let text = |extra: &str| {
+            format!(
+                r#"(module
+                    (import "procraft" "show_panel" (func $show (param i32 i32) (result i32)))
+                    (memory (export "memory") 1)
+                    (data (i32.const 0) "{}")
+                    (func (export "procraft_action") (param i32) (result i32)
+                        (drop (call $show (i32.const 0) (i32.const {}))) (i32.const 0))
+                    (func (export "procraft_panel_event") (param i32 f32) (result i32) (i32.const 0))
+                    {extra})"#,
+                json.replace('"', "\\\""),
+                json.len()
+            )
+        };
+        let plugins = acting(&dir, &wat::parse_str(text("")).unwrap(), json!(["panel"]));
+        assert!(plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
+        assert_eq!(plugins.panel(), None, "no procraft_panel_key");
+        let _ = std::fs::remove_dir_all(&dir);
+        let takes = r#"(func (export "procraft_key_buffer") (param i32) (result i32) (i32.const 1024))
+            (func (export "procraft_panel_key") (param i32) (result i32) (i32.const 0))"#;
+        let plugins = acting(&dir, &wat::parse_str(text(takes)).unwrap(), json!(["panel"]));
+        assert!(plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
+        assert!(plugins.panel().is_some_and(|p| p.key_press));
+        // it takes the next press, and shows no more asking for one
+        assert!(plugins.panel_key(combo("k"), Arc::clone(&s)));
+        assert!(plugins.panel().is_some_and(|p| !p.key_press));
+        assert!(!plugins.panel_key(combo("k"), Arc::clone(&s)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

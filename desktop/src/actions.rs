@@ -1347,6 +1347,31 @@ pub fn plugin_panel(
                                     asked = Some(PanelTouch::Touch(row_at, 1.0));
                                 }
                             }
+                            // its label, and the keys at its end as a file control's name is
+                            PanelRow::Keys { label, keys } => {
+                                text(
+                                    &painter,
+                                    label_at,
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    17.0,
+                                    Weight::Regular,
+                                    argb(ACTIONS_ROW),
+                                );
+                                let right = pos2(cell.right() - 16.0, cell.center().y);
+                                text(
+                                    &painter,
+                                    right,
+                                    Align2::RIGHT_CENTER,
+                                    keys,
+                                    15.0,
+                                    Weight::Regular,
+                                    argb(SLIDE_VALUE),
+                                );
+                                if tapped(ui) {
+                                    asked = Some(PanelTouch::Touch(row_at, 1.0));
+                                }
+                            }
                         }
                         y += h;
                     }
@@ -1610,8 +1635,8 @@ mod tests {
 
     use super::*;
 
-    /// What a tap at `at` on a plugin's panel of a button, a switch and a choice asks (the window
-    /// 1200 wide).
+    /// What a tap at `at` on a plugin's panel of a button, a switch, a choice and a row of keys asks
+    /// (the window 1200 wide).
     fn panel_tapped(at: impl Fn(Rect) -> Pos2) -> Option<PanelTouch> {
         let (ctx, mut look) = (egui::Context::default(), Look::default());
         crate::look::install_fonts(&ctx);
@@ -1625,7 +1650,9 @@ mod tests {
                     options: vec!["Dots".to_owned(), "Lines".to_owned()],
                     chosen: 1,
                 },
+                PanelRow::Keys { label: "Undo".to_owned(), keys: "Ctrl+Z".to_owned() },
             ],
+            key_press: false,
         };
         let top = pc::BAR_HEIGHT + PANEL_MARGIN;
         let rect = Rect::from_min_size(pos2(1200.0 - PANEL_MARGIN - PANEL_WIDTH, top), vec2(PANEL_WIDTH, 300.0));
@@ -1666,6 +1693,7 @@ mod tests {
         assert_eq!(panel_tapped(row(0.0)), Some(PanelTouch::Touch(0, 1.0)), "the button");
         assert_eq!(panel_tapped(row(1.0)), Some(PanelTouch::Touch(1, 0.0)), "the switch turned off");
         assert_eq!(panel_tapped(row(2.0)), Some(PanelTouch::Touch(2, 0.0)), "the choice to the next, round");
+        assert_eq!(panel_tapped(row(3.0)), Some(PanelTouch::Touch(3, 1.0)), "the keys");
         assert_eq!(panel_tapped(|r| pos2(r.right() - 40.0, r.top() + 33.0)), Some(PanelTouch::Close));
         assert_eq!(panel_tapped(|r| pos2(r.left() + 60.0, r.top() + 20.0)), None, "the title does nothing");
     }

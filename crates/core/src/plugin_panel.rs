@@ -15,19 +15,26 @@
 //! ```
 //!
 //! Rows go by their place in `rows`; a value is a slider's, a switch's (1 on, 0 off), a choice's
-//! place, or 1 for a button tapped.
+//! place, or 1 for a button tapped. A `keys` row shows presses as the platform writes them
+//! (`{ "type": "keys", "label": "Undo", "keys": ["command+z"] }`, see [`crate::KeyCombo`]) and is
+//! tapped as a button is; a panel with `"key_press": true` asks for the next key press, which goes
+//! to the plugin as `procraft_panel_key` rather than to the canvas.
 
 use serde::Deserialize;
 
-/// The most rows a panel may have, and the most choices one row may give.
+/// The most rows a panel may have, the most choices one row may give, and the most presses a row of
+/// keys shows.
 const MOST_ROWS: usize = 16;
 const MOST_OPTIONS: usize = 8;
+const MOST_KEYS: usize = 8;
 
 /// A plugin's panel as the apps show it.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct PluginPanel {
     pub title: String,
     pub rows: Vec<PanelRow>,
+    /// It asks for the next key press: the platform hands it to [`crate::Plugins::panel_key`].
+    pub key_press: bool,
 }
 
 /// One of its rows.
@@ -60,6 +67,12 @@ pub enum PanelRow {
     Button {
         label: String,
     },
+    /// A row tapped, `keys` (presses, written for the platform: "Ctrl+Z  Ctrl+Y", or "None") at
+    /// its end.
+    Keys {
+        label: String,
+        keys: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -67,6 +80,8 @@ pub enum PanelRow {
 struct RawPanel {
     title: String,
     rows: Vec<RawRow>,
+    #[serde(default)]
+    key_press: bool,
 }
 
 #[derive(Deserialize)]
@@ -99,6 +114,10 @@ enum RawRow {
     Button {
         label: String,
     },
+    Keys {
+        label: String,
+        keys: Vec<String>,
+    },
 }
 
 /// Words that show as they are: some, not too many, and no control characters.
@@ -114,7 +133,7 @@ pub(crate) fn read_panel(json: &str) -> Option<PluginPanel> {
         return None;
     }
     let rows = raw.rows.into_iter().map(read_row).collect::<Option<Vec<_>>>()?;
-    Some(PluginPanel { title: raw.title, rows })
+    Some(PluginPanel { title: raw.title, rows, key_press: raw.key_press })
 }
 
 fn read_row(raw: RawRow) -> Option<PanelRow> {
@@ -144,6 +163,15 @@ fn read_row(raw: RawRow) -> Option<PanelRow> {
             fits.then_some(PanelRow::Choice { label, options, chosen })?
         }
         RawRow::Button { label } => plain(&label, 40).then_some(PanelRow::Button { label })?,
+        RawRow::Keys { label, keys } => {
+            if !plain(&label, 40) || keys.len() > MOST_KEYS {
+                return None;
+            }
+            let presses = keys.iter().map(|k| crate::KeyCombo::read(k)).collect::<Option<Vec<_>>>()?;
+            let written: Vec<String> = presses.iter().map(|p| p.label(crate::keys::MAC)).collect();
+            let keys = if written.is_empty() { "None".to_owned() } else { written.join("  ") };
+            PanelRow::Keys { label, keys }
+        }
     })
 }
 
@@ -165,7 +193,7 @@ pub(crate) fn touched(panel: &PluginPanel, row: usize, value: f32) -> Option<f32
             let at = value.round();
             (at >= 0.0 && (at as usize) < options.len()).then_some(at)
         }
-        PanelRow::Button { .. } => Some(1.0),
+        PanelRow::Button { .. } | PanelRow::Keys { .. } => Some(1.0),
     }
 }
 
@@ -226,6 +254,29 @@ mod tests {
         assert!(one(r#"{ "type": "choice", "label": "C", "options": ["A"], "chosen": 1 }"#).is_none());
         assert!(read_panel(r#"{ "title": "", "rows": [{ "type": "button", "label": "Go" }] }"#).is_none());
         assert!(read_panel("not json").is_none());
+    }
+
+    #[test]
+    fn a_row_of_keys_is_written_for_the_platform_and_a_panel_may_ask_for_a_key() {
+        let json = r#"{ "title": "Undo", "key_press": true, "rows": [
+            { "type": "keys", "label": "Now", "keys": ["command+shift+z", "alt+["] },
+            { "type": "keys", "label": "None", "keys": [] }
+        ] }"#;
+        let panel = read_panel(json).unwrap();
+        assert!(panel.key_press);
+        let written = if crate::keys::MAC { "⇧⌘Z  ⌥[" } else { "Ctrl+Shift+Z  Alt+[" };
+        assert_eq!(panel.rows[0], PanelRow::Keys { label: "Now".into(), keys: written.into() });
+        assert_eq!(panel.rows[1], PanelRow::Keys { label: "None".into(), keys: "None".into() });
+        assert_eq!(touched(&panel, 0, 0.0), Some(1.0), "tapped as a button is");
+        // a panel asks for no key unless it says so; a press that isn't one doesn't hold up
+        assert!(!read_panel(HALFTONE).unwrap().key_press);
+        let one = |keys: &str| {
+            read_panel(&format!(r#"{{ "title": "T", "rows": [{{ "type": "keys", "label": "K", "keys": {keys} }}] }}"#))
+        };
+        assert!(one(r#"["command+z"]"#).is_some());
+        assert!(one(r#"["ctrl+z"]"#).is_none());
+        assert!(one(r#"["Z"]"#).is_none());
+        assert!(one(&format!("[{}]", [r#""a""#; 9].join(","))).is_none(), "nine presses");
     }
 
     #[test]

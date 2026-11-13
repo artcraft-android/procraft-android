@@ -314,6 +314,11 @@ pub(crate) fn link(linker: &mut Linker<Host>, granted: &[PluginPermission]) -> R
             let Some(len) = usize::try_from(len).ok().filter(|&n| n <= MOST_PANEL) else { return 0 };
             let read = read_bytes(&caller, at, len).and_then(|b| String::from_utf8(b).ok());
             let Some(panel) = read.as_deref().and_then(read_panel) else { return 0 };
+            // one that asks for a key press has somewhere for it to go
+            let takes = |name: &str| caller.get_export(name).and_then(Extern::into_func).is_some();
+            if panel.key_press && !(takes(crate::plugin_run::PANEL_KEY) && takes(crate::plugin_run::KEY_BUFFER)) {
+                return 0;
+            }
             let host = caller.data_mut();
             host.panel = Some(panel);
             host.close_panel = false;

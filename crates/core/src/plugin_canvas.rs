@@ -416,6 +416,17 @@ impl PluginCanvas {
         }
     }
 
+    /// What its plugin keeps changed (another copy of its code kept it): told, and what it draws
+    /// drawn again.
+    pub(crate) fn give_kept(&self, data: &[u8]) {
+        if self.stop().is_none() {
+            let told = self.running().give_kept(data);
+            self.kept(told);
+            *self.drawn.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            self.settle.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// The tool a stroke starts with, told to the plugin if it asks (see the module's notes).
     pub(crate) fn tool(&self, tool: u32, rgba: u32, size: f32, opacity: f32) {
         if self.stop().is_none() {
