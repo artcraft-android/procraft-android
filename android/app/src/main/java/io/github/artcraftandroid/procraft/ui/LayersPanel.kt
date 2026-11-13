@@ -885,8 +885,27 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
                 Image(it, contentDescription = null, contentScale = ContentScale.Fit, filterQuality = FilterQuality.None, modifier = Modifier.fillMaxSize())
             }
         }
+        // a plugin's layer, its strokes kept as strokes: a curve between two nodes in its corner
+        if (l.pluginKind != null) {
+            androidx.compose.foundation.Canvas(Modifier.align(Alignment.BottomEnd).padding(3.dp).size(18.dp, 14.dp)) {
+                val (w, h) = size.width to size.height
+                drawRoundRect(VectorBadge, cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()))
+                val curve = Path().apply {
+                    moveTo(w * 0.22f, h * 0.72f)
+                    cubicTo(w * 0.38f, h * 0.05f, w * 0.62f, h * 0.95f, w * 0.78f, h * 0.28f)
+                }
+                drawPath(curve, Color.White, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx()))
+                val node = 3.dp.toPx()
+                for ((x, y) in listOf(w * 0.22f to h * 0.72f, w * 0.78f to h * 0.28f)) {
+                    drawRect(Color.White, Offset(x - node / 2, y - node / 2), Size(node, node))
+                }
+            }
+        }
     }
 }
+
+/** The badge behind a plugin's layer's glyph on its thumbnail. */
+private val VectorBadge = Color(0x99000000)
 
 /** The transparency checkerboard behind thumbnails. */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.checker() {
