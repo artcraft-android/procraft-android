@@ -96,7 +96,7 @@ targets:
             UTTypeDescription: Brushes
             UTTypeConformsTo: [public.data, public.content]
             UTTypeTagSpecification:
-              public.filename-extension: [brush, brushset, abr, gbr, gih, vbr, kpp, sut]
+              public.filename-extension: [brush, brushset, brushlibrary, abr, gbr, gih, vbr, kpp, sut]
           - UTTypeIdentifier: io.github.artcraftandroid.procraft.palette
             UTTypeDescription: Palette
             UTTypeConformsTo: [public.data, public.content]

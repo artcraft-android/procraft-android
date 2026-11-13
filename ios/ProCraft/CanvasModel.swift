@@ -258,6 +258,18 @@ final class CanvasModel {
     @ObservationIgnored private var lastBrush: (set: UInt32, index: UInt32)?
     /// Brushes read from files, waiting to join the library.
     @ObservationIgnored private var brushesRead: [BrushesRead] = []
+    /// Every brush library, the one in use among them: for the libraries' cards and the title.
+    private(set) var brushLibraries: [BrushLibraryInfo] = []
+    /// The library panel shows every library's card rather than the one in use.
+    var showingLibraries = false
+    /// The library whose name is being edited (its place), if one is.
+    var renamingLibrary: Int?
+    /// Library cards' brush strokes, drawn small, by "library-set-index".
+    private(set) var cardPreviews: [String: UIImage] = [:]
+    @ObservationIgnored private var cardPreviewsAsked: Set<String> = []
+    /// Goes up as the libraries are read again: a card's stroke drawn for a place that has since
+    /// moved is dropped.
+    @ObservationIgnored private var cardPreviewsMade = 0
     /// The library couldn't be kept and that was told: not again until it is kept once more.
     @ObservationIgnored private var libraryFailing = false
     /// Writes of the library, one at a time: each takes the library as it is when it runs.
@@ -319,6 +331,7 @@ final class CanvasModel {
         _ = session.openBrushes(dir: Self.brushesDir)
         addPendingBrushes()
         brushSets = session.brushLibrary()
+        readLibraries()
         readSetChoices()
         let settings = AppSettings.shared
         session.setSelectionVisibility(visibility: settings.selectionVisibility)
@@ -504,6 +517,7 @@ final class CanvasModel {
     /// place).
     func libraryChanged() {
         brushSets = session.brushLibrary()
+        readLibraries()
         currentBrush = session.currentBrush()
         readSetChoices()
         if shownSet != Self.recentSet {
@@ -596,6 +610,122 @@ final class CanvasModel {
             shownSet = max(shownSet - 1, 0)
         }
         libraryChanged()
+    }
+
+    // the brush libraries
+
+    /// The library in use's name, and its place among them.
+    var libraryName: String {
+        brushLibraries.first { $0.current }?.name ?? "Brush library"
+    }
+
+    var libraryPlace: Int {
+        brushLibraries.firstIndex { $0.current } ?? 0
+    }
+
+    private func readLibraries() {
+        brushLibraries = session.brushLibraries()
+        // the cards' strokes go by place, which may have changed
+        cardPreviews = [:]
+        cardPreviewsAsked = []
+        cardPreviewsMade += 1
+    }
+
+    /// Draws brush `index` of set `set` of library `library` small for its card, once, off the
+    /// main thread.
+    func loadCardPreview(library: Int, set: UInt32, index: UInt32) {
+        let key = "\(library)-\(set)-\(index)"
+        guard cardPreviews[key] == nil, !cardPreviewsAsked.contains(key) else { return }
+        cardPreviewsAsked.insert(key)
+        let session = session
+        let made = cardPreviewsMade
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let t = session.brushLibraryPreview(library: UInt32(library), set: set, index: index, width: 212, height: 65)
+            let image = t.flatMap { Self.image($0) }
+            DispatchQueue.main.async {
+                guard let self, let image, self.cardPreviewsMade == made else { return }
+                self.cardPreviews[key] = image
+            }
+        }
+    }
+
+    /// Runs `work` on the libraries off the main thread (it reads and writes their files, one write
+    /// at a time with the library's own), then reads them again; `changed`: the library in use may
+    /// be another, so everything shown of it is read again. Tells `failure` if it didn't work.
+    private func libraryWork(changed: Bool, failure: String, _ work: @escaping (CanvasSession) -> Bool) {
+        let session = session
+        Self.libraryWrites.async { [weak self] in
+            let ok = work(session)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !ok {
+                    self.showNotice(failure, warning: true)
+                }
+                if ok, changed {
+                    self.libraryChanged()
+                    let set = self.currentBrush.map { Int($0.set) } ?? 0
+                    self.shownSet = min(max(set, 0), max(self.brushSets.count - 1, 0))
+                }
+                self.readLibraries()
+            }
+        }
+    }
+
+    /// Brings library `i` into use and shows it.
+    func openLibrary(_ i: Int) {
+        showingLibraries = false
+        guard brushLibraries.indices.contains(i), !brushLibraries[i].current else { return }
+        libraryWork(changed: true, failure: "This library can't be opened.") { $0.openBrushLibrary(index: UInt32(i)) }
+    }
+
+    func renameLibrary(_ i: Int, name: String) {
+        renamingLibrary = nil
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, brushLibraries.indices.contains(i), brushLibraries[i].name != trimmed else { return }
+        libraryWork(changed: false, failure: "The library couldn't be renamed.") { $0.renameBrushLibrary(index: UInt32(i), name: name) }
+    }
+
+    func newLibrary() {
+        libraryWork(changed: false, failure: "A new library couldn't be made.") { $0.newBrushLibrary() != nil }
+    }
+
+    func duplicateLibrary(_ i: Int) {
+        libraryWork(changed: false, failure: "The library couldn't be copied.") { $0.duplicateBrushLibrary(index: UInt32(i)) != nil }
+    }
+
+    func deleteLibrary(_ i: Int) {
+        let current = brushLibraries.indices.contains(i) && brushLibraries[i].current
+        libraryWork(changed: current, failure: "The library couldn't be deleted.") { $0.deleteBrushLibrary(index: UInt32(i)) }
+    }
+
+    /// The library as it ships, back beside the others.
+    func restoreLibraries() {
+        libraryWork(changed: false, failure: "The library couldn't be put back.") { $0.restoreStockBrushLibrary() != nil }
+    }
+
+    /// The library in use written to a library file and handed to the share sheet; told if it
+    /// couldn't be (it has no brushes, say).
+    func shareLibrary() {
+        let session = session
+        let name = libraryName
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var made: URL?
+            if let bytes = session.brushLibraryAsFile() {
+                let file = Sharing.exportsDir
+                    .appendingPathComponent(Sharing.safeName(name, otherwise: "Brushes"))
+                    .appendingPathExtension("brushlibrary")
+                if (try? bytes.write(to: file, options: .atomic)) != nil {
+                    made = file
+                }
+            }
+            DispatchQueue.main.async {
+                if let made {
+                    Sharing.share([made])
+                } else {
+                    self?.showNotice("This library couldn't be shared.", warning: true)
+                }
+            }
+        }
     }
 
     /// Pins a brush of the Recent set there, or unpins it.
@@ -735,14 +865,23 @@ final class CanvasModel {
         if shownSet == Self.recentSet {
             shownSet = currentBrush.map { Int($0.set) } ?? 0
         }
+        var joined = false
         for read in brushesRead {
+            // a library of its own is brought into use off the main thread (its files written)
+            if read.isLibrary() {
+                libraryWork(changed: true, failure: "This library couldn't be added.") { $0.addBrushesRead(read: read, shown: 0) != nil }
+                continue
+            }
+            joined = true
             if let set = session.addBrushesRead(read: read, shown: UInt32(shownSet)) {
                 shownSet = Int(set)
             }
         }
         brushesRead = []
         libraryChanged()
-        showNotice("Brushes added to the library.")
+        if joined {
+            showNotice("Brushes added to the library.")
+        }
     }
 
     /// Draws `b`'s sample stroke off the main thread (half its own canvas: the cell shows it across
