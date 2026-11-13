@@ -1045,6 +1045,73 @@ pub(crate) mod tests {
         KeyCombo::read(text).unwrap()
     }
 
+    /// The keys of the row that does `does` in `list`.
+    fn keys_of(list: &[crate::ShortcutGroup], does: &str) -> Option<String> {
+        list.iter().flat_map(|g| &g.rows).find(|r| r.does == does).map(|r| r.keys.clone())
+    }
+
+    /// `press` written for the platform the tests run on.
+    fn written(press: &str) -> String {
+        combo(press).label(crate::keys::MAC)
+    }
+
+    #[test]
+    fn the_keyboard_plugin_binds_a_key_anew_from_its_panel_and_keeps_it() {
+        use crate::{KeyShortcut, PanelRow};
+        let Some(s) = session() else { return };
+        let dir = store("keyboard");
+        let id = "io.github.artcraftandroid.keyboard-shortcuts";
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "keyboard-shortcuts").unwrap();
+        assert_eq!(plugins.install(file.to_vec()), None);
+        // imported, off: every key as it came
+        assert_eq!(plugins.key_press(combo("command+y")), Some(combo("command+y")));
+        assert!(plugins.set_on(id.to_owned(), true));
+        assert_eq!(plugins.key_press(combo("command+z")), Some(combo("command+z")));
+        assert_eq!(plugins.key_shortcut_list(true, false), crate::key_shortcut_list(true, false));
+        // its action shows the list, a group a page
+        let card = plugins.plugins().into_iter().find(|p| p.id == id).unwrap();
+        assert!(plugins.run_action(card.actions[0].key.clone(), Arc::clone(&s)));
+        let panel = plugins.panel().expect("shown");
+        assert_eq!(panel.title, "Keyboard shortcuts");
+        assert!(!panel.key_press);
+        assert!(matches!(&panel.rows[0], PanelRow::Choice { options, chosen: 0, .. } if options[0] == "Edit"));
+        let undo =
+            panel.rows.iter().position(|r| matches!(r, PanelRow::Keys { label, .. } if label == "Undo")).unwrap();
+        assert_eq!(panel.rows[undo], PanelRow::Keys { label: "Undo".into(), keys: written("command+z") });
+        // a key press goes to no panel that doesn't ask for one
+        assert!(!plugins.panel_key(combo("command+y"), Arc::clone(&s)));
+        // Undo tapped asks for its new keys, and takes the next press
+        assert!(plugins.panel_touched(undo as u32, 1.0, Arc::clone(&s)));
+        let asking = plugins.panel().unwrap();
+        assert_eq!(asking.title, "Undo");
+        assert!(asking.key_press);
+        assert!(plugins.panel_key(combo("command+y"), Arc::clone(&s)));
+        let panel = plugins.panel().unwrap();
+        assert!(!panel.key_press);
+        assert_eq!(panel.rows[undo], PanelRow::Keys { label: "Undo".into(), keys: written("command+y") });
+        // on the canvas Ctrl+Y undoes, and Ctrl+Z does nothing; Redo is as it came
+        assert_eq!(plugins.key_press(combo("command+y")), Some(combo("command+z")));
+        assert_eq!(plugins.key_press(combo("command+z")), None);
+        assert_eq!(plugins.key_shortcut("Y".into(), true, false, false, false), Some(KeyShortcut::Undo));
+        assert_eq!(plugins.key_shortcut("z".into(), true, false, false, false), None);
+        assert_eq!(plugins.key_shortcut("z".into(), true, true, false, false), Some(KeyShortcut::Redo));
+        // and so the list says
+        let list = plugins.key_shortcut_list(true, false);
+        assert_eq!(keys_of(&list, "Undo").as_deref(), Some("Ctrl+Y"));
+        assert_eq!(keys_of(&list, "Redo").as_deref(), Some("Ctrl+Shift+Z"));
+        // kept: the next start has it
+        let next = restarted(&dir, &plugins);
+        assert_eq!(next.key_press(combo("command+y")), Some(combo("command+z")));
+        // off, every key is as it came; on again, as it was bound
+        assert!(plugins.set_on(id.to_owned(), false));
+        assert_eq!(plugins.key_press(combo("command+z")), Some(combo("command+z")));
+        assert_eq!(plugins.key_shortcut_list(true, false), crate::key_shortcut_list(true, false));
+        assert!(plugins.set_on(id.to_owned(), true));
+        assert_eq!(plugins.key_press(combo("command+z")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// On the key hook: Q is taken as Ctrl+Z, N as nothing, X as something that is no press, and
     /// anything else as it is.
     const REBINDS: &str = r#"(module
