@@ -68,6 +68,28 @@ fn keeps_textures_uncompressed(name: &str, backend: wgpu::Backend) -> bool {
     backend == wgpu::Backend::Vulkan && name.to_ascii_lowercase().contains("mali")
 }
 
+/// Whether a GPU named `name` draws wrong on Vulkan where it draws right on OpenGL ES: Samsung's
+/// Xclipse, whose Vulkan driver draws an open stroke's soft edges and lowered opacity solid, black
+/// where the colour is faint (#153); its OpenGL ES (ANGLE, over the same driver) draws them as
+/// every other GPU does.
+fn draws_wrong_on_vulkan(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("xclipse")
+}
+
+/// Whether OpenGL ES goes before Vulkan on Android: for a GPU that draws wrong on Vulkan (see
+/// [`draws_wrong_on_vulkan`]), asked of Vulkan once (which lists the GPUs, making no device).
+fn opengl_first() -> bool {
+    static FIRST: OnceLock<bool> = OnceLock::new();
+    *FIRST.get_or_init(|| {
+        let seen = std::panic::catch_unwind(|| Gpu::adapters(wgpu::Backends::VULKAN)).unwrap_or_default();
+        let wrong = seen.iter().find(|a| draws_wrong_on_vulkan(&a.name));
+        if let Some(gpu) = wrong {
+            log::info!("{} draws strokes wrong on Vulkan: OpenGL ES first", gpu.name);
+        }
+        wrong.is_some()
+    })
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {
     #[error("no suitable GPU: {0}")]
@@ -140,7 +162,8 @@ impl Gpu {
 
     /// The backends a device is made from, best first: those `WGPU_BACKEND` names if it is set
     /// (to try another when a driver fails); on Android Vulkan, then OpenGL ES (for a device
-    /// whose Vulkan is missing or fails); on Windows Vulkan and Direct3D 12, Direct3D 12 first on
+    /// whose Vulkan is missing or fails), the other way round for a GPU that draws wrong on Vulkan
+    /// (see [`draws_wrong_on_vulkan`]); on Windows Vulkan and Direct3D 12, Direct3D 12 first on
     /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens), then OpenGL (a GPU or
     /// driver too old for either); on Linux Vulkan, then OpenGL (the same); elsewhere the native
     /// API. A backend's index here is the one the other calls take.
@@ -149,7 +172,11 @@ impl Gpu {
             return vec![chosen];
         }
         if cfg!(target_os = "android") {
-            vec![wgpu::Backends::VULKAN, wgpu::Backends::GL]
+            if opengl_first() {
+                vec![wgpu::Backends::GL, wgpu::Backends::VULKAN]
+            } else {
+                vec![wgpu::Backends::VULKAN, wgpu::Backends::GL]
+            }
         } else if cfg!(all(windows, target_arch = "aarch64")) {
             vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN, wgpu::Backends::GL]
         } else if cfg!(windows) {
@@ -490,12 +517,24 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     /// A GPU or driver too old for the rest still draws: without OpenGL behind them the app can't
-    /// open at all.
+    /// open at all. (First, on Android, for a GPU that draws wrong on Vulkan.)
     #[test]
     #[cfg(any(target_os = "linux", windows, target_os = "android"))]
     fn opengl_is_the_last_backend_tried() {
         if std::env::var_os("WGPU_BACKEND").is_none() {
-            assert_eq!(super::Gpu::backends().last(), Some(&wgpu::Backends::GL));
+            let backends = super::Gpu::backends();
+            let first = cfg!(target_os = "android") && super::opengl_first();
+            assert_eq!(if first { backends.first() } else { backends.last() }, Some(&wgpu::Backends::GL));
+        }
+    }
+
+    #[test]
+    fn samsung_xclipse_gpus_draw_on_opengl_first() {
+        for name in ["Samsung Xclipse 950", "Samsung Xclipse 540", "ANGLE (Samsung Xclipse 940)"] {
+            assert!(super::draws_wrong_on_vulkan(name), "{name}");
+        }
+        for name in ["Adreno (TM) 750", "Mali-G715", "NVIDIA GeForce RTX 4070", "PowerVR B-Series"] {
+            assert!(!super::draws_wrong_on_vulkan(name), "{name}");
         }
     }
 

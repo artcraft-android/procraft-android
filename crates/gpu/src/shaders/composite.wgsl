@@ -186,6 +186,12 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
     if (lu.stroke_mode != 0u) {
         let px = stroke_pixel(p);
         let s = px.s;
+        // where the stroke left nothing (no paint, no burnt edge) the layer is as it was: and
+        // Samsung's Xclipse compiler, given the blend below for those pixels, made them opaque
+        // black while a stroke was drawn (the boxes of #153)
+        if (s.a <= 0.0 && px.burn <= 0.0) {
+            return c0;
+        }
         if (lu.stroke_mode == 2u) {
             c = c * (1.0 - s.a);
         } else {
