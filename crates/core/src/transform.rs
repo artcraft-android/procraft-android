@@ -221,19 +221,23 @@ impl State {
     /// laid again exactly.
     pub(crate) fn end_transform(&mut self, commit: bool) {
         self.snap_pending = None;
-        if let Some((layer, ids)) = self.transform_items.take()
+        if let Some((layer, ids, laid)) = self.transform_items.take()
             && let Some(t) = self.transform.take()
         {
             let moved = corners_affine(t.source(), t.content()).filter(|_| commit);
             if let Some(canvas) = self.canvas.as_mut() {
                 canvas.end_transform(false);
             }
+            // its pixels back as they were: as its items were laid, if they were then
+            self.flush();
+            if laid {
+                self.trust_laid(layer);
+            }
             if let Some(moved) = moved {
                 let name = match self.transform_mode {
                     procraft_engine::transform::TransformMode::Uniform => "uniform transform",
                     _ => "non-uniform transform",
                 };
-                self.flush();
                 self.move_taken_items(layer, Some(&ids), moved, name);
             }
             return;
@@ -393,9 +397,9 @@ impl CanvasSession {
             if ids.is_empty() {
                 return None;
             }
-            st.transform_items = Some((current, ids));
+            st.transform_items = Some((current, ids, false));
         }
-        let movable = |l: &Layer| movable(l) || st.transform_items.as_ref().is_some_and(|(id, _)| *id == l.id);
+        let movable = |l: &Layer| movable(l) || st.transform_items.as_ref().is_some_and(|(id, ..)| *id == l.id);
         let targets: Vec<LayerId> = if chosen.len() > 1 {
             st.doc
                 .layers()
@@ -412,6 +416,12 @@ impl CanvasSession {
             return None;
         }
         st.flush();
+        if let Some((layer, ..)) = st.transform_items {
+            let laid = st.laid_current(layer);
+            if let Some(items) = st.transform_items.as_mut() {
+                items.2 = laid;
+            }
+        }
         let (width, height) = (st.doc.width(), st.doc.height());
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
         // only where they are painted (and the selection takes) is read back; all of them where

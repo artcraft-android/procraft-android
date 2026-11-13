@@ -463,6 +463,11 @@ pub(crate) struct State {
     pub(crate) recording: Option<plugin_layers::Recording>,
     /// The changes strokes made to plugins' layers' data, by the step each made, for undo and redo.
     pub(crate) layer_steps: Vec<plugin_layers::LayerStep>,
+    /// Plugins' layers as their items were last laid: where each item reached, so an edit lays
+    /// again only what it changes.
+    pub(crate) laid: std::collections::HashMap<procraft_engine::document::LayerId, plugin_layers::Laid>,
+    /// How many times plugins' layers were laid again whole, and how many times only in part.
+    pub(crate) lays: [u64; 2],
     /// Plugins' layers whose data couldn't be read (or their plugin couldn't take it): they take no
     /// strokes, and their data files are left as they are.
     pub(crate) layer_data_unread: std::collections::HashSet<procraft_engine::document::LayerId>,
@@ -597,8 +602,9 @@ pub(crate) struct State {
     /// The open transform, how its handles act and how it resamples.
     transform: Option<procraft_engine::transform::Transform>,
     /// A plugin's layer being transformed: the layer and the ids of the items moving, which are
-    /// moved as items as it ends.
-    transform_items: Option<(procraft_engine::document::LayerId, Vec<u32>)>,
+    /// moved as items as it ends; and whether its pixels were as its items were last laid as it
+    /// began (the transform puts them back so before they move).
+    transform_items: Option<(procraft_engine::document::LayerId, Vec<u32>, bool)>,
     transform_mode: procraft_engine::transform::TransformMode,
     interpolation: transform::Interpolation,
     transform_guides: transform::GuideSettings,
@@ -1435,6 +1441,8 @@ impl CanvasSession {
             text_steps: Vec::new(),
             recording: None,
             layer_steps: Vec::new(),
+            laid: std::collections::HashMap::new(),
+            lays: [0; 2],
             layer_data_unread: std::collections::HashSet::new(),
             pour: None,
             reveal: None,

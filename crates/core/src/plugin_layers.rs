@@ -27,18 +27,23 @@
 //! ([`field::TRANSFORM`]) moves its samples where it is laid, its brush scaled with it; a stroke drawn
 //! inside a selection keeps the selection ([`field::CLIP`]) and is laid within it again.
 //!
+//! Each layer's items are known where they reached as they were last laid ([`Laid`]): an edit then
+//! lays again only where what it changed reaches, each item there laid within it, rather than the
+//! whole layer.
+//!
 //! The brush an item names is kept in it as the brush library keeps a brush: the brush it came from
 //! among those the app comes with, and every setting changed from there as it was when the stroke
 //! was drawn, its own pictures in it (without its preview, maker, notches and reset point). So the
 //! item draws the same whatever happens to the brush later, edited or deleted. Its name goes with
 //! it, for finding it again by.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use procraft_engine::brush::Brush;
 use procraft_engine::curve::Curve;
 use procraft_engine::document::LayerId;
-use procraft_engine::geom::{Affine, Vec2};
+use procraft_engine::geom::{Affine, IRect, Vec2};
 use procraft_engine::guide::{Guide, GuideKind, SymmetryKind};
 use procraft_engine::input::Sample;
 use procraft_engine::selection::Mask;
@@ -62,6 +67,8 @@ const MOST_TAKEN: usize = 1 << 20;
 const SECOND_SEED: u32 = 0x5eed_0002;
 /// The bit of a batch's count saying the pen lifted after it.
 const LIFTED: u32 = 1 << 31;
+/// The most of a layer laid again in part, as a share of it: more is laid again whole.
+const MOST_IN_PART: f64 = 0.6;
 
 /// The ids of an item's fields.
 pub(crate) mod field {
@@ -324,6 +331,11 @@ fn pointer_number(pointer: PointerKind) -> u8 {
 impl Item {
     /// It as a record, its brush in it.
     pub(crate) fn record(&self) -> Vec<u8> {
+        self.written(true)
+    }
+
+    /// It as a record, its brush in it or not.
+    fn written(&self, brush: bool) -> Vec<u8> {
         let mut r = Record::default();
         r.field(field::TOOL, &[tool_number(self.tool)]);
         let mut samples = Vec::with_capacity(self.samples.len() * 32);
@@ -339,7 +351,9 @@ impl Item {
         r.floats(field::SIZE, &[self.size]);
         r.floats(field::OPACITY, &[self.opacity]);
         r.floats(field::WIDTH, &[self.width]);
-        r.field(field::BRUSH, &self.brush);
+        if brush {
+            r.field(field::BRUSH, &self.brush);
+        }
         r.floats(field::SIZES, &self.sizes);
         r.field(field::BRUSH_NAME, self.brush_name.as_bytes());
         r.field(field::SEED, &self.seed.to_le_bytes());
@@ -487,6 +501,99 @@ impl Item {
             ToolKind::Paint => "Paint stroke",
         }
     }
+}
+
+/// What each of `items` is, as far as laying it goes: two items laid alike have the same, items laid
+/// differently not (their ids aside).
+pub(crate) fn item_keys(items: &[Item]) -> Vec<u64> {
+    // each brush once (the items read together share them)
+    let mut brushes: Vec<(*const Vec<u8>, u64)> = Vec::new();
+    items
+        .iter()
+        .map(|item| {
+            let at = Arc::as_ptr(&item.brush);
+            let brush = match brushes.iter().find(|(p, _)| *p == at) {
+                Some(&(_, h)) => h,
+                None => {
+                    let mut h = DefaultHasher::new();
+                    item.brush.hash(&mut h);
+                    let h = h.finish();
+                    brushes.push((at, h));
+                    h
+                }
+            };
+            let mut h = DefaultHasher::new();
+            brush.hash(&mut h);
+            item.written(false).hash(&mut h);
+            h.finish()
+        })
+        .collect()
+}
+
+/// Where an item laid on a plugin's layer reached.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaidItem {
+    /// What it is (see [`item_keys`]).
+    key: u64,
+    /// The pixels its stamps reach.
+    bounds: IRect,
+    /// It changed the layer as it went (smudging, painting wet): what was under it counts.
+    in_place: bool,
+}
+
+/// A plugin's layer's pixels as its items were last laid: each item where it reached, in order,
+/// and the layer's pixels' version then on the canvas then.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Laid {
+    canvas: u64,
+    version: u64,
+    items: Arc<Vec<LaidItem>>,
+}
+
+/// What laying a layer's items again in part takes: the parts (apart from each other) to lay
+/// again, and each item where it reaches and whether it is laid in place (those changed found
+/// by measuring them).
+struct InPart {
+    parts: Vec<IRect>,
+    items: Vec<LaidItem>,
+    measured: Vec<bool>,
+}
+
+/// Which of `new` (keys) are new or changed since `old`, and where those of `old` that went (or
+/// changed) reached; none if any is there twice, or those kept come in another order.
+fn changed_items(old: &[LaidItem], new: &[u64]) -> Option<(Vec<bool>, Vec<IRect>)> {
+    let mut olds = std::collections::HashSet::with_capacity(old.len());
+    if !old.iter().all(|item| olds.insert(item.key)) {
+        return None;
+    }
+    let mut news = std::collections::HashSet::with_capacity(new.len());
+    if !new.iter().all(|key| news.insert(*key)) {
+        return None;
+    }
+    let kept_old = old.iter().map(|i| i.key).filter(|k| news.contains(k));
+    if !kept_old.eq(new.iter().copied().filter(|k| olds.contains(k))) {
+        return None;
+    }
+    let added = new.iter().map(|k| !olds.contains(k)).collect();
+    let gone = old.iter().filter(|o| !news.contains(&o.key)).map(|o| o.bounds).collect();
+    Some((added, gone))
+}
+
+/// `rects` joined where they overlap, until none of them do.
+fn apart(rects: Vec<IRect>) -> Vec<IRect> {
+    let mut out: Vec<IRect> = Vec::new();
+    for rect in rects.into_iter().filter(|r| !r.is_empty()) {
+        let mut rect = rect;
+        while let Some(at) = out.iter().position(|o| !o.intersect(rect).is_empty()) {
+            rect = rect.union(out.swap_remove(at));
+        }
+        out.push(rect);
+    }
+    out
+}
+
+fn area(r: IRect) -> f64 {
+    f64::from(r.width()) * f64::from(r.height())
 }
 
 /// An affine's six numbers, as an item's transform keeps them.
@@ -671,6 +778,8 @@ pub(crate) struct Recording {
     item: Item,
     /// When its first sample came (milliseconds on the input's clock).
     started: Option<f64>,
+    /// The layer's pixels were as its items were last laid as it began.
+    laid: bool,
 }
 
 impl Recording {
@@ -701,7 +810,12 @@ pub(crate) struct LayerStep {
     layer: LayerId,
     before: Option<Arc<Vec<u8>>>,
     after: Option<Arc<Vec<u8>>>,
+    /// Where its items were laid before the step and after it, when known.
+    laid: Option<LaidPair>,
 }
+
+/// Where a layer's items were laid before a step and after it.
+type LaidPair = (Arc<Vec<LaidItem>>, Arc<Vec<LaidItem>>);
 
 impl State {
     /// The kind of plugin layer `layer` is (`<id>.<key>`), if it is one.
@@ -763,7 +877,8 @@ impl State {
             // drawn within the selection: laid within it again
             clip: self.selection.as_ref().and_then(Clip::of).map(Arc::new),
         };
-        let mut recording = Recording { layer, kind, item, started: None };
+        let laid = self.laid_current(layer);
+        let mut recording = Recording { layer, kind, item, started: None, laid };
         recording.add(samples);
         self.recording = Some(recording);
     }
@@ -773,7 +888,9 @@ impl State {
     /// layer drawn again from its items if the plugin says to; not laid at all if it can't keep it.
     /// The layer's data from then on goes with the step made.
     pub(crate) fn end_recorded(&mut self, recording: Recording, builder: StrokeBuilder, second: Option<StrokeBuilder>) {
-        let Recording { layer, kind, item, .. } = recording;
+        let Recording { layer, kind, item, laid, .. } = recording;
+        // (the stroke shown as it went changed the layer's pixels' version, not what they hold)
+        let laid_before = self.laid.get(&layer).filter(|_| laid).map(|l| Arc::clone(&l.items));
         let guide = self.doc.stroke_guide().into_owned();
         let before = self.doc.layer(layer).and_then(|l| l.plugin.as_ref()).and_then(|p| p.data.clone());
         let record = item.record();
@@ -796,10 +913,23 @@ impl State {
         let after = match answer {
             Some(Some((after, None))) => {
                 crate::close_stroke(canvas, builder, second, &guide);
+                self.flush();
+                // laid where it is laid now, after the rest
+                let ended = self.canvas.as_ref().and_then(procraft_gpu::Canvas::last_stroke);
+                if let (Some(mut items), Some((bounds, in_place))) = (laid_before.clone(), ended) {
+                    let key = Item::read(&record, &[]).and_then(|i| item_keys(&[i]).first().copied()).unwrap_or(0);
+                    Arc::make_mut(&mut items).push(LaidItem { key, bounds, in_place });
+                    self.set_laid(layer, items);
+                }
                 after
             }
             Some(Some((after, Some(list)))) => {
                 canvas.cancel_stroke();
+                // as it was before the stroke: as its items were laid, if it was then
+                self.flush();
+                if laid {
+                    self.trust_laid(layer);
+                }
                 // nothing changed (or a layer with nothing yet still has nothing): the layer stays
                 // as it was, and no step is made
                 let items = read_drawn(&list);
@@ -825,18 +955,65 @@ impl State {
         let after = Some(Arc::new(after));
         self.doc.set_plugin_data(layer, after.clone());
         if let Some(made) = made {
-            self.note_layer_step(made, layer, before, after);
+            let laid = laid_before.zip(self.laid_items(layer));
+            self.note_layer_step(made, layer, before, after, laid);
         }
         self.revision += 1;
     }
 
-    /// Clears `layer` and lays `items` on it again in order, through the brush engine in canvas
-    /// pixels (masks as the eraser), as one step called `name`, made now.
+    /// Where `layer`'s items reached as they were last laid, if its pixels are still as they laid
+    /// them (nothing queued changes them either).
+    pub(crate) fn laid_current(&self, layer: LayerId) -> bool {
+        self.laid_items(layer).is_some() && self.canvas.as_ref().is_some_and(|canvas| !canvas.writes_queued(layer))
+    }
+
+    /// Where `layer`'s items reached as they were last laid, if its pixels are as they laid them as
+    /// of the last render.
+    fn laid_items(&self, layer: LayerId) -> Option<Arc<Vec<LaidItem>>> {
+        let canvas = self.canvas.as_ref()?;
+        let laid = self.laid.get(&layer)?;
+        (laid.canvas == canvas.id() && laid.version == canvas.layer_version(layer)).then(|| Arc::clone(&laid.items))
+    }
+
+    /// `layer`'s pixels, as of the last render, are as they were when [`State::laid_current`] said
+    /// they were as its items laid them (they were changed and put back since: a stroke taken back,
+    /// a transform that moves items).
+    pub(crate) fn trust_laid(&mut self, layer: LayerId) {
+        if let (Some(canvas), Some(laid)) = (self.canvas.as_ref(), self.laid.get_mut(&layer))
+            && laid.canvas == canvas.id()
+        {
+            laid.version = canvas.layer_version(layer);
+        }
+    }
+
+    /// `layer`'s pixels, as of the last render, are as `items` laid them.
+    fn set_laid(&mut self, layer: LayerId, items: Arc<Vec<LaidItem>>) {
+        match self.canvas.as_ref() {
+            Some(canvas) => {
+                let laid = Laid { canvas: canvas.id(), version: canvas.layer_version(layer), items };
+                self.laid.insert(layer, laid);
+            }
+            None => {
+                self.laid.remove(&layer);
+            }
+        }
+    }
+
+    /// Lays `items` on `layer` again in order, through the brush engine in canvas pixels (masks as
+    /// the eraser), as one step called `name`, made now: where its pixels are as its items were last
+    /// laid, only where what changed reaches (cleared there first, each item there laid within it);
+    /// else the whole layer, cleared first.
     fn lay_items_again(&mut self, layer: LayerId, items: &[Item], name: &str) {
         // what was queued before is made first; the selection is set aside meanwhile, so it
         // leaves out nothing of what was drawn
         self.flush();
-        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return };
+        let keys = item_keys(items);
+        let mut brushes: Vec<(Arc<Vec<u8>>, Brush)> = Vec::new();
+        let in_part = self.in_part(layer, items, &keys, &mut brushes);
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else {
+            self.laid.remove(&layer);
+            return;
+        };
         let selection = canvas.selection().map(<[u8]>::to_vec);
         if selection.is_some() {
             canvas.set_selection(gpu, None);
@@ -844,28 +1021,25 @@ impl State {
         // one step, holding one copy of the layer as it was (none for each item)
         canvas.name_next_step(name);
         canvas.hold_layer_quietly(layer);
-        canvas.clear_layer(layer);
-        // each brush made again once
-        let mut brushes: Vec<(Arc<Vec<u8>>, Brush)> = Vec::new();
-        let (width, height) = (self.doc.width(), self.doc.height());
-        for item in items {
-            // one drawn within a selection laid within it (as the selection is read when the
-            // stroke is drawn, it is laid then)
-            let clip = item.clip.as_ref().map(|c| c.mask(width, height, item.transform));
-            if let Some(clip) = &clip {
-                self.flush();
-                if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
-                    canvas.set_selection(gpu, Some(&clip.data));
-                }
+        let laid = in_part.and_then(|in_part| self.lay_in_part(layer, items, in_part, &mut brushes));
+        let laid = match laid {
+            Some(laid) => {
+                self.lays[1] += 1;
+                laid
             }
-            self.lay_item(layer, item, &mut brushes);
-            if clip.is_some() {
-                self.flush();
-                if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
-                    canvas.set_selection(gpu, None);
+            None => {
+                self.lays[0] += 1;
+                if let Some(canvas) = self.canvas.as_mut() {
+                    canvas.clear_layer(layer);
                 }
+                let mut laid = Vec::with_capacity(items.len());
+                for (item, key) in items.iter().zip(&keys) {
+                    let (bounds, in_place) = self.lay_clipped(layer, item, &mut brushes);
+                    laid.push(LaidItem { key: *key, bounds, in_place });
+                }
+                laid
             }
-        }
+        };
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.release_layer(true, None);
         }
@@ -873,11 +1047,127 @@ impl State {
         if let (Some(canvas), Some(gpu), Some(selection)) = (self.canvas.as_mut(), self.gpu.as_ref(), selection) {
             canvas.set_selection(gpu, Some(&selection));
         }
+        self.set_laid(layer, Arc::new(laid));
+    }
+
+    /// What laying `items` (their keys `keys`) on `layer` again in part takes, if its pixels are as
+    /// its items were last laid and what changed reaches little enough of it: the items new or
+    /// changed measured (not drawn). None to lay it all again.
+    fn in_part(
+        &mut self,
+        layer: LayerId,
+        items: &[Item],
+        keys: &[u64],
+        brushes: &mut Vec<(Arc<Vec<u8>>, Brush)>,
+    ) -> Option<InPart> {
+        let old = self.laid_items(layer)?;
+        let (added, gone) = changed_items(&old, keys)?;
+        let full = IRect::from_size(self.doc.width(), self.doc.height());
+        let whole = area(full);
+        // most of them changed, or what went reaches much of it: not worth measuring the rest
+        let gone_area: f64 = apart(gone.iter().map(|r| r.intersect(full)).collect()).into_iter().map(area).sum();
+        if added.iter().filter(|a| **a).count() * 2 > items.len().max(1) || gone_area > whole * MOST_IN_PART {
+            return None;
+        }
+        // where those kept reach, and where those new or changed would
+        let by_key: std::collections::HashMap<u64, LaidItem> = old.iter().map(|o| (o.key, *o)).collect();
+        self.canvas.as_mut()?.measure(true);
+        let mut laid = Some(Vec::with_capacity(items.len()));
+        for ((item, &key), &new) in items.iter().zip(keys).zip(&added) {
+            let one = if new {
+                let (bounds, in_place) = self.lay_item(layer, item, brushes);
+                Some(LaidItem { key, bounds, in_place })
+            } else {
+                by_key.get(&key).copied()
+            };
+            match (one, laid.as_mut()) {
+                (Some(one), Some(laid)) => laid.push(one),
+                _ => {
+                    laid = None;
+                    break;
+                }
+            }
+        }
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.measure(false);
+        }
+        let laid = laid?;
+        let changed = laid.iter().zip(&added).filter(|(_, new)| **new).map(|(l, _)| l.bounds);
+        let parts = apart(gone.into_iter().chain(changed).map(|r| r.intersect(full)).collect());
+        if parts.iter().map(|r| area(*r)).sum::<f64>() > whole * MOST_IN_PART {
+            return None;
+        }
+        // one laid in place there takes what is under it as it was: all laid again
+        let touched = |item: &LaidItem| parts.iter().any(|p| !p.intersect(item.bounds).is_empty());
+        if laid.iter().any(|item| item.in_place && touched(item)) {
+            return None;
+        }
+        Some(InPart { parts, items: laid, measured: added })
+    }
+
+    /// Lays `items` again on `layer` as `in_part` says: each part cleared, then the items reaching
+    /// it laid within it in order. Where each item reached; none if one new or changed reached
+    /// beyond where it was measured to (the layer is then laid again whole).
+    fn lay_in_part(
+        &mut self,
+        layer: LayerId,
+        items: &[Item],
+        in_part: InPart,
+        brushes: &mut Vec<(Arc<Vec<u8>>, Brush)>,
+    ) -> Option<Vec<LaidItem>> {
+        let InPart { parts, items: laid, measured } = in_part;
+        let mut fits = true;
+        'parts: for part in &parts {
+            let (Ok(x), Ok(y)) = (u32::try_from(part.x0), u32::try_from(part.y0)) else { continue };
+            let (w, h) = (part.width(), part.height());
+            let canvas = self.canvas.as_mut()?;
+            canvas.put_layer_region(layer, x, y, w, h, vec![0; w as usize * h as usize * 4]);
+            canvas.lay_within(Some(*part));
+            for (item, (one, &new)) in items.iter().zip(laid.iter().zip(&measured)) {
+                if part.intersect(one.bounds).is_empty() {
+                    continue;
+                }
+                let (bounds, _) = self.lay_clipped(layer, item, brushes);
+                if new && bounds.union(one.bounds) != one.bounds {
+                    fits = false;
+                    break 'parts;
+                }
+            }
+            if let Some(canvas) = self.canvas.as_mut() {
+                canvas.lay_within(None);
+            }
+        }
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.lay_within(None);
+        }
+        fits.then_some(laid)
+    }
+
+    /// Lays `item` on `layer` as [`State::lay_item`] does, within the selection it was drawn in
+    /// (as the selection is read when the stroke is drawn, it is laid then).
+    fn lay_clipped(&mut self, layer: LayerId, item: &Item, brushes: &mut Vec<(Arc<Vec<u8>>, Brush)>) -> (IRect, bool) {
+        let (width, height) = (self.doc.width(), self.doc.height());
+        let clip = item.clip.as_ref().map(|c| c.mask(width, height, item.transform));
+        if let Some(clip) = &clip {
+            self.flush();
+            if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+                canvas.set_selection(gpu, Some(&clip.data));
+            }
+        }
+        let laid = self.lay_item(layer, item, brushes);
+        if clip.is_some() {
+            self.flush();
+            if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+                canvas.set_selection(gpu, None);
+            }
+        }
+        laid
     }
 
     /// Lays `item` on `layer` as it was laid, its brush made again from what it keeps (or taken
-    /// from `brushes`, made already).
-    fn lay_item(&mut self, layer: LayerId, item: &Item, brushes: &mut Vec<(Arc<Vec<u8>>, Brush)>) {
+    /// from `brushes`, made already): where it reached, and whether it changed the layer as it went
+    /// (smudging, painting wet).
+    fn lay_item(&mut self, layer: LayerId, item: &Item, brushes: &mut Vec<(Arc<Vec<u8>>, Brush)>) -> (IRect, bool) {
         let raw = match brushes.iter().find(|(kept, _)| **kept == *item.brush) {
             Some((_, brush)) => brush.clone(),
             None => {
@@ -914,7 +1204,7 @@ impl State {
         let mut builder = make(brush, diameter * scale, item.seed);
         let mut second_builder = second.as_ref().map(|(b, _, d)| make(b.clone(), d * scale, item.seed ^ SECOND_SEED));
         let guide = item.symmetry.map_or_else(Guide::default, |s| s.moved(t).guide());
-        let Some(canvas) = self.canvas.as_mut() else { return };
+        let Some(canvas) = self.canvas.as_mut() else { return (IRect::EMPTY, false) };
         match second {
             Some((_, second, _)) => canvas.begin_dual_stroke(layer, style, second),
             None => canvas.begin_stroke(layer, style),
@@ -946,6 +1236,7 @@ impl State {
             }
         }
         crate::lay_stroke(canvas, builder, second_builder, &guide);
+        canvas.last_stroke().unwrap_or((IRect::EMPTY, false))
     }
 
     /// Asks `layer`'s plugin for its items and lays them again (see [`State::lay_items_again`]):
@@ -967,7 +1258,18 @@ impl State {
             })
         });
         let Some(Some(list)) = list else { return false };
+        // all of it, whatever is known of where its items were laid (and that put back with the
+        // step: its data stays as it is)
+        self.flush();
+        let laid_before = self.laid_items(layer);
+        self.laid.remove(&layer);
+        let steps = self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made);
         self.lay_items_again(layer, &read_drawn(&list), "Redraw layer");
+        let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(procraft_gpu::Canvas::undo_step);
+        if let Some(made) = made {
+            let laid = laid_before.zip(self.laid_items(layer));
+            self.note_layer_step(made, layer, data.clone(), data, laid);
+        }
         self.revision += 1;
         true
     }
@@ -1024,14 +1326,25 @@ impl State {
             return;
         };
         // (one step may change several layers' data: flipping the canvas)
-        let changes: Vec<(LayerId, Option<Arc<Vec<u8>>>)> = self
+        type Back = (LayerId, Option<Arc<Vec<u8>>>, Option<Arc<Vec<LaidItem>>>);
+        let changes: Vec<Back> = self
             .layer_steps
             .iter()
             .filter(|s| s.made == step)
-            .map(|s| (s.layer, if undone { s.before.clone() } else { s.after.clone() }))
+            .map(|s| {
+                let laid = s.laid.as_ref().map(|(before, after)| Arc::clone(if undone { before } else { after }));
+                (s.layer, if undone { s.before.clone() } else { s.after.clone() }, laid)
+            })
             .collect();
-        for (layer, data) in changes {
+        for (layer, data, laid) in changes {
             self.doc.set_plugin_data(layer, data);
+            // its pixels put back as they were laid then
+            match laid {
+                Some(laid) => self.set_laid(layer, laid),
+                None => {
+                    self.laid.remove(&layer);
+                }
+            }
         }
     }
 
@@ -1042,8 +1355,9 @@ impl State {
         layer: LayerId,
         before: Option<Arc<Vec<u8>>>,
         after: Option<Arc<Vec<u8>>>,
+        laid: Option<LaidPair>,
     ) {
-        self.layer_steps.push(LayerStep { made, layer, before, after });
+        self.layer_steps.push(LayerStep { made, layer, before, after, laid });
         let over = self.layer_steps.len().saturating_sub(STEPS_KEPT);
         self.layer_steps.drain(..over);
     }
@@ -1106,12 +1420,15 @@ impl State {
         });
         let Some(Some((after, list))) = answer else { return false };
         let steps = self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made);
+        self.flush();
+        let laid_before = self.laid_items(layer);
         self.lay_items_again(layer, &read_drawn(&list), name);
         let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(procraft_gpu::Canvas::undo_step);
         let after = Some(Arc::new(after));
         self.doc.set_plugin_data(layer, after.clone());
         if let Some(made) = made {
-            self.note_layer_step(made, layer, before, after);
+            let laid = laid_before.zip(self.laid_items(layer));
+            self.note_layer_step(made, layer, before, after, laid);
         }
         self.revision += 1;
         true
@@ -1171,7 +1488,7 @@ impl State {
     /// The layers' data moved by a step (see [`State::move_all_items`]), kept with step `made`.
     pub(crate) fn note_moved_data(&mut self, made: u64, moved: Vec<MovedData>) {
         for (layer, before, after) in moved {
-            self.note_layer_step(made, layer, before, after);
+            self.note_layer_step(made, layer, before, after, None);
         }
     }
 
@@ -1236,6 +1553,11 @@ impl CanvasSession {
             })
             .unwrap_or(0);
         if id != 0 {
+            // empty, as no items lay it
+            let mut st = self.shared.lock();
+            st.flush();
+            st.set_laid(LayerId(id), Arc::new(Vec::new()));
+            drop(st);
             self.tell_plugins(crate::plugin_run::Hook::LayerAdded);
         }
         id

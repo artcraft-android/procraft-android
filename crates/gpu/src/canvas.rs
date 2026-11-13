@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 
 use procraft_engine::animation::{self, FrameLook};
@@ -24,6 +24,9 @@ pub(crate) mod plugin_filter;
 pub(crate) mod plugin_picture;
 
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// The id the next canvas made takes (see [`Canvas::id`]).
+static NEXT_CANVAS: AtomicU64 = AtomicU64::new(1);
 
 /// The most textures the canvas's size kept for reuse (see `Canvas::spares`).
 const SPARES_KEPT: usize = 1;
@@ -1331,6 +1334,8 @@ struct ActiveStroke {
     pencil: bool,
     /// A dual brush's second stroke, if it has one.
     second: Option<SecondStroke>,
+    /// Lays its pixels only within this (see [`Canvas::lay_within`]).
+    within: Option<IRect>,
 }
 
 /// A dual brush's second stroke, drawn along the open stroke's path into a texture of its own
@@ -1823,6 +1828,8 @@ struct ScreenPipelines {
 }
 
 pub struct Canvas {
+    /// Its own among the canvases made while the app runs.
+    id: u64,
     width: u32,
     height: u32,
     pipelines: std::sync::Arc<Pipelines>,
@@ -1941,6 +1948,13 @@ pub struct Canvas {
     next_name: Option<String>,
     /// Where the next stroke committed changes pixels, if known more closely than its bounds.
     within: Option<Vec<IRect>>,
+    /// Where strokes begun from now on lay their pixels, when only part of a layer is laid again
+    /// (see [`Canvas::lay_within`]).
+    lay_within: Option<IRect>,
+    /// Strokes begun from now on are only measured (see [`Canvas::measure`]).
+    measuring: bool,
+    /// Where the stroke ended last reached, and whether it changed its layer as it went.
+    last_ended: Option<(IRect, bool)>,
     smudge_params: wgpu::Buffer,
     smudge_capacity: u64,
     /// The passes of wet paint a render lays (see [`WetPass`]), and how many it holds.
@@ -2194,6 +2208,7 @@ impl Canvas {
         let stamp_capacity = 4096;
         let stamp_buffer = stamp_buffer(device, stamp_capacity);
         let canvas = Canvas {
+            id: NEXT_CANVAS.fetch_add(1, Ordering::Relaxed),
             width,
             height,
             pipelines,
@@ -2253,6 +2268,9 @@ impl Canvas {
             mark: None,
             next_name: None,
             within: None,
+            lay_within: None,
+            measuring: false,
+            last_ended: None,
             smudge_params: smudge_params(device, 64),
             smudge_spare: [spare_buffer(device), spare_buffer(device)],
             smudge_capacity: 64,
@@ -2295,6 +2313,12 @@ impl Canvas {
 
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Its own among the canvases made while the app runs: what was known of another's layers
+    /// isn't taken for its own.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Points `style` at `brush`'s own shape and grain images, if it has them, putting them in
@@ -2596,7 +2620,8 @@ impl Canvas {
     pub fn begin_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None });
+        let within = self.lay_within;
+        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None, within });
     }
 
     /// Begins a stroke as [`Canvas::begin_stroke`] does, with a dual brush's second (its stamps
@@ -2606,7 +2631,9 @@ impl Canvas {
         if let Some(active) = self.active.as_mut() {
             active.second = Some(second);
         }
-        self.ops.push(Op::ClearSecond(second));
+        if !self.measuring {
+            self.ops.push(Op::ClearSecond(second));
+        }
     }
 
     /// Draws more of the open stroke's second.
@@ -2690,8 +2717,9 @@ impl Canvas {
             return;
         }
         let at = self.ops.len();
+        // (measured, it counts where the stroke reaches, as drawn)
         let bounds = self.push_stamps(stamps, false);
-        if bounds.is_empty() {
+        if bounds.is_empty() || self.measuring {
             return;
         }
         self.ops.insert(at, Op::SaveTip(bounds));
@@ -2715,15 +2743,36 @@ impl Canvas {
     fn push_stamps_to(&mut self, stamps: &[Stamp], clear: bool, second: bool) -> IRect {
         let full = self.full();
         let Some(active) = self.active.as_mut() else { return IRect::EMPTY };
-        let mut bounds = IRect::EMPTY;
         let style = match (second, active.second) {
             (false, _) => active.style,
             (true, Some(s)) => s.style,
             (true, None) => return IRect::EMPTY,
         };
         let capped = self.pipelines.stamp_capped.is_some();
+        let reach = |s: &Stamp| {
+            let radius = drawn_radius(&style, s.radius, s.taper);
+            let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
+            IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2)
+        };
         let drawn: Vec<&Stamp> =
             stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).collect();
+        // where all of them reach, though only those reaching where the stroke is laid are drawn
+        // (each pixel built up from its own stamps alone: never a stroke laid in place)
+        let bounds = drawn.iter().fold(IRect::EMPTY, |b, s| b.union(reach(s))).intersect(full);
+        let within = active.within.filter(|_| !style.in_place());
+        let drawn: Vec<&Stamp> =
+            drawn.into_iter().filter(|s| within.is_none_or(|w| !reach(s).intersect(w).is_empty())).collect();
+        if clear && !second {
+            if !self.measuring {
+                self.dirty = self.dirty.union(active.bounds);
+            }
+            active.bounds = bounds;
+        } else {
+            active.bounds = active.bounds.union(bounds);
+        }
+        if self.measuring {
+            return bounds;
+        }
         let wet: Vec<[f32; 8]> =
             drawn.iter().map(|s| s.wet.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 })).collect();
         let times: Vec<Paced> = drawn
@@ -2737,8 +2786,6 @@ impl Canvas {
             .iter()
             .map(|s| {
                 let radius = drawn_radius(&style, s.radius, s.taper);
-                let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
-                bounds = bounds.union(IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2));
                 // without the capped pipeline, the transfer goes into the stamp
                 let (alpha, transfer) = capped_alpha(&style, capped, s);
                 StampInstance {
@@ -2764,13 +2811,6 @@ impl Canvas {
                 }
             })
             .collect();
-        let bounds = bounds.intersect(full);
-        if clear && !second {
-            self.dirty = self.dirty.union(active.bounds);
-            active.bounds = bounds;
-        } else {
-            active.bounds = active.bounds.union(bounds);
-        }
         self.dirty = self.dirty.union(bounds);
         if !instances.is_empty() || clear {
             let pencil = active.pencil;
@@ -2833,8 +2873,37 @@ impl Canvas {
         self.prediction.clear();
         self.untip();
         if let Some(active) = self.active.take() {
-            self.ops.push(Op::Commit(active));
+            self.last_ended = Some((active.bounds, active.style.in_place()));
+            if !self.measuring {
+                self.ops.push(Op::Commit(active));
+            }
         }
+    }
+
+    /// Strokes begun from now on lay their pixels only within `rect` (none: wherever they reach),
+    /// for part of a layer laid again: what they reach outside it is left as it is, and their stamps
+    /// there aren't drawn. A stroke laid in place (smudging, painting wet) isn't held to it.
+    pub fn lay_within(&mut self, rect: Option<IRect>) {
+        self.lay_within = rect;
+    }
+
+    /// With `on`, strokes begun from now on are only measured: where each would reach is found
+    /// ([`Canvas::last_stroke`] as it ends) and nothing is drawn or kept. Without, they are drawn
+    /// again.
+    pub fn measure(&mut self, on: bool) {
+        self.prediction.clear();
+        self.measuring = on;
+    }
+
+    /// Where the stroke ended last reached (all of it, wherever [`Canvas::lay_within`] laid it),
+    /// and whether it changed its layer as it went (smudging, painting wet); none before any.
+    pub fn last_stroke(&self) -> Option<(IRect, bool)> {
+        self.last_ended
+    }
+
+    /// Whether work queued and not yet done changes `layer`'s pixels (a stroke open on it counts).
+    pub fn writes_queued(&self, layer: LayerId) -> bool {
+        self.ops_layers().1.contains(&layer)
     }
 
     /// Ends the open stroke as [`Canvas::end_stroke`] does, knowing that it changes pixels only
@@ -2882,7 +2951,9 @@ impl Canvas {
     pub fn cancel_stroke(&mut self) {
         self.prediction.clear();
         self.tip = None;
-        if let Some(active) = self.active.take() {
+        if let Some(active) = self.active.take()
+            && !self.measuring
+        {
             self.dirty = self.dirty.union(active.bounds);
             self.ops.push(Op::Cancel);
         }
@@ -3706,7 +3777,8 @@ impl Canvas {
     pub fn begin_pencil_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None });
+        self.active =
+            Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None, within: None });
     }
 
     /// A step of the liquify brush: `stamps` added up, then the field carried along by them.
@@ -5410,6 +5482,8 @@ impl Canvas {
         stroke: ActiveStroke,
     ) {
         let rect = stroke.bounds.intersect(self.full());
+        // laid only within part of the layer (never one laid in place: it has changed it already)
+        let rect = stroke.within.filter(|_| !stroke.style.in_place()).map_or(rect, |w| rect.intersect(w));
         let within = self.within.take();
         if !rect.is_empty() && self.layers.contains_key(&stroke.layer) {
             // what the stroke can change: its bounds, or only the rectangles it was said to reach

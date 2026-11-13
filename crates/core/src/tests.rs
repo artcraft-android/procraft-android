@@ -12489,3 +12489,105 @@ fn a_library_shared_comes_back_as_a_library_of_its_own() {
     assert_eq!(s.brush_libraries().last().map(|l| l.name.clone()).as_deref(), Some("Untitled library 2"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A short stroke from (`x0`, `y0`) to (`x1`, `y1`), window pixels.
+fn stroke_line(s: &CanvasSession, (x0, y0): (f32, f32), (x1, y1): (f32, f32)) {
+    let steps = 12;
+    let at = |i: u32| {
+        let t = i as f32 / steps as f32;
+        (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+    };
+    s.stroke_begin(PointerKind::Stylus, vec![sample(x0, y0, 0.0)]);
+    s.stroke_add((1..steps).map(|i| sample(at(i).0, at(i).1, f64::from(i) * 8.0)).collect());
+    s.stroke_end(vec![sample(x1, y1, f64::from(steps) * 8.0)]);
+}
+
+/// How many times plugins' layers were laid again whole, and in part.
+fn lays(s: &CanvasSession) -> [u64; 2] {
+    s.shared.lock().lays
+}
+
+#[test]
+fn an_edit_lays_again_only_where_it_changes_a_vector_layer_and_matches_it_laid_whole() {
+    let side = 1536;
+    let Some((s, plugins, dir)) = vector_session(side, "in-part") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.15);
+    // a grid of short strokes, 24 rows of 16
+    let started = std::time::Instant::now();
+    let corner = |row: u32, col: u32| (20.0 + col as f32 * 92.0, 30.0 + row as f32 * 62.0);
+    for row in 0..24 {
+        for col in 0..16 {
+            s.set_color(row as f32 / 24.0, 0.4, col as f32 / 16.0);
+            let (x, y) = corner(row, col);
+            stroke_line(&s, (x, y), (x + 64.0, y + 28.0));
+        }
+    }
+    eprintln!("384 strokes drawn in {:?}", started.elapsed());
+    let whole_relay = |s: &CanvasSession| {
+        let t = std::time::Instant::now();
+        assert!(s.draw_plugin_layer_again(vector));
+        let took = t.elapsed();
+        let rgba = layer_rgba(s, vector);
+        assert_eq!(s.undo().as_deref(), Some("Redraw layer"));
+        (rgba, took)
+    };
+    // laid whole: what every edit took before
+    let (drawn, whole) = whole_relay(&s);
+    assert_eq!(layer_rgba(&s, vector), drawn, "laid again as drawn");
+    // one stroke taken and moved: only where it was and where it goes laid again
+    let [w0, p0] = lays(&s);
+    let (x, y) = corner(5, 5);
+    s.select_shape(false, x - 8.0, y - 8.0, x + 72.0, y + 36.0, crate::SelectionJoin::Add);
+    assert_eq!(s.taken_plugin_items().len(), 1);
+    let t = std::time::Instant::now();
+    assert!(s.transform_plugin_items(vec![1.0, 0.0, 0.0, 1.0, 21.0, 13.0]));
+    let moved = t.elapsed();
+    assert_eq!(lays(&s), [w0, p0 + 1], "laid again in part");
+    let after = layer_rgba(&s, vector);
+    assert_eq!(most_apart(&after, &whole_relay(&s).0), 0, "as if laid whole");
+    eprintln!("a vector layer of 384 strokes laid again whole: {whole:?}; one stroke moved, in part: {moved:?}");
+    // taken back, its earlier laying known again: the next edit in part too
+    assert_eq!(s.undo().as_deref(), Some("Move strokes"));
+    assert_eq!(layer_rgba(&s, vector), drawn);
+    s.select_none();
+    let [w0, _] = lays(&s);
+    let (x, y) = corner(9, 2);
+    s.select_shape(false, x - 8.0, y - 8.0, x + 72.0, y + 36.0, crate::SelectionJoin::Add);
+    s.set_color(1.0, 1.0, 0.0);
+    assert!(s.restyle_plugin_items(true, false, false, false));
+    s.select_none();
+    let (x, y) = corner(10, 6);
+    s.select_shape(false, x - 8.0, y - 8.0, x + 72.0, y + 36.0, crate::SelectionJoin::Add);
+    assert!(s.delete_plugin_items());
+    s.select_none();
+    assert_eq!(lays(&s)[0], w0, "never whole");
+    let after = layer_rgba(&s, vector);
+    assert_eq!(most_apart(&after, &whole_relay(&s).0), 0, "restyled and deleted, as if laid whole");
+    // a stroke drawn (kept as painted) and the whole eraser over another: still in part
+    let [w0, _] = lays(&s);
+    let (x, y) = corner(12, 7);
+    stroke_line(&s, (x, y + 40.0), (x + 60.0, y + 40.0));
+    assert!(plugins.set_slider(format!("{VECTOR_ID}.eraser"), 1.0).is_some());
+    s.set_tool(ToolKind::Erase);
+    let (x, y) = corner(3, 3);
+    stroke_line(&s, (x + 30.0, y - 4.0), (x + 34.0, y + 30.0));
+    s.set_tool(ToolKind::Paint);
+    assert!(plugins.set_slider(format!("{VECTOR_ID}.eraser"), 0.0).is_some());
+    assert_eq!(lays(&s)[0], w0, "never whole");
+    let after = layer_rgba(&s, vector);
+    assert_eq!(most_apart(&after, &whole_relay(&s).0), 0, "erased, as if laid whole");
+    // a smudge over strokes: an edit reaching it lays the layer whole, which still matches
+    s.set_tool(ToolKind::Smudge);
+    let (x, y) = corner(7, 8);
+    stroke_line(&s, (x - 10.0, y + 10.0), (x + 70.0, y + 20.0));
+    s.set_tool(ToolKind::Paint);
+    s.select_shape(false, x - 8.0, y - 8.0, x + 72.0, y + 36.0, crate::SelectionJoin::Add);
+    let [w1, _] = lays(&s);
+    assert!(s.transform_plugin_items(vec![1.0, 0.0, 0.0, 1.0, 5.0, 0.0]));
+    s.select_none();
+    assert_eq!(lays(&s)[0], w1 + 1, "laid whole");
+    let after = layer_rgba(&s, vector);
+    assert_eq!(most_apart(&after, &whole_relay(&s).0), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
