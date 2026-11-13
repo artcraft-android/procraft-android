@@ -74,6 +74,7 @@ mod render;
 mod reveal;
 mod scene3d;
 mod selection;
+mod sharp;
 mod sound_file;
 mod stroke_sound;
 mod studio;
@@ -468,6 +469,10 @@ pub(crate) struct State {
     pub(crate) laid: std::collections::HashMap<procraft_engine::document::LayerId, plugin_layers::Laid>,
     /// How many times plugins' layers were laid again whole, and how many times only in part.
     pub(crate) lays: [u64; 2],
+    /// Plugins' layers drawn sharp over the canvas when zoomed in.
+    pub(crate) sharp: sharp::Sharp,
+    /// While items are laid on the sharp picture's canvas: canvas pixels to its pixels.
+    pub(crate) lay_to: Option<procraft_engine::geom::Affine>,
     /// Plugins' layers whose data couldn't be read (or their plugin couldn't take it): they take no
     /// strokes, and their data files are left as they are.
     pub(crate) layer_data_unread: std::collections::HashSet<procraft_engine::document::LayerId>,
@@ -1443,6 +1448,8 @@ impl CanvasSession {
             layer_steps: Vec::new(),
             laid: std::collections::HashMap::new(),
             lays: [0; 2],
+            sharp: sharp::Sharp::default(),
+            lay_to: None,
             layer_data_unread: std::collections::HashSet::new(),
             pour: None,
             reveal: None,

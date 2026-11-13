@@ -93,6 +93,13 @@ impl State {
             self.needs_frame = true;
         }
         let to_screen = self.view.map(|v| v.to_screen());
+        // plugins' layers drawn sharp over the canvas, zoomed in and settled
+        if let Some(to_screen) = to_screen
+            && !self.scene_shown()
+            && self.sphere.is_none()
+        {
+            self.keep_sharp(size, to_screen);
+        }
         let grid = self.surround_grid(Vec2::ZERO);
         let surround = self.surround();
         let selection_shown = self.selection_shown(started, screen);

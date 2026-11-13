@@ -12591,3 +12591,120 @@ fn an_edit_lays_again_only_where_it_changes_a_vector_layer_and_matches_it_laid_w
     assert_eq!(most_apart(&after, &whole_relay(&s).0), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A window-sized picture drawn into and read back, and how to draw a frame into it.
+fn frame_target(s: &CanvasSession, side: u32) -> (procraft_gpu::wgpu::Texture, procraft_gpu::Gpu) {
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
+        label: Some("window"),
+        size: procraft_gpu::wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: procraft_gpu::wgpu::TextureDimension::D2,
+        format: procraft_gpu::wgpu::TextureFormat::Rgba8Unorm,
+        usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT | procraft_gpu::wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    (texture, gpu)
+}
+
+/// A frame drawn into `texture` (`side` square), read back.
+fn framed(s: &CanvasSession, texture: &procraft_gpu::wgpu::Texture, gpu: &procraft_gpu::Gpu, side: u32) -> Vec<u8> {
+    let view = texture.create_view(&Default::default());
+    let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+    s.draw(&view, format, (side, side), procraft_engine::profile::Profile::Srgb, std::time::Instant::now());
+    procraft_gpu::read_texture(gpu, texture, side, side).unwrap()
+}
+
+/// Whether the canvas shows its plugins' layers drawn sharp now.
+fn shows_sharp(s: &CanvasSession) -> bool {
+    s.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::shows_sharp)
+}
+
+/// How many of the `block` × `block` squares of `rgba` (`side` wide) aren't one colour.
+fn mixed_blocks(rgba: &[u8], side: u32, block: u32) -> usize {
+    let px = |x: u32, y: u32| &rgba[((y * side + x) * 4) as usize..((y * side + x) * 4 + 4) as usize];
+    let mut n = 0;
+    let tall = rgba.len() as u32 / 4 / side;
+    for by in (0..tall).step_by(block as usize) {
+        for bx in (0..side).step_by(block as usize) {
+            let first = px(bx, by);
+            if (0..block).any(|dy| (0..block).any(|dx| px(bx + dx, by + dy) != first)) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn zoomed_in_a_vector_layer_shows_sharp_once_the_view_settles_and_as_it_was_elsewhere() {
+    let Some((s, _plugins, dir)) = vector_session(200, "sharp") else { return };
+    // the window twice the canvas: each canvas pixel two window pixels across, shown crisp
+    let side = 400;
+    {
+        let mut st = s.shared.lock();
+        st.window_size = (side, side);
+        st.view = Some(View::fit((200, 200), (side, side)));
+    }
+    let settle = || std::thread::sleep(std::time::Duration::from_millis(160));
+    // a pixel layer's stroke at the top, a vector layer's thin stroke below it
+    s.add_layer();
+    s.set_brush_size(0.3);
+    s.set_color(0.9, 0.2, 0.1);
+    stroke_across(&s, 60.0, 40.0, 360.0);
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.08);
+    s.set_color(0.1, 0.2, 0.8);
+    stroke_line(&s, (60.0, 160.0), (340.0, 330.0));
+    // and a wider one at the bottom
+    s.set_brush_size(0.35);
+    stroke_line(&s, (40.0, 370.0), (360.0, 372.0));
+    let (texture, gpu) = frame_target(&s, side);
+    let soft = framed(&s, &texture, &gpu, side);
+    assert!(!shows_sharp(&s), "not before it settles");
+    settle();
+    let sharp = framed(&s, &texture, &gpu, side);
+    assert!(shows_sharp(&s), "once it settles");
+    assert_eq!(s.shared.lock().sharp.made, 1);
+    if let Ok(shots) = std::env::var("PROCRAFT_SHOTS") {
+        let shots = std::path::Path::new(&shots);
+        crate::project::write_png(&shots.join("sharp-before.png"), side, side, &soft, &[]).unwrap();
+        crate::project::write_png(&shots.join("sharp-after.png"), side, side, &sharp, &[]).unwrap();
+    }
+    // the pixel layer's stroke and the rest exactly as shown before; the vector stroke finer: its
+    // edges within each canvas pixel's square of the window
+    let rows = |p: &[u8], from: u32, to: u32| p[(from * side * 4) as usize..(to * side * 4) as usize].to_vec();
+    assert_eq!(most_apart(&rows(&soft, 0, 120), &rows(&sharp, 0, 120)), 0, "the rest as it was");
+    assert_eq!(mixed_blocks(&rows(&soft, 140, 340), side, 2), 0, "each canvas pixel a square before");
+    assert!(mixed_blocks(&rows(&sharp, 140, 340), side, 2) > 100, "finer than the canvas's pixels after");
+    // the wide stroke as wide, as much of it (a thin one's edges were as wide as a canvas pixel)
+    let ink = |p: &[u8]| p.as_chunks::<4>().0.iter().map(|c| u64::from(255 - c[0])).sum::<u64>();
+    let (a, b) = (ink(&rows(&soft, 345, 400)), ink(&rows(&sharp, 345, 400)));
+    eprintln!(
+        "ink of the wide stroke: {a} soft, {b} sharp; of the thin: {} and {}",
+        ink(&rows(&soft, 140, 340)),
+        ink(&rows(&sharp, 140, 340))
+    );
+    assert!(a.abs_diff(b) * 20 < a, "the same stroke, as much of it: {a} and {b}");
+    // a stroke takes it away at once; settled again, it is made again with it
+    stroke_line(&s, (60.0, 300.0), (200.0, 250.0));
+    framed(&s, &texture, &gpu, side);
+    assert!(!shows_sharp(&s));
+    settle();
+    framed(&s, &texture, &gpu, side);
+    assert!(shows_sharp(&s));
+    assert_eq!(s.shared.lock().sharp.made, 2);
+    // the vector layer hidden, or zoomed out to the canvas's own size: none
+    s.set_layer_visible(vector, false);
+    framed(&s, &texture, &gpu, side);
+    assert!(!shows_sharp(&s));
+    s.set_layer_visible(vector, true);
+    s.view_gesture(200.0, 200.0, 0.0, 0.0, 0.5, 0.0);
+    framed(&s, &texture, &gpu, side);
+    settle();
+    framed(&s, &texture, &gpu, side);
+    assert!(!shows_sharp(&s));
+    assert!(s.shared.lock().sharp.held_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}

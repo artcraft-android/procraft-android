@@ -655,6 +655,24 @@ impl Clip {
         (coverage.len() == area).then_some(Clip { x, y, width, height, coverage })
     }
 
+    /// It as a selection of a `width` × `height` canvas each of whose pixels `back` takes to where
+    /// it was drawn (nearest).
+    fn mask_onto(&self, width: u32, height: u32, back: Affine) -> Mask {
+        let mut mask = Mask::empty(width, height);
+        let (x0, y0) = (self.x as f32, self.y as f32);
+        for (y, row) in mask.data.chunks_exact_mut(width.max(1) as usize).enumerate() {
+            for (x, v) in row.iter_mut().enumerate() {
+                let p = back.apply(Vec2::new(x as f32 + 0.5, y as f32 + 0.5));
+                let (cx, cy) = ((p.x - x0).floor(), (p.y - y0).floor());
+                if cx >= 0.0 && cy >= 0.0 && cx < self.width as f32 && cy < self.height as f32 {
+                    let at = cy as usize * self.width as usize + cx as usize;
+                    *v = self.coverage.get(at).copied().unwrap_or(0);
+                }
+            }
+        }
+        mask
+    }
+
     /// It as a selection of a `width` × `height` canvas, moved by `transform` (where its stroke is
     /// laid now).
     fn mask(&self, width: u32, height: u32, transform: Option<Affine>) -> Mask {
@@ -1145,9 +1163,21 @@ impl State {
 
     /// Lays `item` on `layer` as [`State::lay_item`] does, within the selection it was drawn in
     /// (as the selection is read when the stroke is drawn, it is laid then).
-    fn lay_clipped(&mut self, layer: LayerId, item: &Item, brushes: &mut Vec<(Arc<Vec<u8>>, Brush)>) -> (IRect, bool) {
+    pub(crate) fn lay_clipped(
+        &mut self,
+        layer: LayerId,
+        item: &Item,
+        brushes: &mut Vec<(Arc<Vec<u8>>, Brush)>,
+    ) -> (IRect, bool) {
         let (width, height) = (self.doc.width(), self.doc.height());
-        let clip = item.clip.as_ref().map(|c| c.mask(width, height, item.transform));
+        let clip = item.clip.as_ref().and_then(|c| match self.lay_to {
+            // laid on the sharp picture's canvas: its pixels back to where the stroke was drawn
+            Some(to) => {
+                let back = item.transform.unwrap_or(Affine::IDENTITY).then(to).inverse()?;
+                Some(c.mask_onto(width, height, back))
+            }
+            None => Some(c.mask(width, height, item.transform)),
+        });
         if let Some(clip) = &clip {
             self.flush();
             if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
@@ -1393,6 +1423,42 @@ impl State {
     pub(crate) fn layer_items(&self, layer: LayerId) -> Option<Vec<Item>> {
         let list = self.on_layer_data(layer, |running| running.layer_draw(MOST_DRAWN))?;
         Some(read_drawn(&list))
+    }
+
+    /// Those of `items` (`layer`'s, in order) that may reach `rect`: by where each reached as last
+    /// laid when that is known, else by its samples and its brush's width (and every one with a
+    /// symmetry's copies).
+    pub(crate) fn items_reaching(&self, layer: LayerId, items: Vec<Item>, rect: IRect) -> Vec<Item> {
+        let laid = self.laid_items(layer).filter(|laid| laid.len() == items.len());
+        let keys = laid.as_ref().map(|_| item_keys(&items));
+        items
+            .into_iter()
+            .enumerate()
+            .filter(|(i, item)| {
+                let known = laid.as_ref().zip(keys.as_ref()).and_then(|(laid, keys)| {
+                    let (one, key) = (laid.get(*i)?, keys.get(*i)?);
+                    (one.key == *key).then_some(one.bounds)
+                });
+                let bounds = match known {
+                    Some(bounds) => bounds,
+                    None if item.symmetry.is_some() => return true,
+                    None => {
+                        let t = item.transform.unwrap_or(Affine::IDENTITY);
+                        let margin = item.width * t.scale_factor() * 2.0 + 16.0;
+                        items_reach(std::slice::from_ref(item)).map_or(IRect::EMPTY, |[l, t, r, b]| {
+                            IRect::new(
+                                (l - margin).floor() as i32,
+                                (t - margin).floor() as i32,
+                                (r + margin).ceil() as i32,
+                                (b + margin).ceil() as i32,
+                            )
+                        })
+                    }
+                };
+                !bounds.intersect(rect).is_empty()
+            })
+            .map(|(_, item)| item)
+            .collect()
     }
 
     /// The items of `layer` the selection takes (every one with nothing selected), in order.

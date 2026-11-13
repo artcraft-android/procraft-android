@@ -43,13 +43,38 @@ const MULTIPLY_MODE: u32 = 1;
 const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
-const UNIFORM_SIZE: u64 = 128;
+const UNIFORM_SIZE: u64 = 144;
 const _: () = assert!(
     size_of::<LayerUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<StampUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<FilterUniform>() as u64 <= UNIFORM_SIZE,
     "a uniform block outgrew its binding"
 );
+
+/// `s` given in another canvas's pixels, as drawn on one `k` times as big whose top left is at
+/// `origin` of those: where it is, and its moving grain with it (its size is scaled as it is drawn,
+/// see [`scaled_radius`]).
+fn scaled_stamp(s: &Stamp, origin: [f32; 2], k: f32) -> Stamp {
+    let mut s = *s;
+    s.center = procraft_engine::geom::Vec2::new((s.center.x - origin[0]) * k, (s.center.y - origin[1]) * k);
+    s.grain_offset = s.grain_offset * k;
+    s.grain_size *= k;
+    s.distance *= k;
+    s
+}
+
+/// How far past its radius a stamp's shape reaches where it is drawn: half a pixel of the round
+/// tip's rim, or the shape's quad's reach (as `stamp.wgsl` has them).
+fn stamp_rim(style: &StrokeStyle) -> f32 {
+    if style.shape.is_some() { std::f32::consts::FRAC_1_SQRT_2 } else { 0.5 }
+}
+
+/// A stamp drawn at `radius` (its rim past that) on a canvas, as drawn `k` times as big: its edge,
+/// rim and all, as far out, the rim itself a pixel of the bigger one.
+fn scaled_radius(style: &StrokeStyle, radius: f32, k: f32) -> f32 {
+    let rim = stamp_rim(style);
+    ((radius + rim) * k - rim).max(0.0)
+}
 
 /// The vertex layout of a warp mesh corner: where it goes, and where it came from (pixels).
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
@@ -760,6 +785,10 @@ struct LayerUniform {
     clip_masked: f32,
     /// Pixels a side of the image the grain is read from.
     grain_side: f32,
+    /// How many of this canvas's pixels a pixel of the canvas strokes are given in takes, and
+    /// where its top left is in those (see [`Canvas::draw_scaled`]): what grain fixed to the
+    /// canvas is read by.
+    scaled: [f32; 4],
 }
 
 impl Default for LayerUniform {
@@ -791,6 +820,7 @@ impl Default for LayerUniform {
             dual_threshold: -1.0,
             clip_masked: 0.0,
             grain_side: TEXTURE_SIZE as f32,
+            scaled: [1.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -907,6 +937,15 @@ struct Veil {
     uniform_bind: wgpu::BindGroup,
     /// The hole this frame, canvas pixels.
     hole: Vec<[f32; 2]>,
+}
+
+/// Part of the canvas drawn again at the target's resolution, shown over it in its place (see
+/// [`Canvas::set_sharp`]).
+struct Sharp {
+    /// Where on the canvas: left, top, width, height (canvas pixels, fractions allowed).
+    rect: [f32; 4],
+    _texture: wgpu::Texture,
+    bind: wgpu::BindGroup,
 }
 
 /// An encoded colour moved by a linear-light matrix (clipped), as the display shader does.
@@ -1476,6 +1515,15 @@ enum Op {
     },
     /// A layer's pixels are replaced with no undo step (during an edit held with `Hold`).
     Put(LayerId, Vec<u8>),
+    /// A layer redrawn with no undo step from another canvas's layer (`source`, `size` pixels),
+    /// each pixel from where `to_source` (3 × 3, rows) takes it there, filtered so.
+    RedrawFrom {
+        layer: LayerId,
+        source: wgpu::TextureView,
+        size: (u32, u32),
+        to_source: [f32; 9],
+        resample: Resample,
+    },
     /// Part of a layer's pixels replaced so: the rectangle at (`x`, `y`), `width` x `height`.
     PutRegion {
         layer: LayerId,
@@ -1955,6 +2003,11 @@ pub struct Canvas {
     measuring: bool,
     /// Where the stroke ended last reached, and whether it changed its layer as it went.
     last_ended: Option<(IRect, bool)>,
+    /// Strokes are given in another canvas's pixels, drawn here this many times as big, from this
+    /// point of those at the top left (see [`Canvas::draw_scaled`]).
+    scaled: Option<([f32; 2], f32)>,
+    /// Part of the canvas drawn again sharper, shown over it in its place.
+    sharp: Option<Sharp>,
     smudge_params: wgpu::Buffer,
     smudge_capacity: u64,
     /// The passes of wet paint a render lays (see [`WetPass`]), and how many it holds.
@@ -2271,6 +2324,8 @@ impl Canvas {
             lay_within: None,
             measuring: false,
             last_ended: None,
+            scaled: None,
+            sharp: None,
             smudge_params: smudge_params(device, 64),
             smudge_spare: [spare_buffer(device), spare_buffer(device)],
             smudge_capacity: 64,
@@ -2741,6 +2796,15 @@ impl Canvas {
 
     /// As [`Canvas::push_stamps`], into the open stroke's second if `second` (none without one).
     fn push_stamps_to(&mut self, stamps: &[Stamp], clear: bool, second: bool) -> IRect {
+        // given in another canvas's pixels: drawn here as much bigger
+        let mapped: Vec<Stamp>;
+        let stamps = match self.scaled {
+            Some((origin, k)) => {
+                mapped = stamps.iter().map(|s| scaled_stamp(s, origin, k)).collect();
+                &mapped[..]
+            }
+            None => stamps,
+        };
         let full = self.full();
         let Some(active) = self.active.as_mut() else { return IRect::EMPTY };
         let style = match (second, active.second) {
@@ -2749,8 +2813,13 @@ impl Canvas {
             (true, None) => return IRect::EMPTY,
         };
         let capped = self.pipelines.stamp_capped.is_some();
-        let reach = |s: &Stamp| {
+        let scale = self.scaled.map(|(_, k)| k);
+        let drawn_at = |s: &Stamp| {
             let radius = drawn_radius(&style, s.radius, s.taper);
+            scale.map_or(radius, |k| scaled_radius(&style, radius, k))
+        };
+        let reach = |s: &Stamp| {
+            let radius = drawn_at(s);
             let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
             IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2)
         };
@@ -2785,7 +2854,7 @@ impl Canvas {
         let instances: Vec<StampInstance> = drawn
             .iter()
             .map(|s| {
-                let radius = drawn_radius(&style, s.radius, s.taper);
+                let radius = drawn_at(s);
                 // without the capped pipeline, the transfer goes into the stamp
                 let (alpha, transfer) = capped_alpha(&style, capped, s);
                 StampInstance {
@@ -2899,6 +2968,78 @@ impl Canvas {
     /// and whether it changed its layer as it went (smudging, painting wet); none before any.
     pub fn last_stroke(&self) -> Option<(IRect, bool)> {
         self.last_ended
+    }
+
+    /// Strokes given from now on are in another canvas's pixels, `scale` of this one's each, the
+    /// point `origin` of those at this one's top left: drawn here as much bigger (their stamps,
+    /// their moving grain and the grain fixed to the canvas with them), for part of that canvas
+    /// drawn sharper.
+    pub fn draw_scaled(&mut self, origin: [f32; 2], scale: f32) {
+        let ok = origin.iter().all(|v| v.is_finite()) && scale.is_finite() && scale > 0.0;
+        self.scaled = ok.then_some((origin, scale));
+    }
+
+    /// Redraws `layer` from another canvas's layer `source` (`size` pixels, premultiplied), each
+    /// pixel here from where `to_source` takes it there (pixel middles at halves), filtered as
+    /// `resample` says; no undo step.
+    pub fn redraw_from(
+        &mut self,
+        layer: LayerId,
+        source: wgpu::TextureView,
+        size: (u32, u32),
+        to_source: Affine,
+        resample: Resample,
+    ) {
+        let t = to_source;
+        let to_source = [t.a, t.c, t.e, t.b, t.d, t.f, 0.0, 0.0, 1.0];
+        self.ops.push(Op::RedrawFrom { layer, source, size, to_source, resample });
+    }
+
+    /// Layer `layer`'s pixels for another canvas to read (see [`Canvas::redraw_from`]), as they are
+    /// once the work queued is done (done here), given their texture again if they were put away.
+    pub fn layer_to_read(&mut self, gpu: &Gpu, doc: &mut Document, layer: LayerId) -> Option<wgpu::TextureView> {
+        self.render(gpu, doc, None);
+        if !self.layers.contains_key(&layer) {
+            self.restore(gpu, layer);
+        }
+        self.layers.get(&layer).map(|l| l.view.clone())
+    }
+
+    /// Shows `picture` (its top left `size` pixels, premultiplied, as composited) over the canvas
+    /// rectangle `rect` (left, top, width, height in canvas pixels, fractions allowed) in place of
+    /// the canvas there: part of it drawn again at the target's resolution, copied now. None takes
+    /// it away.
+    pub fn set_sharp(&mut self, gpu: &Gpu, picture: Option<(&wgpu::Texture, (u32, u32), [f32; 4])>) {
+        self.sharp = None;
+        let Some((source, (w, h), rect)) = picture else { return };
+        let fits = w > 0 && h > 0 && w <= source.width() && h <= source.height();
+        if !fits || !rect.iter().all(|v| v.is_finite()) || rect[2] <= 0.0 || rect[3] <= 0.0 {
+            return;
+        }
+        let device = &gpu.device;
+        let texture = texture(device, "sharp", w, h, LAYER_FORMAT);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sharp") });
+        encoder.copy_texture_to_texture(copy_at(source, 0, 0), copy_at(&texture, 0, 0), extent(w, h));
+        gpu.queue.submit([encoder.finish()]);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = sampled_bind(device, &self.pipelines.sampled_layout, &view, &self.sampler);
+        self.sharp = Some(Sharp { rect, _texture: texture, bind });
+    }
+
+    /// The composite's texture (see [`Canvas::composite_view`]).
+    pub fn composite_texture(&self) -> &wgpu::Texture {
+        &self.composite
+    }
+
+    /// Whether work is queued, or the picture is to be composited again: what shows is about to
+    /// change.
+    pub fn changes_queued(&self) -> bool {
+        !self.ops.is_empty() || !self.dirty.is_empty() || self.active.is_some()
+    }
+
+    /// Whether part of the canvas shows drawn again sharper (see [`Canvas::set_sharp`]).
+    pub fn shows_sharp(&self) -> bool {
+        self.sharp.is_some()
     }
 
     /// Whether work queued and not yet done changes `layer`'s pixels (a stroke open on it counts).
@@ -3490,6 +3631,7 @@ impl Canvas {
                 | Op::TransformAlso(id)
                 | Op::Put(id, _)
                 | Op::PutRegion { layer: id, .. }
+                | Op::RedrawFrom { layer: id, .. }
                 | Op::Hold(id) => written.push(*id),
                 Op::Write { layers, .. } => written.extend(layers.iter().map(|(id, ..)| *id)),
                 Op::Flip { layers, .. } => written.extend(layers.iter().copied()),
@@ -3936,7 +4078,9 @@ impl Canvas {
                 }
                 Op::Write { layers, .. } => ids.extend(layers.iter().map(|(id, ..)| *id)),
                 Op::Flip { layers, .. } => ids.extend(layers.iter().copied()),
-                Op::Put(id, _) | Op::PutRegion { layer: id, .. } | Op::Hold(id) => ids.push(*id),
+                Op::Put(id, _) | Op::PutRegion { layer: id, .. } | Op::Hold(id) | Op::RedrawFrom { layer: id, .. } => {
+                    ids.push(*id);
+                }
                 Op::Release { before: Some(d), .. } => ids.extend(d.pixel_layer_ids()),
                 _ => {}
             }
@@ -4407,6 +4551,47 @@ impl Canvas {
                     }
                     self.dirty = full;
                     history_changed = true;
+                }
+                Op::RedrawFrom { layer: id, source, size, to_source: m, resample } => {
+                    if let Some(layer) = self.layers.get(&id) {
+                        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("redrawn from"),
+                            layout: &self.pipelines.transform_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&source),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(&self.everything),
+                                },
+                            ],
+                        });
+                        let filter = match resample {
+                            Resample::Nearest => 0.0,
+                            Resample::Bilinear => 1.0,
+                            Resample::Bicubic => 2.0,
+                        };
+                        let [a, b, c, d, e, f, g, h, i] = m;
+                        let offset = uniforms.push(&TransformUniform {
+                            r0: [a, b, c, 0.0],
+                            r1: [d, e, f, 0.0],
+                            r2: [g, h, i, 0.0],
+                            p: [filter, size.0 as f32, size.1 as f32, 0.0],
+                        });
+                        let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
+                        let mut pass = render_pass(&mut encoder, "redrawn from", &layer.view, clear);
+                        pass.set_pipeline(&self.pipelines.transform);
+                        pass.set_bind_group(0, &bind, &[]);
+                        pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+                        pass.draw(0..3, 0..1);
+                    }
+                    self.dirty = self.full();
                 }
                 Op::Put(id, pixels) => {
                     if let Some(layer) = self.layers.get(&id) {
@@ -5494,6 +5679,7 @@ impl Canvas {
                 self.push_step(Step { made: 0, name: None, doc: None, pixels, selection: None, flip: None });
             }
             let opacity = stroke.style.opacity.clamp(0.0, 1.0);
+            let scaled = self.scaled.map_or([1.0, 0.0, 0.0, 0.0], |([x, y], k)| [k, x, y, 0.0]);
             let locked = stroke.style.preserve_alpha;
             let burns = stroke.style.burnt_edges > 0.0 && !stroke.style.preview;
             // a dual brush's: its second's texture read too (the stroke has ended: told here)
@@ -5518,6 +5704,7 @@ impl Canvas {
                                 _ => STROKE_PAINT,
                             },
                             stroke_opacity: opacity,
+                            scaled,
                             ..Default::default()
                         }
                         .with_grain(Some(&stroke.style))
@@ -5542,7 +5729,7 @@ impl Canvas {
                 }
                 (tool, _) => {
                     let offset = uniforms.push(
-                        &LayerUniform { opacity: 1.0, stroke_opacity: opacity, ..Default::default() }
+                        &LayerUniform { opacity: 1.0, stroke_opacity: opacity, scaled, ..Default::default() }
                             .with_grain(Some(&stroke.style))
                             .with_dual(Some(&stroke)),
                     );
@@ -7235,6 +7422,22 @@ impl Canvas {
         pass.set_bind_group(1, &self.uniform_bind, &[offset]);
         pass.set_bind_group(2, target.lut.map_or(&self.identity_lut, |l| &l.bind), &[]);
         pass.draw(0..6, 0..1);
+
+        // part of the canvas drawn again sharper, in its place
+        if let Some(sharp) = self.sharp.as_ref() {
+            let [x, y, w, h] = sharp.rect;
+            let unit_to_rect = Affine { a: w, b: 0.0, c: 0.0, d: h, e: x, f: y };
+            let m = unit_to_rect.then(target.to_screen).then(to_clip);
+            let offset = uniforms.push(&DisplayUniform::new(
+                [m.a, m.b, m.c, m.d],
+                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
+                target.convert,
+                target.lut.is_some(),
+            ));
+            pass.set_bind_group(0, &sharp.bind, &[]);
+            pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+            pass.draw(0..6, 0..1);
+        }
 
         // part of the canvas as it was, over it but for its hole
         if let Some(veil) = self.veil.as_ref() {

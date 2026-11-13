@@ -48,6 +48,10 @@ struct LayerUniform {
     clip_masked: f32,
     // pixels a side of the image the grain is read from
     grain_side: f32,
+    // how many of this canvas's pixels a pixel of the canvas its strokes are given in takes, and
+    // where this one's top left is in those (x: the scale, yz: the point): grain fixed to the
+    // canvas is read where it is on that canvas
+    scaled: vec4<f32>,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -111,7 +115,7 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
     }
     let built = s.a;
     if (lu.grain >= 0) {
-        let at = vec2<f32>(p) + 0.5;
+        let at = (vec2<f32>(p) + 0.5) / lu.scaled.x + lu.scaled.yz;
         let gc = cos(lu.grain_rotation);
         let gs = sin(lu.grain_rotation);
         let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / lu.grain_scale;
