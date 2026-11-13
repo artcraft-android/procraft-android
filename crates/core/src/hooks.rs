@@ -1352,16 +1352,22 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn the_vector_canvas_plugin_draws_strokes_in_the_brush_colour_and_undoes_them() {
-        let Some(s) = session() else { return };
-        let dir = store("vector-canvas");
+    /// Plugins with the artworks of marks (`MARKS`) on, going through a store `name` of their own,
+    /// and the kind those artworks are.
+    fn marking(name: &str) -> (String, Arc<Plugins>, String) {
+        let dir = store(name);
         let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
-        assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.vector-canvas";
-        assert!(plugins.set_on(id.to_owned(), true));
-        let kind = plugins.kinds().into_iter().find(|k| k.key == format!("{id}.vector")).expect("listed").key;
+        let file = crate::plugin_file::tests::marks_file(ID, json!([{ "key": "marks", "label": "Marks" }]));
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        (dir, plugins, format!("{ID}.marks"))
+    }
+
+    #[test]
+    fn a_plugin_s_artwork_draws_strokes_in_the_brush_colour_over_what_it_drew_and_undoes_them() {
+        let Some(s) = session() else { return };
+        let (dir, plugins, kind) = marking("plugin-artwork-marks");
+        let kind = plugins.kinds().into_iter().find(|k| k.key == kind).expect("listed").key;
         let canvas = plugins.open_canvas(kind.clone(), 200, 200, None).unwrap();
         assert!(s.attach_plugin_canvas(kind, canvas));
         s.set_color(0.0, 0.0, 1.0);
@@ -1398,13 +1404,7 @@ pub(crate) mod tests {
     #[test]
     fn a_plugin_s_artwork_keeps_its_layer_its_steps_and_its_data_honestly() {
         let Some(s) = session() else { return };
-        let dir = store("plugin-artwork-honest");
-        let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
-        assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.vector-canvas";
-        assert!(plugins.set_on(id.to_owned(), true));
-        let kind = format!("{id}.vector");
+        let (dir, plugins, kind) = marking("plugin-artwork-honest");
         let canvas = plugins.open_canvas(kind.clone(), 200, 200, None).unwrap();
         assert!(s.attach_plugin_canvas(kind.clone(), canvas));
         let art_layer = s.layers().iter().find(|l| l.current).unwrap().id;
@@ -1446,15 +1446,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_eraser_cuts_a_vector_stroke_on_the_canvas() {
+    fn a_plugin_s_artwork_is_told_the_eraser_and_takes_away_what_it_passes_over() {
         let Some(s) = session() else { return };
-        let dir = store("vector-eraser");
-        let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
-        assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.vector-canvas";
-        assert!(plugins.set_on(id.to_owned(), true));
-        let kind = format!("{id}.vector");
+        let (dir, plugins, kind) = marking("plugin-artwork-eraser");
         assert!(s.attach_plugin_canvas(kind.clone(), plugins.open_canvas(kind, 200, 200, None).unwrap()));
         s.set_color(0.0, 0.0, 1.0);
         s.set_brush_size(0.5);
@@ -1471,12 +1465,11 @@ pub(crate) mod tests {
         assert_eq!((alpha(&s, 60), alpha(&s, 100), alpha(&s, 140)), (255, 0, 255));
         s.undo();
         assert_eq!(alpha(&s, 100), 255);
-        // its switch turned on with the artwork open: the eraser takes the whole stroke at once
-        assert!(plugins.set_switch(format!("{id}.whole"), true));
-        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 80.0, 0.0)]);
-        s.stroke_add((1..10).map(|i| sample(100.0, 80.0 + i as f32 * 4.0, f64::from(i) * 8.0)).collect());
-        s.stroke_end(vec![sample(100.0, 120.0, 88.0)]);
-        assert_eq!((alpha(&s, 60), alpha(&s, 100), alpha(&s, 140)), (0, 0, 0), "all of it gone");
+        // painting again, it adds
+        s.set_tool(crate::ToolKind::Paint);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 20.0, 0.0)]);
+        s.stroke_end(vec![sample(100.0, 20.0, 8.0)]);
+        assert_eq!(picture(&s)[(20 * 200 + 100) * 4 + 3], 255);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

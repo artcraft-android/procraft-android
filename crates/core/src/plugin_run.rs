@@ -1852,6 +1852,107 @@ pub(crate) mod tests {
         (func (export "procraft_canvas_load") (result i32)
             (i64.store (i32.const 0) (i64.load (i32.const 2048))) (i32.const 0)))"#;
 
+    /// A plugin's artwork of marks: each touch of a stroke leaves a 10-pixel square in the colour the
+    /// stroke started with (its tool told it), a stroke called off takes its marks back, the eraser
+    /// takes away every mark within 8 pixels of it, and it keeps and draws all of them (each list
+    /// beginning as the last did, while marks are only added). Its data: the count, then each
+    /// mark's x, y and colour.
+    pub(crate) const MARKS: &str = r#"(module
+        (memory (export "memory") 1)
+        (func $copy (param $to i32) (param $from i32) (param $len i32)
+            (local $i i32)
+            (block $done (loop $each
+                (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+                (i32.store (i32.add (local.get $to) (local.get $i)) (i32.load (i32.add (local.get $from) (local.get $i))))
+                (local.set $i (i32.add (local.get $i) (i32.const 4)))
+                (br $each))))
+        (func (export "procraft_canvas_new") (param i32 i32) (result i32)
+            (i32.store (i32.const 0) (i32.const 0))
+            (i32.store (i32.const 4) (i32.const 0x000000FF))
+            (i32.store (i32.const 8) (i32.const 0))
+            (i32.const 0))
+        (func (export "procraft_canvas_tool") (param $tool i32) (param $colour i32) (param f32) (param f32)
+            (i32.store (i32.const 8) (local.get $tool))
+            (i32.store (i32.const 4) (local.get $colour)))
+        (func (export "procraft_canvas_touch") (param $phase i32) (param $x f32) (param $y f32) (param f32) (result i32)
+            (local $n i32) (local $i i32) (local $keep i32) (local $at i32) (local $dx f32) (local $dy f32)
+            (local.set $n (i32.load (i32.const 0)))
+            ;; called off: as many marks as it began with
+            (if (i32.eq (local.get $phase) (i32.const 3))
+                (then
+                    (if (i32.lt_u (i32.load (i32.const 12)) (local.get $n))
+                        (then (i32.store (i32.const 0) (i32.load (i32.const 12))) (return (i32.const 1))))
+                    (return (i32.const 0))))
+            (if (i32.eqz (local.get $phase)) (then (i32.store (i32.const 12) (local.get $n))))
+            (if (i32.eq (i32.load (i32.const 8)) (i32.const 1))
+                (then
+                    (block $done (loop $each
+                        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+                        (local.set $at (i32.add (i32.const 64) (i32.mul (local.get $i) (i32.const 12))))
+                        (local.set $dx (f32.sub (f32.load (local.get $at)) (local.get $x)))
+                        (local.set $dy (f32.sub (f32.load offset=4 (local.get $at)) (local.get $y)))
+                        (if (f32.ge (f32.add (f32.mul (local.get $dx) (local.get $dx)) (f32.mul (local.get $dy) (local.get $dy))) (f32.const 64))
+                            (then
+                                (call $copy (i32.add (i32.const 64) (i32.mul (local.get $keep) (i32.const 12))) (local.get $at) (i32.const 12))
+                                (local.set $keep (i32.add (local.get $keep) (i32.const 1)))))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br $each)))
+                    (i32.store (i32.const 0) (local.get $keep))
+                    (return (i32.ne (local.get $keep) (local.get $n)))))
+            (if (i32.ge_u (local.get $n) (i32.const 256)) (then (return (i32.const 0))))
+            (local.set $at (i32.add (i32.const 64) (i32.mul (local.get $n) (i32.const 12))))
+            (f32.store (local.get $at) (local.get $x))
+            (f32.store offset=4 (local.get $at) (local.get $y))
+            (i32.store offset=8 (local.get $at) (i32.load (i32.const 4)))
+            (i32.store (i32.const 0) (i32.add (local.get $n) (i32.const 1)))
+            (i32.const 1))
+        (func (export "procraft_canvas_draw") (result i32)
+            (local $n i32) (local $i i32) (local $m i32) (local $o i32) (local $x f32) (local $y f32)
+            (local.set $n (i32.load (i32.const 0)))
+            (local.set $o (i32.const 8192))
+            (block $done (loop $each
+                (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+                (local.set $m (i32.add (i32.const 64) (i32.mul (local.get $i) (i32.const 12))))
+                (local.set $x (f32.load (local.get $m)))
+                (local.set $y (f32.load offset=4 (local.get $m)))
+                (i32.store (local.get $o) (i32.const 1))
+                (i32.store offset=4 (local.get $o) (i32.load offset=8 (local.get $m)))
+                (i32.store offset=8 (local.get $o) (i32.const 0))
+                (f32.store offset=12 (local.get $o) (f32.const 0))
+                (i32.store offset=16 (local.get $o) (i32.const 0))
+                (i32.store offset=20 (local.get $o) (i32.const 2))
+                (f32.store offset=24 (local.get $o) (f32.sub (local.get $x) (f32.const 5)))
+                (f32.store offset=28 (local.get $o) (f32.sub (local.get $y) (f32.const 5)))
+                (i32.store offset=32 (local.get $o) (i32.const 3))
+                (f32.store offset=36 (local.get $o) (f32.add (local.get $x) (f32.const 5)))
+                (f32.store offset=40 (local.get $o) (f32.sub (local.get $y) (f32.const 5)))
+                (i32.store offset=44 (local.get $o) (i32.const 3))
+                (f32.store offset=48 (local.get $o) (f32.add (local.get $x) (f32.const 5)))
+                (f32.store offset=52 (local.get $o) (f32.add (local.get $y) (f32.const 5)))
+                (i32.store offset=56 (local.get $o) (i32.const 3))
+                (f32.store offset=60 (local.get $o) (f32.sub (local.get $x) (f32.const 5)))
+                (f32.store offset=64 (local.get $o) (f32.add (local.get $y) (f32.const 5)))
+                (i32.store offset=68 (local.get $o) (i32.const 5))
+                (local.set $o (i32.add (local.get $o) (i32.const 72)))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $each)))
+            (i32.sub (local.get $o) (i32.const 8192)))
+        (func (export "procraft_canvas_out") (result i32) (i32.const 8192))
+        (func (export "procraft_canvas_save") (result i32)
+            (local $len i32)
+            (local.set $len (i32.mul (i32.load (i32.const 0)) (i32.const 12)))
+            (i32.store (i32.const 8192) (i32.load (i32.const 0)))
+            (call $copy (i32.const 8196) (i32.const 64) (local.get $len))
+            (i32.add (local.get $len) (i32.const 4)))
+        (func (export "procraft_canvas_in") (param i32) (result i32) (i32.const 40000))
+        (func (export "procraft_canvas_load") (result i32)
+            (local $n i32)
+            (local.set $n (i32.load (i32.const 40000)))
+            (if (i32.gt_u (local.get $n) (i32.const 256)) (then (return (i32.const 1))))
+            (i32.store (i32.const 0) (local.get $n))
+            (call $copy (i32.const 64) (i32.const 40004) (i32.mul (local.get $n) (i32.const 12)))
+            (i32.const 0)))"#;
+
     /// A picture: red across, green down, the hue in blue.
     pub(crate) const PICTURE: &str =
         "fn picture(at: vec2<f32>) -> vec4<f32> { return vec4<f32>(at.x, at.y, hue(), 1.0); }";

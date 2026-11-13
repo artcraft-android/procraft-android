@@ -1,7 +1,7 @@
 //! A plugin's own canvas (interface 2): an artwork of a kind a plugin makes, a vector drawing say.
 //! The plugin keeps the artwork itself, in its own format; the app hands it the touches, asks it
 //! what to draw, keeps what it saves as each step and hands an older one back to undo. Its manifest
-//! lists the kinds (`"kinds": [{ "key": "vector", "label": "Vector artwork" }]`), and its module
+//! lists the kinds (`"kinds": [{ "key": "dots", "label": "Dots" }]`), and its module
 //! exports:
 //!
 //! - `procraft_canvas_new(width: i32, height: i32) -> i32`: a new artwork that size, canvas pixels

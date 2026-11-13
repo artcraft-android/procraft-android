@@ -19,10 +19,9 @@ A plugin holds one or both of these:
   ([layers of its own](#layers-of-its-own)).
 - **A [filter](#filters)**, which adds a new adjustment. It's a function the GPU runs over a layer.
 
-The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with code and `gap-closing`
+The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with code and `vector-layers`
 the largest. `extract-lines`, `posterise` and `outline` are filters. `grid-layer` has an action,
-`colour-triangle` is a picker, `vector-canvas` makes artworks of its own, `vector-layers` adds layers
-of its own, and `keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds.
+`colour-triangle` is a picker, `vector-layers` adds layers of its own, and `keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds.
 
 ## What you write
 
@@ -735,7 +734,7 @@ its own format. The app hands it the strokes, shows what it draws, and keeps wha
 stroke as a step for undo and redo. The manifest lists the kinds (interface 2):
 
 ```json
-  "kinds": [{ "key": "vector", "label": "Vector artwork" }]
+  "kinds": [{ "key": "dots", "label": "Dots" }]
 ```
 
 While the plugin is on, the gallery's New canvas list has a row for each kind under the presets,
@@ -769,8 +768,7 @@ the colour (`0xRRGGBBAA`), the brush's width in canvas pixels, and its opacity (
   other calls 800,000,000, for at most 5 seconds.
 
 The kit's `canvas` module writes it: an `Artwork` (new, the brush a stroke starts with, touch, draw
-into a `DrawList`, save, load) and `kit::canvas!(MyArtwork)`. `plugins/vector-canvas` is one to start
-from.
+into a `DrawList`, save, load) and `kit::canvas!(MyArtwork)`.
 
 ## Layers of its own
 

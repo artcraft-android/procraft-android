@@ -1869,7 +1869,17 @@ pub(crate) mod tests {
 
     /// A plugin that makes dots (`DOTS`), its kinds as `kinds` says.
     pub(crate) fn dots_file(id: &str, kinds: Value) -> Vec<u8> {
-        let module = wat::parse_str(crate::plugin_run::tests::DOTS).unwrap();
+        artwork_file(id, kinds, crate::plugin_run::tests::DOTS)
+    }
+
+    /// A plugin that makes artworks of marks (`MARKS`), its kinds as `kinds` says.
+    pub(crate) fn marks_file(id: &str, kinds: Value) -> Vec<u8> {
+        artwork_file(id, kinds, crate::plugin_run::tests::MARKS)
+    }
+
+    /// A plugin making artworks of its own, of kinds `kinds`, with the code `text` (WAT).
+    fn artwork_file(id: &str, kinds: Value, text: &str) -> Vec<u8> {
+        let module = wat::parse_str(text).unwrap();
         let mut manifest = coded(id, &module);
         manifest["compat"]["procraft"]["interface"] = json!(2);
         manifest["hooks"] = json!([]);
