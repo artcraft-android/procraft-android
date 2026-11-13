@@ -15,19 +15,22 @@
 #                                                 signed with a Developer ID and notarized when
 #                                                 the APPLE_* secrets exist, else ad hoc
 #   procraft-<version>-harmonyos-arm64.hap        HarmonyOS 5.0.3+ tablets (harmony/), signed with
-#                                                 the HARMONY_* secrets (harmony/SIGNING.md)
+#                                                 the HARMONY_* secrets (harmony/SIGNING.md); without
+#                                                 them …-harmonyos-arm64-unsigned.hap, which installs
+#                                                 once signed with one's own Huawei account
 #   SHA256SUMS.txt                                each file's SHA-256
 #
 # The Mac file is built on the public repository alone (a private one pays for macOS runners'
 # minutes, ten times Linux's), and only once the repository's variable RELEASE_MAC is true. The
-# HarmonyOS file likewise, once RELEASE_HARMONY is true (with its secrets set; without the signing
-# ones it is built but not released). While they are new, their failing leaves their file out
-# rather than holding up the release; so does Windows on ARM's.
+# HarmonyOS file likewise, once RELEASE_HARMONY is true (with HARMONY_TOOLS_URL set; the signing
+# secrets are optional). While they are new, their failing leaves their file out rather than
+# holding up the release; so does Windows on ARM's.
 #
 # A manual run (Actions › Release › Run workflow) is a dry run: it builds them at the version in
 # gradle.properties and keeps them as the run's artifacts, and releases nothing. It also builds
 # the iPad app's unsigned .ipa (ios/), which stays out of releases until that app is finished, and
-# (with RELEASE_HARMONY) the HarmonyOS app's unsigned .hap, for people to sign themselves.
+# (with RELEASE_HARMONY and the signing secrets) the HarmonyOS app's unsigned .hap beside the signed
+# one.
 name: Release
 
 on:
@@ -285,7 +288,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       DIST: ${{ github.workspace }}/dist
-      # signed (and released) only with the signing secrets; else the unsigned .hap alone
+      # signed with the signing secrets; without them the release carries the unsigned .hap
       SIGNED: ${{ secrets.HARMONY_P12 != '' && secrets.HARMONY_CER != '' && secrets.HARMONY_P7B != '' }}
     steps:
       - uses: actions/checkout@v4
@@ -354,9 +357,17 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/unsigned"
           cp "$unsigned" "$GITHUB_WORKSPACE/unsigned/procraft-$VERSION-harmonyos-arm64-unsigned.hap"
 
-      # a dry run keeps the unsigned .hap too: someone can sign it with their own Huawei ID
+      # no signing secrets: the release carries the unsigned .hap, which installs once someone signs
+      # it with their own Huawei account (harmony/README.md)
+      - name: The unsigned .hap as the release's
+        if: env.SIGNED != 'true'
+        run: |
+          mkdir -p "$DIST"
+          cp unsigned/*.hap "$DIST/"
+
+      # signed, a dry run keeps the unsigned .hap beside it
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'workflow_dispatch'
+        if: env.SIGNED == 'true' && github.event_name == 'workflow_dispatch'
         with:
           name: harmonyos-unsigned
           path: unsigned/*
@@ -395,7 +406,6 @@ jobs:
         run: ls -l dist unsigned >>"$GITHUB_STEP_SUMMARY" 2>&1 || true
 
       - uses: actions/upload-artifact@v4
-        if: env.SIGNED == 'true'
         with:
           name: release-harmonyos
           path: dist/*

@@ -1,9 +1,14 @@
 # Signing and releasing ProCraft for HarmonyOS
 
-The release workflow's `harmony` job (`.github/workflows/release.yml`) builds and signs the
-HarmonyOS app as the Mac job signs the Mac app: secrets in GitHub, signed in CI, skipped until set
-up. This is what sets it up, all of it the maintainer's to do (Huawei issues the certificates to a
-verified account), and what a signed `.hap` can and can't do.
+The release workflow's `harmony` job (`.github/workflows/release.yml`) builds the HarmonyOS app
+and, as the Mac job does, signs it in CI from GitHub secrets. It is skipped until set up. This is
+what sets it up and what a signed `.hap` can and can't do.
+
+**Signing is optional.** With only the command-line tools set up (steps 1, 2 and 4: a free Huawei
+ID, no certificates), the job releases `procraft-<version>-harmonyos-arm64-unsigned.hap`. That
+installs once someone signs it with their own Huawei account (harmony/README.md, "Install the
+unsigned build yourself"). Steps 3 and 5's signing secrets switch it to a signed `.hap`. Huawei
+issues the certificates, to a verified account.
 
 Confidence: **High** = Huawei's or OpenHarmony's own documentation; **Medium** = documentation that
 leaves gaps, or several consistent secondary sources; **Low** = one secondary source, or untested.
@@ -54,13 +59,15 @@ FAQ.)
    - Note its SHA-256 (`sha256sum` or `Get-FileHash`).
    - Read the licence you accept at the download first: keeping a private copy for your own CI
      has to be allowed by it. It wasn't checked here (unverified).
-5. **GitHub**, in the public repository's Settings > Secrets and variables > Actions:
+5. **GitHub**, in the public repository's Settings > Secrets and variables > Actions. The
+   maintainer's `set-harmony-secrets.sh` sets these from files: the tools' two always, the
+   signing ones only when all six files are there.
 
    | Name | Kind | What |
    |---|---|---|
-   | `HARMONY_TOOLS_URL` | secret | the command-line tools zip's private URL |
-   | `HARMONY_TOOLS_SHA256` | variable | its SHA-256 |
-   | `HARMONY_P12` | secret | `procraft.p12`, base64 |
+   | `HARMONY_TOOLS_URL` | secret | the command-line tools zip's private URL (needed) |
+   | `HARMONY_TOOLS_SHA256` | variable | its SHA-256 (needed) |
+   | `HARMONY_P12` | secret | `procraft.p12`, base64 (this and the five below: signed builds only) |
    | `HARMONY_CER` | secret | a `.cer`, base64 (see below for which) |
    | `HARMONY_P7B` | secret | the matching `.p7b`, base64 |
    | `HARMONY_KEY_ALIAS` | secret | the key's alias |
@@ -71,9 +78,10 @@ FAQ.)
    - Base64 in Git Bash: `base64 -w0 procraft.p12`. In PowerShell:
      `[Convert]::ToBase64String([IO.File]::ReadAllBytes("procraft.p12"))`.
    - Or set them all with `gh secret set HARMONY_P12 < <(base64 -w0 procraft.p12)` and so on.
-6. **A dry run** (Actions > Release > Run workflow) builds the `.hap` both unsigned (artifact
-   `harmonyos-unsigned`) and signed (artifact `release-harmonyos`). A tag then drafts the release
-   with `procraft-<version>-harmonyos-arm64.hap`.
+6. **A dry run** (Actions > Release > Run workflow) builds the `.hap` (artifact
+   `release-harmonyos`: signed with the signing secrets, else unsigned; signed, the unsigned one
+   comes too, as `harmonyos-unsigned`). A tag then drafts the release with
+   `procraft-<version>-harmonyos-arm64.hap` (or `…-unsigned.hap`).
 
 ## Which certificate and profile go into the secrets
 

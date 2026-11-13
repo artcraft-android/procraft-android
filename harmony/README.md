@@ -25,7 +25,10 @@ needs DevEco Studio.
 | `../desktop/src/native_input.rs`, `egui_events.rs` | Touches with the pen's tool, pressure and tilt, made into the window events the desktop takes. egui's input is made from those as egui-winit makes it. |
 | `../crates/core/src/ohos_window.rs` | The core's side of the later ArkUI interface: the native window from a surface id. |
 
-## Running it
+## Build it yourself
+
+This needs nothing from the maintainer: a free Huawei ID, DevEco Studio and a HarmonyOS 5.0.3+
+tablet (or the emulator).
 
 What you need (the downloads need a Huawei ID):
 
@@ -48,6 +51,8 @@ harmony/build-rust.sh x86_64          # the emulator on a PC; arm64 for a tablet
 Then, in DevEco Studio:
 1. Open `harmony/app`.
 2. Under File > Project Structure > Signing Configs, tick *Automatically generate signature*.
+   It makes a debug certificate and profile for your device under your Huawei ID. If it refuses
+   the bundle name, change `bundleName` in `app/AppScope/app.json5` to one of your own.
 3. Pick the emulator or the tablet and press Run.
 
 The app's log goes to hilog under the tag `ProCraft` (`hdc hilog | grep ProCraft`), and to
@@ -62,6 +67,38 @@ bridge's build script only adds link paths) and run:
 ```
 OHOS_NDK_HOME=/some/empty/folder cargo clippy --target aarch64-unknown-linux-ohos -p procraft-desktop -p procraft-harmony --all-targets -- -D warnings
 ```
+
+## Install the unsigned build yourself
+
+A release may carry `procraft-<version>-harmonyos-arm64-unsigned.hap`. **It won't install until
+you sign it with your own Huawei account.** HarmonyOS installs only packages signed with a
+certificate and profile that Huawei issued. Building it yourself (above) is the easier way; to
+sign the download instead:
+
+1. **Developer mode:**
+   - Make a Huawei ID and install DevEco Studio.
+   - On the tablet, turn on developer mode (tap the software version in Settings > About several
+     times), then USB debugging in Settings > System > Developer options. Connect the tablet.
+2. **Your own debug certificate and profile:**
+   - In DevEco Studio, Build > Generate Key and CSR makes a `.p12` and a `.csr`.
+   - In AppGallery Connect (Certificates, APP IDs and Profiles):
+     - a debug certificate from the `.csr` (a `.cer`);
+     - your tablet's UDID (`hdc shell bm get --udid`);
+     - an APP ID for `io.github.artcraftandroid.procraft`;
+     - a debug profile with that certificate and your tablet (a `.p7b`).
+   - If AppGallery Connect won't take that bundle name for your account, build it yourself
+     instead, with a bundle name of your own.
+3. **Sign** with the SDK's tool (in DevEco Studio's `sdk/default/openharmony/toolchains/lib`):
+   ```
+   java -jar hap-sign-tool.jar sign-app -mode localSign -signAlg SHA256withECDSA \
+     -keyAlias <alias> -keyPwd <key password> -keystoreFile my.p12 -keystorePwd <keystore password> \
+     -appCertFile my.cer -profileFile my.p7b \
+     -inFile procraft-<version>-harmonyos-arm64-unsigned.hap -outFile procraft.hap
+   ```
+4. **Install:** `hdc install procraft.hap` (hdc is in the SDK's `toolchains` folder).
+
+Without identity verification, a debug certificate lasts 14 days; after that, sign and install
+again. Verified, it lasts a year.
 
 ## Unverified (written from the API docs; to check on the emulator or a device)
 
@@ -92,10 +129,13 @@ OHOS_NDK_HOME=/some/empty/folder cargo clippy --target aarch64-unknown-linux-oho
 ## Packaging and releases
 
 The release workflow builds the HarmonyOS app (job `harmony` in `.github/workflows/release.yml`)
-once the repository variable `RELEASE_HARMONY` is true. Like the Mac job, it is signed in CI from
-secrets and left out of a release when it fails. `SIGNING.md` has the steps (Huawei ID,
-certificates and profiles from AppGallery Connect, the secrets) and what a signed `.hap` can and
-can't do. In short:
+once the repository variable `RELEASE_HARMONY` is true and Huawei's command-line tools are
+reachable (`HARMONY_TOOLS_URL`). Like the Mac job, it is left out of a release when it fails.
+- **Without signing secrets:** it releases the unsigned `.hap` (see "Install the unsigned build
+  yourself").
+- **With them:** it releases a signed one.
+
+`SIGNING.md` has the maintainer's steps and what a signed `.hap` can and can't do. In short:
 - **Builds:** `hvigorw assembleHap` builds a `.hap` per module (installed with `hdc install`),
   and `hvigorw assembleApp` builds the `.app` that AppGallery Connect takes.
 - **Signing:** a keystore (`.p12`), plus a certificate (`.cer`) and profile (`.p7b`) that Huawei
