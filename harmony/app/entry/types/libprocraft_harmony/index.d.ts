@@ -4,10 +4,28 @@
 
 /**
  * Starts the app (for now the desktop app's interface, hosted in the canvas component whose
- * `libraryname` is 'procraft_harmony'): its folder (`context.filesDir`) and the display's pixels per
- * vp. Before the canvas component is made.
+ * `libraryname` is 'procraft_harmony'): its folders (`context.filesDir`, `context.cacheDir`) and
+ * the display's pixels per vp. Before the canvas component is made, after registerHost.
  */
-export declare function startApp(filesDir: string, density: number): void
+export declare function startApp(filesDir: string, cacheDir: string, density: number): void
+
+/**
+ * ArkTS's side of what the app asks of the system (host/Host.ets): each request as JSON, on the
+ * interface's thread; one with an id other than 0 is answered through answer().
+ */
+export declare function registerHost(host: (id: number, request: string) => void): void
+
+/** The answer to request `id`, as JSON. */
+export declare function answer(id: number, json: string): void
+
+/** Text the soft keyboard typed. */
+export declare function softText(text: string): void
+
+/** A key the soft keyboard pressed `count` times: 'Backspace', 'Delete' or 'Enter'. */
+export declare function softKey(name: string, count: number): void
+
+/** The pen hovering over the canvas component at (x, y) vp, with its tilts in degrees. */
+export declare function penHover(x: number, y: number, tiltX: number, tiltY: number): void
 
 /** One touch sample: surface pixels, pressure 0..1, the pen's tilts in degrees, time in ns. */
 export interface TouchSample {

@@ -43,6 +43,8 @@ mod model_picture;
 mod native_input;
 #[cfg(target_env = "ohos")]
 pub mod ohos;
+#[cfg(target_env = "ohos")]
+mod ohos_platform;
 mod overlays;
 mod panel;
 mod pdf;
@@ -637,7 +639,9 @@ impl App {
     }
 
     /// The app ending (its window closed, or ended without that: then the artwork open kept as
-    /// closing the window keeps it).
+    /// closing the window keeps it). (HarmonyOS ends the app without asking: its artwork is kept as
+    /// it goes to the background.)
+    #[cfg_attr(target_env = "ohos", allow(dead_code))]
     fn on_exiting(&mut self) {
         // the backend did its run: the next starts on it again
         startup::gpu_ended();

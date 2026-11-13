@@ -9,17 +9,20 @@ native side drives the app the way winit does on the desktop. An ArkUI interface
 the core's `CanvasSession`, comes later; `bridge/src/canvas.rs` and `app/.../canvas/CanvasView.ets`
 are its start.
 
-**Status:** the Rust type-checks and passes clippy for `aarch64-unknown-linux-ohos`. Nothing has
-been linked, packaged or run yet, and the ArkTS has not been compiled: that needs DevEco Studio.
+**Status:** the Rust type-checks and passes clippy for `aarch64-unknown-linux-ohos` (CI checks
+it too). Nothing has been linked, packaged or run yet, and the ArkTS has not been compiled: that
+needs DevEco Studio.
 
 ## What is here
 
 | Path | What it is |
 |---|---|
-| `bridge/` | `procraft-harmony`, the native library (`libprocraft_harmony.so`). `egui_host.rs`: when ArkUI loads it as the canvas component's native side, it hooks the component's surface, touch, mouse, key and frame callbacks up to the desktop app (`../desktop/src/ohos.rs`). `canvas.rs`: Node-API wrappers of a few core calls, for the later ArkUI interface. On any other system the crate is empty except for its pen maths. |
-| `app/` | The DevEco Studio project (Stage model, one `entry` module for tablets and 2-in-1s). `pages/Index.ets` calls `startApp(filesDir, density)` and shows the full-screen `XComponent` with `libraryname: 'procraft_harmony'`. |
+| `bridge/` | `procraft-harmony`, the native library (`libprocraft_harmony.so`). `egui_host.rs`: when ArkUI loads it as the canvas component's native side, it hooks the component's surface, touch (with the samples kept between frames), mouse and key callbacks up to the desktop app (`../desktop/src/ohos.rs`). It also takes ArkTS's side of the system (`registerHost`, `answer`, the soft keyboard's text, the pen's hover). `canvas.rs`: Node-API wrappers of a few core calls, for the later ArkUI interface. On any other system the crate is empty except for its pen maths. |
+| `app/` | The DevEco Studio project (Stage model, one `entry` module for tablets and 2-in-1s, HarmonyOS 5.0.3 / API 15 and later). `pages/Index.ets` registers `host/Host.ets`, calls `startApp`, and shows the full-screen `XComponent` with `libraryname: 'procraft_harmony'`. `host/Host.ets` does what the app asks of the system: the document picker, the picker's Save, the share sheet, the pasteboard and the soft keyboard. |
 | `build-rust.sh` | Builds the library into `app/entry/libs/<abi>/` and copies in the app icons. |
-| `../desktop/src/ohos.rs` | The desktop app's HarmonyOS host. The window is the component's native window; wgpu draws on OpenGL ES. Frames come at the display's vsync. Touches carry the pen's tool, pressure and tilt (`native_input.rs`); egui's input is made from them as egui-winit makes it (`egui_events.rs`). |
+| `../desktop/src/ohos.rs` | The desktop app's HarmonyOS host. The app runs on a thread of its own, taking the component's callbacks as events. It can wait for the system's pickers the way it waits for rfd's dialogs on the desktop. The window is the component's native window, and wgpu draws on OpenGL ES. The GPU device, the canvas and the interface outlive the surface, so going to the background loses nothing (the artwork is saved as it goes). |
+| `../desktop/src/ohos_platform.rs` | The requests to `Host.ets` (JSON) and their answers. Files picked are copied into the app's cache. Files saved are written into the cache, then copied where the user picked, or shared from the share sheet for a "Share as …". |
+| `../desktop/src/native_input.rs`, `egui_events.rs` | Touches with the pen's tool, pressure and tilt, made into the window events the desktop takes. egui's input is made from those as egui-winit makes it. |
 | `../crates/core/src/ohos_window.rs` | The core's side of the later ArkUI interface: the native window from a surface id. |
 
 ## Running it
@@ -53,32 +56,38 @@ The app's log goes to hilog under the tag `ProCraft` (`hdc hilog | grep ProCraft
 DevEco Studio writes the signing keys' paths and passwords into `app/build-profile.json5`. Don't
 commit them.
 
-To check the Rust without the SDK, point `OHOS_NDK_HOME` at any empty folder (the bridge's build
-script only adds link paths) and run:
+To check the Rust without the SDK (as CI does), point `OHOS_NDK_HOME` at any empty folder (the
+bridge's build script only adds link paths) and run:
 
 ```
 OHOS_NDK_HOME=/some/empty/folder cargo clippy --target aarch64-unknown-linux-ohos -p procraft-desktop -p procraft-harmony --all-targets -- -D warnings
 ```
 
-## Stand-ins and what is still to do
+## Unverified (written from the API docs; to check on the emulator or a device)
 
-- **Files:** opening, saving, importing and sharing say "isn't available on HarmonyOS yet" (`desktop/src/host.rs`).
-  The fix is the document picker and Share Kit through ArkTS.
-- **Clipboard:** text copied in the app pastes within the app, but nothing is shared with the
-  system's pasteboard. The fix is the pasteboard through ArkTS.
-- **Text:** fields take a hardware keyboard only, with a US layout (`egui_events.rs`). The fix is
-  the soft keyboard through the input method framework.
-- **Leaving the app:** when it goes to the background, the artwork open is kept and closed, and the
-  app comes back on the gallery. Later, keep the GPU device and the canvas across surfaces, as the
-  Android app does.
-- **Pen:** each touch carries its own tool, pressure and tilt; historical points (more than one
-  sample per frame) and hover aren't read yet.
-- **Not checked yet:**
-  - whether touch positions are in pixels (assumed) or vp;
-  - which way each tilt axis leans.
-- **GPU:** OpenGL ES only until wgpu has `VK_OHOS_surface` (its next major release).
-- **Not wired:** fonts for other scripts from `/system/fonts`, Project canvas, the M-Pencil's
-  double-tap and squeeze (Pen Kit).
+- **The ArkTS** (`Host.ets`, `Index.ets`): the picker, Share Kit, pasteboard and input method
+  calls follow the API references but haven't been compiled.
+- **The pasteboard:** reading it takes `ohos.permission.READ_PASTEBOARD` (a restricted
+  permission, not declared) or the system's paste button. Until then, a paste falls back to the
+  app's own clipboard. Copying out needs nothing.
+- **Pen and touch:**
+  - whether touch positions are in pixels (assumed);
+  - which way each tilt axis leans;
+  - whether the kept samples' array is the system's to free.
+- **Background:** whether a surface the app is slow to let go of (while a picker is open) is safe;
+  the app holds its own reference to the native window.
+- **Saving again:** a second Save of the same artwork writes into the cache without copying out
+  again.
+
+## Not done yet
+
+- **Clipboard pictures and files from other apps:** these need the paste button or the
+  permission.
+- **Open with:** files opened with the app from other apps (skills and `want.uri` in
+  `module.json5`).
+- **GPU:** Vulkan waits for wgpu's next major release (OpenGL ES until then).
+- **Smaller pieces:** Project canvas, the M-Pencil's double-tap and squeeze (Pen Kit, mainland
+  China only), time-lapse video through the system's encoder.
 
 ## Packaging and releases
 

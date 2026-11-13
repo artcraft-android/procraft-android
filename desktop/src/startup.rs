@@ -443,6 +443,7 @@ pub fn canvas_shown(drawn: Option<bool>) {
 
 /// This run is ending as it should: its backend is kept for the next, unless the canvases'
 /// pipelines failed on it.
+#[cfg_attr(target_env = "ohos", allow(dead_code))]
 pub fn gpu_ended() {
     let mut run = run_now();
     run.end();
@@ -614,6 +615,7 @@ impl Run {
     }
 
     /// The app is ending as it should.
+    #[cfg_attr(target_env = "ohos", allow(dead_code))]
     fn end(&mut self) {
         self.ended = true;
     }

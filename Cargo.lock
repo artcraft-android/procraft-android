@@ -3332,6 +3332,7 @@ dependencies = [
  "resvg",
  "rfd",
  "rustix 1.1.5",
+ "serde_json",
  "swash",
  "wayland-backend",
  "wayland-client",
@@ -3372,6 +3373,7 @@ dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
  "ohos-xcomponent-binding",
+ "ohos-xcomponent-sys",
  "procraft-core",
  "procraft-desktop",
 ]

@@ -1,20 +1,25 @@
 //! The app on HarmonyOS, until it has an interface of its own: the canvas component (an ArkUI
 //! XComponent, full screen) is its window, and its native side's callbacks drive it as winit's
 //! event loop does on the desktop. harmony/bridge hands them here, on the interface's thread: the
-//! surface coming, changing size and going, touches (with the pen's tool, pressure and tilt), the
-//! mouse, keys, focus, and the display's frames, at each of which the app draws if it asked to.
+//! surface coming, changing size and going, touches (with the pen's tool, pressure and tilt, and
+//! the samples kept between frames), the pen hovering, the mouse, keys, focus, and the soft
+//! keyboard's text.
 //!
-//! What the system has and the app doesn't use yet: the soft keyboard (text fields take a hardware
-//! keyboard only), the document picker and the pasteboard (`host.rs` says so), a second display.
+//! The app runs on a thread of its own, which takes those as events and draws. It can then wait
+//! for what it asks of the system through ArkTS (the document picker, the pasteboard:
+//! `ohos_platform.rs`) as it waits for rfd's dialogs on the desktop, while the interface's thread
+//! answers. The GPU device, the canvas and the interface outlive the surface: the app going to
+//! the background loses nothing.
+#![allow(unsafe_code)]
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::{Duration, Instant};
 
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
@@ -23,29 +28,61 @@ use winit::raw_window_handle as rwh;
 use crate::egui_events::{EguiEvents, Wants};
 use crate::native_input::{Held, mouse_events, touch_event};
 pub use crate::native_input::{MouseAction, NativeButton, NativeKey, NativeMouse, NativeTouch, Phase, Tool};
+pub use crate::ohos_platform::{answer, set_requester};
 use crate::{App, Looper};
 
 /// The display's refresh when the system hasn't said, millihertz.
 const REFRESH: u32 = 60_000;
 
+/// How long the interface's thread waits, as the surface goes, for the app to let go of it.
+const LET_GO_WAIT: Duration = Duration::from_millis(500);
+
+/// The pen's id while it hovers (no touch has it then).
+const HOVER: u64 = u64::MAX - 1;
+
+// libnative_window.so: a reference of the app's own to the component's native window, so the
+// window outlives a surface the app hasn't let go of yet
+#[link(name = "native_window")]
+unsafe extern "C" {
+    fn OH_NativeWindow_NativeObjectReference(object: *mut c_void) -> i32;
+    fn OH_NativeWindow_NativeObjectUnreference(object: *mut c_void) -> i32;
+}
+
+/// The canvas component's native window, with a reference of the app's own.
+pub struct NativeWindow(NonNull<c_void>);
+
+impl NativeWindow {
+    /// `window`, referenced for as long as this is kept.
+    pub fn new(window: NonNull<c_void>) -> NativeWindow {
+        // SAFETY: the system's live native window, as its surface callback hands it over
+        unsafe { OH_NativeWindow_NativeObjectReference(window.as_ptr()) };
+        NativeWindow(window)
+    }
+}
+
+impl Drop for NativeWindow {
+    fn drop(&mut self) {
+        // SAFETY: the reference taken in `new`, given back once
+        unsafe { OH_NativeWindow_NativeObjectUnreference(self.0.as_ptr()) };
+    }
+}
+
+// SAFETY: the window is only handed to wgpu (to make the surface on, which it may do from any
+// thread) and referenced and let go of, which the system does from any thread
+unsafe impl Send for NativeWindow {}
+// SAFETY: as for `Send`: nothing is written through the pointer here
+unsafe impl Sync for NativeWindow {}
+
 /// The canvas component's surface, as the app's window: the system's native window (handed to
 /// wgpu for the surface), its size, the display's density, and whether a frame was asked for.
 pub struct Window {
-    native: NonNull<c_void>,
+    native: NativeWindow,
     width: AtomicU32,
     height: AtomicU32,
     /// Pixels per vp (ArkUI's unit), which the interface's points are.
     scale: f32,
     redraw: Arc<AtomicBool>,
 }
-
-// SAFETY: the native window is only handed to wgpu to make the surface on (which it may do from
-// any thread, and HarmonyOS's EGL and Vulkan take it from any); everything else is atomics
-#[allow(unsafe_code)]
-unsafe impl Send for Window {}
-// SAFETY: as for `Send`: nothing is written through the pointer here
-#[allow(unsafe_code)]
-unsafe impl Sync for Window {}
 
 impl Window {
     pub fn request_redraw(&self) {
@@ -90,12 +127,11 @@ impl Window {
     }
 }
 
-#[allow(unsafe_code)]
 impl rwh::HasWindowHandle for Window {
     fn window_handle(&self) -> Result<rwh::WindowHandle<'_>, rwh::HandleError> {
-        let raw = rwh::RawWindowHandle::OhosNdk(rwh::OhosNdkWindowHandle::new(self.native));
-        // SAFETY: the canvas component's native window, alive until its surface goes; the host drops
-        // the app's screen (and with it the surface on this window) before it lets the system go on
+        let raw = rwh::RawWindowHandle::OhosNdk(rwh::OhosNdkWindowHandle::new(self.native.0));
+        // SAFETY: the canvas component's native window, which the app's own reference keeps alive
+        // for as long as this window (and the surface made on it) is kept
         Ok(unsafe { rwh::WindowHandle::borrow_raw(raw) })
     }
 }
@@ -131,21 +167,21 @@ impl rwh::HasDisplayHandle for OwnedDisplayHandle {
     }
 }
 
-/// Wakes the app from another thread: at the display's next frame it looks again.
+/// Wakes the app from another thread: it looks again at once.
 pub struct EventLoopProxy<T> {
-    wake: Arc<AtomicBool>,
+    events: mpsc::Sender<Event>,
     kind: PhantomData<fn(T)>,
 }
 
 impl<T> Clone for EventLoopProxy<T> {
     fn clone(&self) -> EventLoopProxy<T> {
-        EventLoopProxy { wake: Arc::clone(&self.wake), kind: PhantomData }
+        EventLoopProxy { events: self.events.clone(), kind: PhantomData }
     }
 }
 
 impl<T> EventLoopProxy<T> {
     pub fn send_event(&self, _event: T) -> Result<(), T> {
-        self.wake.store(true, Ordering::Relaxed);
+        let _ = self.events.send(Event::Wake);
         Ok(())
     }
 }
@@ -158,11 +194,14 @@ pub struct EventResponse {
 }
 
 /// egui's input from the window's events, as egui-winit makes it on the desktop
-/// (`egui_events.rs`), and what egui asks of the system after each frame.
+/// (`egui_events.rs`); what egui asks of the system after each frame (the pasteboard, the soft
+/// keyboard).
 pub struct EguiState {
     ctx: egui::Context,
     events: EguiEvents,
     started: Instant,
+    /// Whether the soft keyboard was last asked up.
+    keyboard: bool,
 }
 
 impl EguiState {
@@ -179,7 +218,7 @@ impl EguiState {
         events.input.max_texture_side = max_texture_side;
         events.input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point =
             native_pixels_per_point;
-        EguiState { ctx, events, started: Instant::now() }
+        EguiState { ctx, events, started: Instant::now(), keyboard: false }
     }
 
     pub fn egui_ctx(&self) -> &egui::Context {
@@ -212,10 +251,20 @@ impl EguiState {
         EventResponse { consumed, repaint: true }
     }
 
-    /// A key, which egui takes as egui-winit gives it; true if egui took it.
+    /// A key, which egui takes as egui-winit gives it (a paste with the system pasteboard's text,
+    /// where the app may read it); true if egui took it.
     fn key(&mut self, key: egui::Key, pressed: bool, repeat: bool) -> bool {
+        let paste = pressed && key == egui::Key::V && self.events.modifiers.command && self.events.clipboard_shortcuts;
+        if paste && let Some(text) = crate::ohos_platform::paste_text() {
+            self.events.clipboard = text;
+        }
         let wants = self.wants();
         self.events.key(key, pressed, repeat, wants)
+    }
+
+    /// Text the soft keyboard typed.
+    fn text(&mut self, text: String) {
+        self.events.input.events.push(egui::Event::Text(text));
     }
 
     pub fn take_egui_input(&mut self, window: &Window) -> egui::RawInput {
@@ -225,7 +274,18 @@ impl EguiState {
     }
 
     pub fn handle_platform_output(&mut self, _window: &Window, output: egui::PlatformOutput) {
+        for command in &output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                crate::ohos_platform::copy_text(text);
+            }
+        }
         self.events.commands(output.commands);
+        // a text field with the keys brings the soft keyboard up, and takes it down as it goes
+        let typing = output.ime.is_some();
+        if typing != self.keyboard {
+            self.keyboard = typing;
+            crate::ohos_platform::keyboard(typing);
+        }
     }
 }
 
@@ -240,6 +300,38 @@ pub fn log_to(sink: fn(&str)) {
 pub(crate) fn log_line(line: &[u8]) {
     if let Some(sink) = LOG.get() {
         sink(String::from_utf8_lossy(line).trim_end());
+    }
+}
+
+/// What reaches the app's thread from the interface's (and from the app's own other threads).
+pub enum Event {
+    /// The surface came: its native window, `width` × `height` pixels.
+    SurfaceCreated(NativeWindow, u32, u32),
+    SurfaceChanged(u32, u32),
+    /// The surface is going: the app lets go of it, then says so.
+    SurfaceDestroyed(mpsc::Sender<()>),
+    Touch(NativeTouch),
+    /// The pen hovering at (x, y) vp, with its tilts (degrees), if it gives them.
+    PenHover(f32, f32, Option<(f32, f32)>),
+    Mouse(NativeMouse),
+    Hover(bool),
+    Key(NativeKey, bool),
+    Focus(bool),
+    /// Text the soft keyboard typed.
+    Text(String),
+    /// A key the soft keyboard pressed (`count` times): Backspace, Delete, Enter.
+    SoftKey(egui::Key, u32),
+    /// Something wants the app to look again (a thread of its own done, say).
+    Wake,
+}
+
+/// Where the interface's thread sends the app its events, once the app has started.
+static EVENTS: Mutex<Option<mpsc::Sender<Event>>> = Mutex::new(None);
+
+/// Sends `event` to the app, if it is running.
+fn send(event: Event) {
+    if let Some(events) = EVENTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        let _ = events.send(event);
     }
 }
 
@@ -260,13 +352,12 @@ impl Looper for Loop {
     }
 }
 
-/// The app, its window while the surface is there, and its loop.
+/// The app on its thread, and what it keeps of the system's.
 struct Host {
     app: App,
-    window: Option<Arc<Window>>,
     looper: Loop,
-    /// A frame asked for (by the app or another thread); cleared as it is drawn.
-    wake: Arc<AtomicBool>,
+    /// A frame asked for (the window's `request_redraw`); cleared as it is drawn.
+    redraw: Arc<AtomicBool>,
     held: Held,
     /// The keys held down (another press of one is the system repeating it).
     keys_down: Vec<egui::Key>,
@@ -274,140 +365,173 @@ struct Host {
     density: f32,
 }
 
-thread_local! {
-    /// The app, on the interface's thread (where every callback comes).
-    static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
-}
-
-/// Runs `f` on the app, if it is running; a panic in it is logged and ends the app (the system's
-/// callback mustn't unwind), the window left as it is.
-fn with_host(what: &str, f: impl FnOnce(&mut Host)) {
-    HOST.with(|host| {
-        let Ok(mut host) = host.try_borrow_mut() else {
-            log::warn!("{what}: the app is busy (a callback within a callback)");
-            return;
-        };
-        let Some(running) = host.as_mut() else { return };
-        if running.looper.exit.get() {
-            return;
-        }
-        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(running)));
-        if let Err(panic) = done {
-            log::error!("{what} panicked: {}", procraft_gpu::panic_message(panic.as_ref()));
-            running.looper.exit.set(true);
-        }
-    });
-}
-
-/// Starts the app: its folder is the app's sandbox (`files_dir`, ArkTS's `context.filesDir`), the
-/// display `density` pixels per vp. Once, before anything else.
-pub fn start(files_dir: PathBuf, density: f32) {
-    HOST.with(|host| {
-        let Ok(mut host) = host.try_borrow_mut() else { return };
-        if host.is_some() {
-            return;
-        }
+/// Starts the app on a thread of its own: its folders are the app's sandbox (`files_dir`,
+/// `cache_dir`: ArkTS's `context.filesDir` and `cacheDir`), the display `density` pixels per vp.
+/// Once, before anything else.
+pub fn start(files_dir: PathBuf, cache_dir: PathBuf, density: f32) {
+    let mut events = EVENTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if events.is_some() {
+        return;
+    }
+    let (sender, receiver) = mpsc::channel();
+    let density = if density.is_finite() && density > 0.0 { density } else { 1.0 };
+    let wake = sender.clone();
+    let thread = std::thread::Builder::new().name("procraft-app".to_owned()).spawn(move || {
         crate::files::set_app_dir(files_dir);
+        crate::ohos_platform::set_cache_dir(cache_dir);
         crate::prepare();
-        let wake = Arc::new(AtomicBool::new(true));
-        let app = App::new(EventLoopProxy { wake: Arc::clone(&wake), kind: PhantomData });
-        let density = if density.is_finite() && density > 0.0 { density } else { 1.0 };
-        *host = Some(Host {
-            app,
-            window: None,
+        let host = Host {
+            app: App::new(EventLoopProxy { events: wake, kind: PhantomData }),
             looper: Loop::default(),
-            wake,
+            redraw: Arc::new(AtomicBool::new(true)),
             held: Held::default(),
             keys_down: Vec::new(),
             density,
-        });
+        };
+        run(host, &receiver);
     });
+    match thread {
+        Ok(_) => *events = Some(sender),
+        Err(e) => log::error!("the app's thread: {e}"),
+    }
 }
 
-/// The canvas component's surface is there: `native` its native window, `width` × `height`
-/// pixels. The app makes its screen on it (the first time, and again after the surface went).
-pub fn surface_created(native: NonNull<c_void>, width: u32, height: u32) {
-    with_host("the surface's coming", |host| {
+/// The app's loop: events as they come, the app's housekeeping, and a frame when one is due.
+fn run(mut host: Host, events: &mpsc::Receiver<Event>) {
+    loop {
+        let first = match host.looper.until.get() {
+            Some(until) => events.recv_timeout(until.saturating_duration_since(Instant::now())).ok(),
+            None => match events.recv() {
+                Ok(event) => Some(event),
+                // nothing can reach the app any more
+                Err(_) => return,
+            },
+        };
+        let mut more = first.into_iter().chain(std::iter::from_fn(|| events.try_recv().ok())).collect::<Vec<_>>();
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for event in more.drain(..) {
+                host.take(event);
+            }
+            host.turn();
+        }));
+        if let Err(panic) = turn {
+            log::error!("the app panicked: {}", procraft_gpu::panic_message(panic.as_ref()));
+            host.looper.exit.set(true);
+        }
+        if host.looper.exit.get() {
+            log::info!("the app ended");
+            return;
+        }
+    }
+}
+
+impl Host {
+    fn window_event(&mut self, event: WindowEvent) {
+        self.app.on_window_event(&self.looper, event);
+    }
+
+    fn take(&mut self, event: Event) {
+        match event {
+            Event::SurfaceCreated(native, width, height) => self.surface_created(native, width, height),
+            Event::SurfaceChanged(width, height) => {
+                if let Some(screen) = &self.app.screen {
+                    screen.window.resized(width, height);
+                }
+                self.window_event(WindowEvent::Resized(PhysicalSize::new(width, height)));
+            }
+            Event::SurfaceDestroyed(done) => {
+                if let Some(screen) = self.app.screen.as_mut() {
+                    screen.drop_surface();
+                }
+                let _ = done.send(());
+                // the app in the background may be ended without a word: the artwork is kept now
+                self.app.keep_artwork();
+            }
+            Event::Touch(touch) => {
+                let event = touch_event(&touch);
+                self.window_event(event);
+            }
+            Event::PenHover(x, y, tilt) => {
+                crate::pen::pointer_kind(HOVER, true);
+                let (tilt_x, tilt_y) = tilt.unwrap_or((0.0, 0.0));
+                crate::pen::keep_pose(HOVER, crate::pen::lean_of(tilt_x, tilt_y), None);
+                let device_id = winit::event::DeviceId::dummy();
+                let position =
+                    winit::dpi::PhysicalPosition::new(f64::from(x * self.density), f64::from(y * self.density));
+                self.window_event(WindowEvent::CursorMoved { device_id, position });
+            }
+            Event::Mouse(mouse) => {
+                for event in mouse_events(&mouse) {
+                    self.window_event(event);
+                }
+            }
+            Event::Hover(inside) => {
+                let device_id = winit::event::DeviceId::dummy();
+                let event = if inside {
+                    WindowEvent::CursorEntered { device_id }
+                } else {
+                    WindowEvent::CursorLeft { device_id }
+                };
+                self.window_event(event);
+            }
+            Event::Key(key, pressed) => self.key(key, pressed),
+            Event::Focus(focused) => self.window_event(WindowEvent::Focused(focused)),
+            Event::Text(text) => {
+                if let Some(screen) = self.app.screen.as_mut() {
+                    screen.egui.text(text);
+                    screen.window.request_redraw();
+                }
+            }
+            Event::SoftKey(key, count) => {
+                for _ in 0..count.clamp(1, 64) {
+                    self.key(NativeKey::Key(key), true);
+                    self.key(NativeKey::Key(key), false);
+                }
+            }
+            Event::Wake => {
+                // (the start's watch asks too)
+                crate::startup::answered();
+            }
+        }
+    }
+
+    /// The surface is there: the app's screen made on it the first time, else moved onto it (the
+    /// device, the canvas and the interface kept from before).
+    fn surface_created(&mut self, native: NativeWindow, width: u32, height: u32) {
         let window = Arc::new(Window {
             native,
             width: AtomicU32::new(width),
             height: AtomicU32::new(height),
-            scale: host.density,
-            redraw: Arc::clone(&host.wake),
+            scale: self.density,
+            redraw: Arc::clone(&self.redraw),
         });
-        host.window = Some(Arc::clone(&window));
-        host.app.start(window, &OwnedDisplayHandle, &host.looper);
-    });
-}
-
-/// The surface is `width` × `height` pixels now (the device turned, the window split).
-pub fn surface_changed(width: u32, height: u32) {
-    with_host("the surface's new size", |host| {
-        let Some(window) = &host.window else { return };
-        window.resized(width, height);
-        host.app.on_window_event(&host.looper, WindowEvent::Resized(PhysicalSize::new(width, height)));
-    });
-}
-
-/// The surface is going (the app went to the background): the artwork open is kept and closed,
-/// and the app starts again on the gallery when a surface comes back. (Keeping the device and the
-/// canvas across surfaces, as the Android app does, comes later.)
-pub fn surface_destroyed() {
-    with_host("the surface's going", |host| {
-        host.app.on_exiting();
-        host.window = None;
-        host.looper = Loop::default();
-        host.app = App::new(EventLoopProxy { wake: Arc::clone(&host.wake), kind: PhantomData });
-    });
-}
-
-/// A touch on the canvas component.
-pub fn touch(touch: NativeTouch) {
-    with_host("a touch", |host| {
-        let event = touch_event(&touch);
-        host.app.on_window_event(&host.looper, event);
-    });
-}
-
-/// The mouse on the canvas component.
-pub fn mouse(mouse: NativeMouse) {
-    with_host("the mouse", |host| {
-        for event in mouse_events(&mouse) {
-            host.app.on_window_event(&host.looper, event);
+        let Some(screen) = self.app.screen.as_mut() else {
+            self.app.start(window, &OwnedDisplayHandle, &self.looper);
+            return;
+        };
+        if let Err(e) = screen.attach(Arc::clone(&window)) {
+            log::error!("the canvas couldn't draw into the new surface: {e}");
+            return;
         }
-    });
-}
+        self.window_event(WindowEvent::Resized(PhysicalSize::new(width, height)));
+        window.request_redraw();
+    }
 
-/// The mouse (or a pen hovering) came over the canvas component, or left it.
-pub fn hover(inside: bool) {
-    with_host("hovering", |host| {
-        let device_id = winit::event::DeviceId::dummy();
-        let event =
-            if inside { WindowEvent::CursorEntered { device_id } } else { WindowEvent::CursorLeft { device_id } };
-        host.app.on_window_event(&host.looper, event);
-    });
-}
-
-/// The window has the keys, or lost them.
-pub fn focus(focused: bool) {
-    with_host("focus", |host| host.app.on_window_event(&host.looper, WindowEvent::Focused(focused)));
-}
-
-/// A key of a hardware keyboard going down (`pressed`) or up: a modifier changes the modifiers;
-/// another goes to egui as a key (and the text it types), and Space and R to the canvas as well,
-/// as on the desktop. A key pressed again while it is held is the system repeating it.
-pub fn key(key: NativeKey, pressed: bool) {
-    with_host("a key", |host| {
-        if let Some(event) = host.held.key(key, pressed) {
-            host.app.on_window_event(&host.looper, event);
+    /// A key of a hardware keyboard (or the soft keyboard's) going down (`pressed`) or up: a
+    /// modifier changes the modifiers; another goes to egui as a key (and the text it types), and
+    /// Space and R to the canvas as well, as on the desktop. A key pressed again while it is held
+    /// is the system repeating it.
+    fn key(&mut self, key: NativeKey, pressed: bool) {
+        if let Some(event) = self.held.key(key, pressed) {
+            self.window_event(event);
         }
         let NativeKey::Key(key) = key else { return };
-        let repeat = pressed && host.keys_down.contains(&key);
-        host.keys_down.retain(|k| *k != key);
+        let repeat = pressed && self.keys_down.contains(&key);
+        self.keys_down.retain(|k| *k != key);
         if pressed {
-            host.keys_down.push(key);
+            self.keys_down.push(key);
         }
-        let app = &mut host.app;
+        let app = &mut self.app;
         let Some(screen) = app.screen.as_mut() else { return };
         let consumed = screen.egui.key(key, pressed, repeat);
         screen.window.request_redraw();
@@ -422,27 +546,89 @@ pub fn key(key: NativeKey, pressed: bool) {
         {
             screen.window.request_redraw();
         }
-    });
-}
+    }
 
-/// The display's frame: the app looks at what came in meanwhile and when its next frame is due,
-/// and draws one if it is due now.
-pub fn frame() {
-    with_host("a frame", |host| {
-        if !host.app.housekeeping(&host.looper) {
+    /// After the events: the app's housekeeping, files written for the system handed on, and a
+    /// frame if one is due.
+    fn turn(&mut self) {
+        if !self.app.housekeeping(&self.looper) {
             return;
         }
-        host.app.pace(&host.looper);
-        let due = host.looper.until.get().is_some_and(|until| Instant::now() >= until);
-        if host.wake.swap(false, Ordering::Relaxed) || due {
-            host.looper.until.set(None);
-            host.app.on_window_event(&host.looper, WindowEvent::RedrawRequested);
+        crate::ohos_platform::hand_on();
+        self.app.pace(&self.looper);
+        let due = self.looper.until.get().is_some_and(|until| Instant::now() >= until);
+        let has_surface = self.app.screen.as_ref().is_some_and(|s| !s.minimised());
+        if (self.redraw.swap(false, Ordering::Relaxed) || due) && has_surface {
+            self.looper.until.set(None);
+            self.window_event(WindowEvent::RedrawRequested);
         }
-    });
+    }
 }
 
-/// Whether the app wants frames: while it is running. (Ended, it waits for the system to close
-/// it; the canvas component shows its last frame.)
-pub fn running() -> bool {
-    HOST.with(|host| host.try_borrow().is_ok_and(|h| h.as_ref().is_some_and(|h| !h.looper.exit.get())))
+/// The canvas component's surface is there: `native` its native window, `width` × `height`
+/// pixels.
+pub fn surface_created(native: NonNull<c_void>, width: u32, height: u32) {
+    send(Event::SurfaceCreated(NativeWindow::new(native), width, height));
+}
+
+/// The surface is `width` × `height` pixels now (the device turned, the window split).
+pub fn surface_changed(width: u32, height: u32) {
+    send(Event::SurfaceChanged(width, height));
+}
+
+/// The surface is going (the app went to the background): the app lets go of it (the canvas
+/// stays), waited for a moment so the system doesn't take it from under a frame being drawn.
+pub fn surface_destroyed() {
+    let (done, let_go) = mpsc::channel();
+    send(Event::SurfaceDestroyed(done));
+    if let_go.recv_timeout(LET_GO_WAIT).is_err() {
+        log::warn!("the surface went while the app was busy: it lets go of it when it's done");
+    }
+}
+
+/// A touch on the canvas component.
+pub fn touch(touch: NativeTouch) {
+    send(Event::Touch(touch));
+}
+
+/// The pen hovering over the canvas component at (`x`, `y`) vp (ArkUI's `onHoverMove`), with its
+/// tilts if it gives them.
+pub fn pen_hover(x: f32, y: f32, tilt: Option<(f32, f32)>) {
+    send(Event::PenHover(x, y, tilt));
+}
+
+/// The mouse on the canvas component.
+pub fn mouse(mouse: NativeMouse) {
+    send(Event::Mouse(mouse));
+}
+
+/// The mouse or the pen came over the canvas component, or left it.
+pub fn hover(inside: bool) {
+    send(Event::Hover(inside));
+}
+
+/// The window has the keys, or lost them.
+pub fn focus(focused: bool) {
+    send(Event::Focus(focused));
+}
+
+/// A key of a hardware keyboard going down (`pressed`) or up.
+pub fn key(key: NativeKey, pressed: bool) {
+    send(Event::Key(key, pressed));
+}
+
+/// Text the soft keyboard typed.
+pub fn soft_text(text: String) {
+    send(Event::Text(text));
+}
+
+/// A key the soft keyboard pressed `count` times: Backspace, Delete or Enter by name.
+pub fn soft_key(name: &str, count: u32) {
+    let key = match name {
+        "Backspace" => egui::Key::Backspace,
+        "Delete" => egui::Key::Delete,
+        "Enter" => egui::Key::Enter,
+        _ => return,
+    };
+    send(Event::SoftKey(key, count));
 }

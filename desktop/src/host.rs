@@ -1,8 +1,9 @@
 //! What the app takes from the system around it: the window, its event loop's waker, egui's input
 //! from the window's events, the file dialogs and the clipboard. On Windows, macOS and Linux winit,
-//! egui-winit, rfd and arboard; on HarmonyOS the canvas component (`ohos.rs`) and, for what it
-//! doesn't have yet, stand-ins of the app's own: the file dialogs say they aren't there yet, and the
-//! clipboard is the app's own (egui's text fields copy and paste among themselves).
+//! egui-winit, rfd and arboard; on HarmonyOS the canvas component (`ohos.rs`), the system's
+//! document picker and share sheet through ArkTS (`ohos_platform.rs`), and for the clipboard's
+//! pictures and files (which reading the system's pasteboard would need a permission for) nothing
+//! yet: egui's text goes to and from the pasteboard where the app may read it.
 
 #[cfg(not(target_env = "ohos"))]
 pub use egui_winit::{EventResponse, State as EguiState};
@@ -77,54 +78,70 @@ mod notice {
     }
 }
 
-/// rfd's dialogs as the app uses them, which HarmonyOS doesn't have yet: picking and saving files
-/// say so (the document picker comes through an ArkTS bridge later); a message shows as the app's
-/// own card.
+/// rfd's dialogs as the app uses them, on HarmonyOS's own (`ohos_platform.rs`): picking opens the
+/// document picker (the files copied into the app's cache), saving writes into the cache and then
+/// copies where the user picked in the picker's Save, or shares from the share sheet for a "Share
+/// as …"; a folder's files are shared together. A message shows as the app's own card.
 #[cfg(target_env = "ohos")]
 pub mod rfd {
     use std::path::PathBuf;
 
-    /// What the app says where a file dialog would open.
-    const NOT_YET: &str = "Opening and saving files isn't available on HarmonyOS yet.";
+    /// What the app says where there is no picker to open (ArkTS not reached).
+    const NO_PICKER: &str = "The system's file picker couldn't be opened.";
 
     #[derive(Default)]
-    pub struct FileDialog;
+    pub struct FileDialog {
+        title: String,
+        extensions: Vec<String>,
+        name: Option<String>,
+    }
 
     impl FileDialog {
         pub fn new() -> FileDialog {
-            FileDialog
+            FileDialog::default()
         }
 
-        pub fn set_title(self, _title: impl Into<String>) -> FileDialog {
+        pub fn set_title(self, title: impl Into<String>) -> FileDialog {
+            FileDialog { title: title.into(), ..self }
+        }
+
+        pub fn add_filter(mut self, _name: impl Into<String>, extensions: &[impl ToString]) -> FileDialog {
+            self.extensions.extend(extensions.iter().map(ToString::to_string));
             self
         }
 
-        pub fn add_filter(self, _name: impl Into<String>, _extensions: &[impl ToString]) -> FileDialog {
-            self
-        }
-
-        pub fn set_file_name(self, _name: impl Into<String>) -> FileDialog {
-            self
+        pub fn set_file_name(self, name: impl Into<String>) -> FileDialog {
+            FileDialog { name: Some(name.into()), ..self }
         }
 
         pub fn pick_file(self) -> Option<PathBuf> {
-            super::notice::say(NOT_YET.to_owned());
-            None
+            self.open(false)?.into_iter().next()
         }
 
         pub fn pick_files(self) -> Option<Vec<PathBuf>> {
-            super::notice::say(NOT_YET.to_owned());
-            None
+            self.open(true)
         }
 
+        /// A folder for files the app writes, shared together once written.
         pub fn pick_folder(self) -> Option<PathBuf> {
-            super::notice::say(NOT_YET.to_owned());
-            None
+            crate::ohos_platform::folder()
         }
 
         pub fn save_file(self) -> Option<PathBuf> {
-            super::notice::say(NOT_YET.to_owned());
-            None
+            let name = self.name.unwrap_or_else(|| "ProCraft".to_owned());
+            let path = crate::ohos_platform::save_file(&self.title, &name);
+            if path.is_none() && !crate::ohos_platform::reachable() {
+                super::notice::say(NO_PICKER.to_owned());
+            }
+            path
+        }
+
+        fn open(&self, multiple: bool) -> Option<Vec<PathBuf>> {
+            let picked = crate::ohos_platform::open_files(&self.title, &self.extensions, multiple);
+            if picked.is_none() && !crate::ohos_platform::reachable() {
+                super::notice::say(NO_PICKER.to_owned());
+            }
+            picked
         }
     }
 
@@ -163,15 +180,21 @@ pub mod rfd {
             let text = if self.title.is_empty() || self.title == "ProCraft" {
                 self.description
             } else {
-                format!("{}\n\n{}", self.title, self.description)
+                format!(
+                    "{}
+
+{}",
+                    self.title, self.description
+                )
             };
             super::notice::say(text);
         }
     }
 }
 
-/// arboard's clipboard as the app uses it, which HarmonyOS doesn't have yet (its pasteboard comes
-/// through an ArkTS bridge later): there is none, so a paste from the system finds nothing.
+/// arboard's clipboard as the app uses it, for pictures and files from other apps: none on
+/// HarmonyOS yet (reading the pasteboard takes a permission most apps don't get, or the system's
+/// paste button), so a paste of a picture from the system finds nothing.
 #[cfg(target_env = "ohos")]
 pub mod arboard {
     use std::borrow::Cow;

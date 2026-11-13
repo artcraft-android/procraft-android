@@ -374,6 +374,7 @@ pub fn watch(_window: &crate::host::Window, _wake: crate::host::EventLoopProxy<(
 pub fn watch(_window: &crate::host::Window, _wake: crate::host::EventLoopProxy<()>) {}
 
 /// Stops reading the pen, before the window's connection closes.
+#[cfg_attr(target_env = "ohos", allow(dead_code))]
 pub fn stop() {
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     wayland::stop();

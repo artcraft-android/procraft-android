@@ -125,6 +125,10 @@ rfd = "0.17"
 # Pictures pasted into the source editor (egui already brings it in, with images)
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
+# HarmonyOS: what the app asks of the system through ArkTS, as JSON (src/ohos_platform.rs)
+[target.'cfg(target_env = "ohos")'.dependencies]
+serde_json = { workspace = true }
+
 # An artwork dragged out of the gallery, handed to the system as a file
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 drag = "2.1"

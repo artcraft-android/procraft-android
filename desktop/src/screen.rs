@@ -11,7 +11,8 @@ use crate::host::{EguiState, EventLoopProxy, OwnedDisplayHandle, Window};
 
 pub struct Screen {
     pub window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
+    /// None while the window has none (HarmonyOS: the app in the background).
+    surface: Option<wgpu::Surface<'static>>,
     config: Option<wgpu::SurfaceConfiguration>,
     pub gpu: Gpu,
     pub egui: EguiState,
@@ -184,7 +185,7 @@ impl Screen {
         );
         Ok(Screen {
             window,
-            surface,
+            surface: Some(surface),
             config,
             gpu,
             egui,
@@ -198,6 +199,27 @@ impl Screen {
             last,
             touch_keyboard: crate::touch_keyboard::TouchKeyboard::default(),
         })
+    }
+
+    /// The window's surface goes, the device, the canvas and the interface staying (HarmonyOS: the
+    /// app goes to the background, and its canvas component's surface with it).
+    #[cfg_attr(not(target_env = "ohos"), allow(dead_code))]
+    pub fn drop_surface(&mut self) {
+        self.surface = None;
+        self.config = None;
+    }
+
+    /// Draws into `window` from now on, on the same device (HarmonyOS: back from the background,
+    /// with a new surface).
+    #[cfg_attr(not(target_env = "ohos"), allow(dead_code))]
+    pub fn attach(&mut self, window: Arc<Window>) -> Result<(), String> {
+        let surface = self.gpu.instance.create_surface(Arc::clone(&window)).map_err(|e| e.to_string())?;
+        self.window = window;
+        self.surface = Some(surface);
+        self.config = None;
+        let size = self.window.inner_size();
+        self.resize(size.width, size.height);
+        Ok(())
     }
 
     /// Whether the canvases' pipelines were made without a GPU error, once they are made (told
@@ -241,7 +263,11 @@ impl Screen {
             self.config = None;
             return;
         }
-        self.config = configure(&self.gpu, &self.surface, (width, height), INTERFACE_WIDE);
+        let Some(surface) = &self.surface else {
+            self.config = None;
+            return;
+        };
+        self.config = configure(&self.gpu, surface, (width, height), INTERFACE_WIDE);
         if let Some(format) = self.config.as_ref().map(|c| c.format).filter(|f| *f != self.format) {
             self.format = format;
             self.renderer = egui_wgpu::Renderer::new(&self.gpu.device, format, egui_wgpu::RendererOptions::default());
@@ -364,7 +390,8 @@ impl Screen {
         };
         let size = (config.width, config.height);
         let (format, screen) = (config.format, screen_profile(config));
-        let frame = match self.surface.get_current_texture() {
+        let Some(surface) = &self.surface else { return None };
+        let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.resize(size.0, size.1);

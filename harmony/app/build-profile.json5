@@ -7,9 +7,9 @@
       {
         "name": "default",
         "signingConfig": "default",
-        // HarmonyOS 5.0.0 (API 12): the first release without Android, and the first with the
-        // surface id call the canvas is made from
-        "compatibleSdkVersion": "5.0.0(12)",
+        // HarmonyOS 5.0.3 (API 15): the pen's hover moves (onHoverMove) and touch pressure; API 12
+        // brought the release without Android and the surface id call
+        "compatibleSdkVersion": "5.0.3(15)",
         "runtimeOS": "HarmonyOS"
       }
     ],

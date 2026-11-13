@@ -338,7 +338,7 @@ fn system_fonts() -> Vec<(String, egui::FontData)> {
             "seguisym.ttf",
         ],
     );
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_env = "ohos")))]
     let (dir, files): (std::path::PathBuf, &[&str]) = (
         std::path::PathBuf::from("/usr/share/fonts"),
         &[
@@ -355,6 +355,17 @@ fn system_fonts() -> Vec<(String, egui::FontData)> {
     );
     #[cfg(not(any(windows, unix)))]
     let (dir, files): (std::path::PathBuf, &[&str]) = (std::path::PathBuf::new(), &[]);
+    // HarmonyOS: its own families in /system/fonts, picked by name (their files differ by release)
+    #[cfg(target_env = "ohos")]
+    let (dir, picked) = {
+        let dir = std::path::PathBuf::from("/system/fonts");
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .map(|entries| entries.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect())
+            .unwrap_or_default();
+        (dir, harmony_fonts(&names))
+    };
+    #[cfg(target_env = "ohos")]
+    let files: Vec<&str> = picked.iter().map(String::as_str).collect();
     files
         .iter()
         .filter_map(|file| {
@@ -363,6 +374,41 @@ fn system_fonts() -> Vec<(String, egui::FontData)> {
             Some((format!("system {file}"), egui::FontData::from_owned(bytes)))
         })
         .collect()
+}
+
+/// What a font file's name says of its script, for HarmonyOS's /system/fonts: each script once, in
+/// this order, its regular face (none of a weight's).
+const HARMONY_SCRIPTS: [&str; 12] =
+    ["SC", "TC", "CJK", "Arabic", "Naskh", "Hebrew", "Devanagari", "Thai", "Bengali", "Tamil", "Myanmar", "Khmer"];
+
+/// The fonts among `names` (a folder's file names) for the scripts Inter and egui's own lack: for
+/// each of [`HARMONY_SCRIPTS`] the first, by name, of the regular fonts naming it.
+#[cfg_attr(not(target_env = "ohos"), allow(dead_code))]
+fn harmony_fonts(names: &[String]) -> Vec<String> {
+    let weights = ["Bold", "Medium", "Light", "Thin", "Black", "Heavy", "Semibold", "SemiBold", "Italic"];
+    let mut fonts: Vec<&String> = names
+        .iter()
+        .filter(|n| [".ttf", ".ttc", ".otf"].iter().any(|e| n.to_lowercase().ends_with(e)))
+        .filter(|n| !weights.iter().any(|w| n.contains(w)))
+        .collect();
+    fonts.sort();
+    let mut picked: Vec<String> = Vec::new();
+    for script in HARMONY_SCRIPTS {
+        // a short code (SC, TC) as a part of the name of its own, a script's name anywhere in it
+        let names_it = |n: &&&String| {
+            if script.len() <= 3 {
+                n.split(['_', '-', '.', ' ']).any(|part| part == script)
+            } else {
+                n.contains(script)
+            }
+        };
+        if let Some(font) = fonts.iter().find(names_it)
+            && !picked.contains(font)
+        {
+            picked.push((*font).clone());
+        }
+    }
+    picked
 }
 
 /// Text in runs of weights, `size` points, placed by `align` at `at`; returns where it went.
@@ -780,5 +826,33 @@ mod tests {
         assert!((0..100).any(|i| spring(0.3, 0.75, 0.0, i as f32 / 100.0) > 1.0));
         // damped enough, it doesn't
         assert!((0..100).all(|i| spring(0.3, 1.2, 0.0, i as f32 / 100.0) <= 1.0));
+    }
+
+    #[test]
+    fn harmony_s_fonts_are_picked_one_regular_face_a_script() {
+        let names: Vec<String> = [
+            "HarmonyOS_Sans.ttf",
+            "HarmonyOS_Sans_SC.ttf",
+            "HarmonyOS_Sans_SC_Bold.ttf",
+            "HarmonyOS_Sans_TC.ttf",
+            "HarmonyOS_Sans_Naskh_Arabic.ttf",
+            "NotoSansHebrew[wdth,wght].ttf",
+            "NotoSansThai-Regular.ttf",
+            "fonts.xml",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let picked = super::harmony_fonts(&names);
+        assert_eq!(
+            picked,
+            [
+                "HarmonyOS_Sans_SC.ttf",
+                "HarmonyOS_Sans_TC.ttf",
+                "HarmonyOS_Sans_Naskh_Arabic.ttf",
+                "NotoSansHebrew[wdth,wght].ttf",
+                "NotoSansThai-Regular.ttf"
+            ]
+        );
     }
 }
