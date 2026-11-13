@@ -105,6 +105,7 @@ struct Both;
 impl Write for Both {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let _ = std::io::stderr().write_all(buf);
+        crate::host::also_log(buf);
         if let Some(file) = LOG_FILE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
             let _ = file.write_all(buf);
         }
@@ -371,7 +372,7 @@ fn since_launch() -> u64 {
 /// log that ends there tells a slow start (still waiting, the window answering) from a stuck one
 /// (the window not answering: it stands "not responding") and from one cut short (a crash logs
 /// itself; with nothing, the app was ended).
-pub fn watch_start(wake: winit::event_loop::EventLoopProxy<()>) {
+pub fn watch_start(wake: crate::host::EventLoopProxy<()>) {
     let watch = std::thread::Builder::new().name("procraft-start-watch".to_owned()).spawn(move || {
         let watching = Instant::now();
         while watching.elapsed() < START_WATCH_MOST {
@@ -400,6 +401,7 @@ pub fn watch_start(wake: winit::event_loop::EventLoopProxy<()>) {
 }
 
 /// The window's thread has answered the start's watch (see [`watch_start`]).
+#[cfg_attr(target_env = "ohos", allow(dead_code))]
 pub fn answered() {
     LAST_ANSWER.store(since_launch().max(1), Ordering::Relaxed);
 }

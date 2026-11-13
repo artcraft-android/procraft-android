@@ -38,7 +38,7 @@ impl TouchKeyboard {
 
     /// Once a frame, whether a field takes typing now: the keyboard comes up as a field focused by
     /// a finger or a pen starts taking it, and goes as the field stops, if it came up for it.
-    pub fn frame(&mut self, window: &winit::window::Window, typing: bool) {
+    pub fn frame(&mut self, window: &crate::host::Window, typing: bool) {
         match self.wanted(typing) {
             Some(true) => self.shown = system::show(window, true),
             Some(false) => {
@@ -91,7 +91,7 @@ mod system {
 
 #[cfg(not(windows))]
 mod system {
-    pub fn show(_window: &winit::window::Window, _up: bool) -> bool {
+    pub fn show(_window: &crate::host::Window, _up: bool) -> bool {
         false
     }
 }

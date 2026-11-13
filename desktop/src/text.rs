@@ -1132,7 +1132,7 @@ impl TextEditor {
 
     /// Puts the text copied in place of the letters chosen.
     fn paste(&mut self, ctx: &egui::Context, session: &CanvasSession) {
-        let Some(add) = arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok() else { return };
+        let Some(add) = crate::host::arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok() else { return };
         let (from, to) = self.chosen;
         let typed: String =
             self.typed.chars().take(from).chain(add.chars()).chain(self.typed.chars().skip(to)).collect();
@@ -1150,7 +1150,8 @@ impl TextEditor {
     /// Copies the font files the user picks into the app and offers them; the text takes the first.
     fn import_font(&mut self, session: &CanvasSession) -> Option<Said> {
         let endings = ["ttf", "otf", "ttc", "otc", "TTF", "OTF", "TTC", "OTC"];
-        let picked = rfd::FileDialog::new().set_title("Import fonts").add_filter("Fonts", &endings).pick_files()?;
+        let picked =
+            crate::host::rfd::FileDialog::new().set_title("Import fonts").add_filter("Fonts", &endings).pick_files()?;
         fonts_ready();
         // kept in the fonts folder by the core (a file that isn't a font is dropped)
         let mut kept = picked.iter().filter_map(|from| {

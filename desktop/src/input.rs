@@ -29,6 +29,14 @@ const R_TAP: Duration = Duration::from_millis(300);
 /// The mouse's pointer id: touches have the platform's.
 const MOUSE: u64 = u64::MAX;
 
+/// A key the canvas acts on itself (the rest are the interface's shortcuts): held, Space moves the
+/// view (with Ctrl or ⌘ zooms it) and R turns it; tapped, R turns it a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasKey {
+    Space,
+    R,
+}
+
 /// Which touch the interface follows as its pointer. egui follows the first touch down and no other
 /// until it lifts, so a hand resting on the canvas would keep a finger off the panels and the side
 /// bar. A touch landing on the interface while the pointer's touch rests on the canvas takes the
@@ -324,44 +332,15 @@ impl Input {
                 }
                 false
             }
-            WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Space) => {
-                let held = event.state == ElementState::Pressed && !consumed;
-                if held && !self.space {
-                    self.space_used = self.command_key || self.control;
-                }
-                self.space_tapped |= self.space && !held && !self.space_used;
-                self.space = held;
-                if !self.space && self.panning && !self.down.contains(&MOUSE) {
-                    self.panning = false;
-                    self.pen_panning = None;
-                }
-                // a zoom ends with it too
-                if !self.space && self.key_drag == Some(KeyDrag::Zoom) {
-                    self.end_key_drag(session);
-                }
-                true
+            WindowEvent::KeyboardInput { event, is_synthetic, .. }
+                if event.logical_key == Key::Named(NamedKey::Space) =>
+            {
+                let pressed = event.state == ElementState::Pressed;
+                self.on_key(session, CanvasKey::Space, pressed, event.repeat, *is_synthetic, consumed)
             }
             WindowEvent::KeyboardInput { event, is_synthetic, .. } if is_r(event) => {
-                match event.state {
-                    // (a press as the window comes to the front is a key held from before: no tap)
-                    ElementState::Pressed if !event.repeat && !*is_synthetic => {
-                        let typed = consumed || self.keys_taken || self.command_key || self.control || self.alt;
-                        self.r_key = (!typed).then(Instant::now);
-                        self.r_dragged = false;
-                    }
-                    ElementState::Pressed => {}
-                    ElementState::Released => {
-                        // tapped, it turns the canvas a step (with Shift back); a drag turned it
-                        let tapped = self.r_key.take().is_some_and(|since| since.elapsed() < R_TAP);
-                        if tapped && !self.r_dragged && !consumed {
-                            session.key_turn(self.shift);
-                        }
-                        if self.key_drag == Some(KeyDrag::Turn) {
-                            self.end_key_drag(session);
-                        }
-                    }
-                }
-                true
+                let pressed = event.state == ElementState::Pressed;
+                self.on_key(session, CanvasKey::R, pressed, event.repeat, *is_synthetic, consumed)
             }
             WindowEvent::Focused(false) => {
                 // keys let go elsewhere never come back up here (nor, perhaps, a press's lift)
@@ -484,6 +463,56 @@ impl Input {
             WindowEvent::Touch(touch) => self.on_touch(session, touch, &over),
             _ => false,
         }
+    }
+
+    /// A key the canvas acts on going down (`pressed`) or up: `repeat` the system's repeat of a key
+    /// held, `synthetic` a key held from before the window came to the front, `consumed` when the
+    /// interface took it. True if anything changed.
+    pub fn on_key(
+        &mut self,
+        session: &CanvasSession,
+        key: CanvasKey,
+        pressed: bool,
+        repeat: bool,
+        synthetic: bool,
+        consumed: bool,
+    ) -> bool {
+        match key {
+            CanvasKey::Space => {
+                let held = pressed && !consumed;
+                if held && !self.space {
+                    self.space_used = self.command_key || self.control;
+                }
+                self.space_tapped |= self.space && !held && !self.space_used;
+                self.space = held;
+                if !self.space && self.panning && !self.down.contains(&MOUSE) {
+                    self.panning = false;
+                    self.pen_panning = None;
+                }
+                // a zoom ends with it too
+                if !self.space && self.key_drag == Some(KeyDrag::Zoom) {
+                    self.end_key_drag(session);
+                }
+            }
+            // (a press as the window comes to the front is a key held from before: no tap)
+            CanvasKey::R if pressed && !repeat && !synthetic => {
+                let typed = consumed || self.keys_taken || self.command_key || self.control || self.alt;
+                self.r_key = (!typed).then(Instant::now);
+                self.r_dragged = false;
+            }
+            CanvasKey::R if pressed => {}
+            CanvasKey::R => {
+                // tapped, it turns the canvas a step (with Shift back); a drag turned it
+                let tapped = self.r_key.take().is_some_and(|since| since.elapsed() < R_TAP);
+                if tapped && !self.r_dragged && !consumed {
+                    session.key_turn(self.shift);
+                }
+                if self.key_drag == Some(KeyDrag::Turn) {
+                    self.end_key_drag(session);
+                }
+            }
+        }
+        true
     }
 
     /// The pointer at `p`: while the view is being moved, moved by as much. True if it was.

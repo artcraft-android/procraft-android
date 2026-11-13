@@ -1,34 +1,54 @@
 # ProCraft for HarmonyOS (starter)
 
 The beginnings of ProCraft on HarmonyOS 5 and later (HarmonyOS NEXT), which runs no Android
-apps. Huawei tablets on HarmonyOS 2 to 4 already run the Android app. Like the Android and iPad
-apps, it is a native interface over the shared Rust core. Here the interface is ArkTS/ArkUI and the
-core is reached through Node-API.
+apps. Huawei tablets on HarmonyOS 2 to 4 already run the Android app.
 
-**Status: a skeleton.** The Rust type-checks and lints for `aarch64-unknown-linux-ohos`. Nothing has
+**For now the HarmonyOS app is the desktop app.** The desktop app's interface (egui; the same
+interface as the tablets) runs in a full-screen canvas component, an ArkUI `XComponent`. Its
+native side drives the app the way winit does on the desktop. An ArkUI interface of its own, over
+the core's `CanvasSession`, comes later; `bridge/src/canvas.rs` and `app/.../canvas/CanvasView.ets`
+are its start.
+
+**Status:** the Rust type-checks and passes clippy for `aarch64-unknown-linux-ohos`. Nothing has
 been linked, packaged or run yet, and the ArkTS has not been compiled: that needs DevEco Studio.
 
 ## What is here
 
 | Path | What it is |
 |---|---|
-| `bridge/` | `procraft-harmony`, the native library the app imports (`libprocraft_harmony.so`): the core, plus thin Node-API wrappers of the calls the interface makes (napi-ohos). On any other system the crate is empty except for its pen maths and tests. |
-| `app/` | The DevEco Studio project (Stage model, one `entry` module for tablets and 2-in-1s): a full-screen canvas component (`XComponent`, type SURFACE) whose surface the core draws into. Every touch and pen sample is passed to the core. |
+| `bridge/` | `procraft-harmony`, the native library (`libprocraft_harmony.so`). `egui_host.rs`: when ArkUI loads it as the canvas component's native side, it hooks the component's surface, touch, mouse, key and frame callbacks up to the desktop app (`../desktop/src/ohos.rs`). `canvas.rs`: Node-API wrappers of a few core calls, for the later ArkUI interface. On any other system the crate is empty except for its pen maths. |
+| `app/` | The DevEco Studio project (Stage model, one `entry` module for tablets and 2-in-1s). `pages/Index.ets` calls `startApp(filesDir, density)` and shows the full-screen `XComponent` with `libraryname: 'procraft_harmony'`. |
 | `build-rust.sh` | Builds the library into `app/entry/libs/<abi>/` and copies in the app icons. |
-| `../crates/core/src/ohos_window.rs` | The core's side: makes the native window from the canvas component's surface id (`acquire_surface`). The render thread draws into it, as it does into Android's and the iPad's windows. |
+| `../desktop/src/ohos.rs` | The desktop app's HarmonyOS host. The window is the component's native window; wgpu draws on OpenGL ES. Frames come at the display's vsync. Touches carry the pen's tool, pressure and tilt (`native_input.rs`); egui's input is made from them as egui-winit makes it (`egui_events.rs`). |
+| `../crates/core/src/ohos_window.rs` | The core's side of the later ArkUI interface: the native window from a surface id. |
 
-## Building
+## Running it
 
-1. Install DevEco Studio (it brings the HarmonyOS SDK), and add the Rust target:
-   `rustup target add aarch64-unknown-linux-ohos`. Add `x86_64-unknown-linux-ohos` too for the
-   emulator on an Intel or AMD PC. Optionally run `cargo install ohrs`: then the build also writes
-   the library's ArkTS declarations from the Rust.
-2. Point `OHOS_NDK_HOME` at the SDK folder that holds `native/` (in DevEco Studio's SDK,
-   `default/openharmony`), then run `harmony/build-rust.sh`, or `harmony/build-rust.sh arm64 x86_64`
-   for the emulator too.
-3. Open `harmony/app` in DevEco Studio and let it sync.
-4. Set up signing: File > Project Structure > Signing Configs > Automatically generate signature,
-   signed in with a Huawei ID. Then run the app on a device or the emulator.
+What you need (the downloads need a Huawei ID):
+
+1. **DevEco Studio** for Windows or macOS, from developer.huawei.com (about 3 GB). It includes the
+   HarmonyOS SDK. Sign in with your Huawei ID inside it.
+2. **The emulator image:** Device Manager > New Emulator > a tablet image (x86_64 on an Intel or AMD
+   PC, arm64 on an Apple-silicon Mac), downloaded through DevEco Studio. Or use a HarmonyOS 5/6
+   tablet with developer mode on, connected over USB.
+3. **Rust targets:** `rustup target add aarch64-unknown-linux-ohos x86_64-unknown-linux-ohos`.
+   Optionally run `cargo install ohrs`: it writes the library's ArkTS declarations from the Rust.
+
+Then:
+
+```
+# the SDK's native part: <DevEco Studio>/sdk/default/openharmony (it holds native/llvm and native/sysroot)
+export OHOS_NDK_HOME="/c/Program Files/Huawei/DevEco Studio/sdk/default/openharmony"
+harmony/build-rust.sh x86_64          # the emulator on a PC; arm64 for a tablet or a Mac's emulator
+```
+
+Then, in DevEco Studio:
+1. Open `harmony/app`.
+2. Under File > Project Structure > Signing Configs, tick *Automatically generate signature*.
+3. Pick the emulator or the tablet and press Run.
+
+The app's log goes to hilog under the tag `ProCraft` (`hdc hilog | grep ProCraft`), and to
+`procraft.log` in the app's files folder.
 
 DevEco Studio writes the signing keys' paths and passwords into `app/build-profile.json5`. Don't
 commit them.
@@ -37,20 +57,35 @@ To check the Rust without the SDK, point `OHOS_NDK_HOME` at any empty folder (th
 script only adds link paths) and run:
 
 ```
-rustup target add aarch64-unknown-linux-ohos
-OHOS_NDK_HOME=/some/empty/folder cargo clippy --target aarch64-unknown-linux-ohos -p procraft-core -p procraft-harmony --all-targets -- -D warnings
+OHOS_NDK_HOME=/some/empty/folder cargo clippy --target aarch64-unknown-linux-ohos -p procraft-desktop -p procraft-harmony --all-targets -- -D warnings
 ```
 
-## Not done yet
+## Stand-ins and what is still to do
 
-- **GPU.** The canvas draws on OpenGL ES. wgpu 30 can't make a Vulkan surface on HarmonyOS.
-  Upstream wgpu has `VK_OHOS_surface` for its next major release; Vulkan goes first once that is
-  out (`Gpu::backends`).
-- **Pen.** Pressure and tilt are read per event. The native event API (`OH_ArkUI_PointerEvent_GetHistoryTiltX`
-  and the rest) has them for every kept point, and so does the hover state. Which way each tilt
-  axis leans still has to be checked with a real pen (`bridge/src/pen.rs`).
-- **Timed gestures.** The core's `touch_deadline` / `touch_tick` (holds) aren't wired up yet.
-- **Logging.** The core's log doesn't reach hilog yet.
-- **Everything else in the interface**: gallery, panels, files, sharing. The bridge only wraps
-  the calls in `bridge/src/canvas.rs`. The plan is to generate the wrappers from the core's UniFFI
-  interface, as the Kotlin and Swift bindings are, rather than write hundreds by hand.
+- **Files:** opening, saving, importing and sharing say "isn't available on HarmonyOS yet" (`desktop/src/host.rs`).
+  The fix is the document picker and Share Kit through ArkTS.
+- **Clipboard:** text copied in the app pastes within the app, but nothing is shared with the
+  system's pasteboard. The fix is the pasteboard through ArkTS.
+- **Text:** fields take a hardware keyboard only, with a US layout (`egui_events.rs`). The fix is
+  the soft keyboard through the input method framework.
+- **Leaving the app:** when it goes to the background, the artwork open is kept and closed, and the
+  app comes back on the gallery. Later, keep the GPU device and the canvas across surfaces, as the
+  Android app does.
+- **Pen:** each touch carries its own tool, pressure and tilt; historical points (more than one
+  sample per frame) and hover aren't read yet.
+- **Not checked yet:**
+  - whether touch positions are in pixels (assumed) or vp;
+  - which way each tilt axis leans.
+- **GPU:** OpenGL ES only until wgpu has `VK_OHOS_surface` (its next major release).
+- **Not wired:** fonts for other scripts from `/system/fonts`, Project canvas, the M-Pencil's
+  double-tap and squeeze (Pen Kit).
+
+## Packaging and releases
+
+How a HarmonyOS release is packaged and signed, and a draft GitHub Actions job, are in
+`release-harmony.yml.draft`. That file is not under `.github/`, so it never runs. In short:
+- **Builds:** `hvigorw assembleHap` builds a `.hap` per module (installed with `hdc install`), and
+  `hvigorw assembleApp` builds the `.app` that AppGallery Connect takes.
+- **Signing:** a keystore (`.p12`), a certificate (`.cer`) and a profile (`.p7b`). Debug-signed
+  builds install only on devices registered in the profile; release-signed ones go through
+  AppGallery.

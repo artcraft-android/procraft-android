@@ -40,7 +40,7 @@ impl Held {
     /// What is on the clipboard now (`picture` says which files are pictures).
     fn read(picture: fn(&std::path::Path) -> bool) -> Held {
         let _one = LOOKING.lock();
-        let Ok(mut clipboard) = arboard::Clipboard::new() else { return Held::Nothing };
+        let Ok(mut clipboard) = crate::host::arboard::Clipboard::new() else { return Held::Nothing };
         if let Ok(image) = clipboard.get_image() {
             return Held::Picture(ThumbnailImage {
                 width: image.width as u32,

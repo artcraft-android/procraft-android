@@ -431,11 +431,13 @@ impl Interface {
         self.prefs.tap_assistance
     }
 
+    #[cfg_attr(target_env = "ohos", allow(dead_code))]
     pub fn project_canvas(&self) -> bool {
         self.prefs.project_canvas
     }
 
     /// Project canvas goes off (its window closed on the other display).
+    #[cfg_attr(target_env = "ohos", allow(dead_code))]
     pub fn stop_projecting(&mut self) {
         self.prefs.project_canvas = false;
         self.prefs.keep();
@@ -1600,7 +1602,7 @@ impl Interface {
     /// do.
     fn insert_picture(&mut self, session: &Arc<CanvasSession>, photo: bool, private: bool) {
         let title = if photo { "Insert a photo" } else { "Insert a file" };
-        let Some(path) = rfd::FileDialog::new()
+        let Some(path) = crate::host::rfd::FileDialog::new()
             .set_title(title)
             .add_filter("Pictures and videos", &[&PICTURES[..], &VIDEOS[..]].concat())
             .pick_file()

@@ -1,6 +1,13 @@
 // The ArkTS side of harmony/bridge (libprocraft_harmony.so). Written to match
-// harmony/bridge/src/canvas.rs; `ohrs build` writes the same declarations from the Rust, and
+// harmony/bridge/src/egui_host.rs and canvas.rs; `ohrs build` writes the same declarations from the Rust, and
 // ../../../build-rust.sh copies them over this file when it is installed.
+
+/**
+ * Starts the app (for now the desktop app's interface, hosted in the canvas component whose
+ * `libraryname` is 'procraft_harmony'): its folder (`context.filesDir`) and the display's pixels per
+ * vp. Before the canvas component is made.
+ */
+export declare function startApp(filesDir: string, density: number): void
 
 /** One touch sample: surface pixels, pressure 0..1, the pen's tilts in degrees, time in ns. */
 export interface TouchSample {

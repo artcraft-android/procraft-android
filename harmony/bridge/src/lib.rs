@@ -8,9 +8,14 @@
 //! SURFACE): ArkTS passes its surface id to `CanvasSession.attachSurface` (`canvas.rs`), the core
 //! makes the native window from it (`procraft_core::acquire_surface`) and its render thread draws
 //! into it, as on the other tablets.
+//!
+//! For now the app's interface is the desktop app's (egui), hosted in a full-screen canvas
+//! component (`egui_host.rs`); the ArkUI interface over `CanvasSession` comes later.
 
 #[cfg_attr(not(target_env = "ohos"), allow(dead_code))]
 mod pen;
 
 #[cfg(target_env = "ohos")]
 mod canvas;
+#[cfg(target_env = "ohos")]
+mod egui_host;

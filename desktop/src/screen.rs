@@ -6,15 +6,15 @@ use std::time::{Duration, Instant};
 
 use procraft_core::{CanvasSession, Plugins, configure, screen_profile};
 use procraft_gpu::{Gpu, wgpu};
-use winit::event_loop::OwnedDisplayHandle;
-use winit::window::Window;
+
+use crate::host::{EguiState, EventLoopProxy, OwnedDisplayHandle, Window};
 
 pub struct Screen {
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     config: Option<wgpu::SurfaceConfiguration>,
     pub gpu: Gpu,
-    pub egui: egui_winit::State,
+    pub egui: EguiState,
     /// Made for the surface's format.
     renderer: egui_wgpu::Renderer,
     format: wgpu::TextureFormat,
@@ -28,7 +28,7 @@ pub struct Screen {
     canvases_since: Instant,
     /// On OpenGL they are made only after the window's first frame, and nothing is drawn while
     /// they are (see [`Screen::gl_busy`]): what to wake once they are, till then.
-    canvases_later: Option<winit::event_loop::EventLoopProxy<()>>,
+    canvases_later: Option<EventLoopProxy<()>>,
     /// How many backends have been tried, its own the last of them (with those the app tried
     /// before it started again), and whether that is all there are.
     pub tried: usize,
@@ -51,7 +51,7 @@ const PIPELINES_STACK: usize = 64 << 20;
 /// Makes the canvases' pipelines on `gpu` (and the brush images they hold) on a thread of their
 /// own, waking `wake` once they are; a canvas made meanwhile waits for them. The thread says
 /// whether they were made without a GPU error (a driver that panics on them fails too).
-fn make_canvases(gpu: &Gpu, wake: winit::event_loop::EventLoopProxy<()>) -> Option<std::thread::JoinHandle<bool>> {
+fn make_canvases(gpu: &Gpu, wake: EventLoopProxy<()>) -> Option<std::thread::JoinHandle<bool>> {
     let gpu = gpu.clone();
     // on a big stack: a driver's shader compiler recurses, and a stack overflow ends the app with
     // next to no word
@@ -108,7 +108,7 @@ impl Screen {
         from: usize,
         tried: usize,
         mut trying: impl FnMut(usize),
-        wake: winit::event_loop::EventLoopProxy<()>,
+        wake: EventLoopProxy<()>,
     ) -> Result<(Screen, usize), String> {
         let count = order.len().max(1);
         let left = count.saturating_sub(tried).max(1);
@@ -174,7 +174,7 @@ impl Screen {
         let ctx = egui::Context::default();
         // Ctrl (⌘) with + - 0 zoom the canvas (the interface's shortcuts), not the whole interface
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        let egui = egui_winit::State::new(
+        let egui = EguiState::new(
             ctx,
             egui::ViewportId::ROOT,
             &window,

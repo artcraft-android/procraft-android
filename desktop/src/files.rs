@@ -4,11 +4,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::host::rfd::{FileDialog, MessageDialog, MessageLevel};
 use procraft_core::{
     CanvasPreset, CanvasSession, KeptGestures, ModelFile, PagesOutcome, PsdOutcome, ThumbnailImage, export_file_name,
     import_pages, import_psd, preset_height, preset_width,
 };
-use rfd::{FileDialog, MessageDialog, MessageLevel};
 
 use crate::ui::Interface;
 
@@ -82,9 +82,22 @@ impl Format {
     }
 }
 
+/// The app's own folder where the system hands one over (HarmonyOS: the app's sandbox,
+/// `filesDir`), in place of the platform's place for an app's data.
+static GIVEN_APP_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The system handed the app `dir` as its own folder (before anything reads or writes there).
+#[cfg_attr(not(target_env = "ohos"), allow(dead_code))]
+pub fn set_app_dir(dir: PathBuf) {
+    let _ = GIVEN_APP_DIR.set(dir);
+}
+
 /// Where the app keeps what it keeps between runs (palettes and the like): the platform's place
 /// for an app's data.
 pub fn app_dir() -> PathBuf {
+    if let Some(given) = GIVEN_APP_DIR.get() {
+        return given.clone();
+    }
     let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home).join("ProCraft")
@@ -163,7 +176,7 @@ pub fn take_pending_brushes() -> Vec<(Vec<u8>, String)> {
 pub fn tell(title: &str, text: &str) {
     log::error!("{title}: {text}");
     eprintln!("{title}: {text}");
-    if cfg!(target_os = "linux") && !has_program("zenity") {
+    if cfg!(all(target_os = "linux", not(target_env = "ohos"))) && !has_program("zenity") {
         // what shows the app's dialogs on Linux isn't there: the first that is of the others
         let shown = other_dialogs(title, text).iter().any(|(program, args)| {
             std::process::Command::new(program).args(args).status().is_ok_and(|done| done.success())

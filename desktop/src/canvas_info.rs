@@ -444,7 +444,7 @@ impl CanvasInfo {
             None => look.icon(ui, &icons::PERSON, photo.center(), 48.0, argb(PHOTO_GLYPH)),
         }
         if ui.interact(photo, ui.scope_id().with("photo"), Sense::click()).clicked()
-            && let Some(path) = rfd::FileDialog::new()
+            && let Some(path) = crate::host::rfd::FileDialog::new()
                 .set_title("Photo")
                 .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp"])
                 .pick_file()

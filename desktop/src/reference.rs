@@ -283,7 +283,7 @@ impl Reference {
     }
 
     fn import(&mut self, ctx: &egui::Context, session: &CanvasSession) {
-        let Some(path) = rfd::FileDialog::new()
+        let Some(path) = crate::host::rfd::FileDialog::new()
             .set_title("Import Image")
             .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"])
             .pick_file()
