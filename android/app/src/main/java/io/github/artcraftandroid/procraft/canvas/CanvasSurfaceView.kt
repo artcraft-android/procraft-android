@@ -400,9 +400,13 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 // a spray can's sound (a plugin's) rattles shaken above the canvas
                 session?.soundHover(e.x, e.y)
                 penHovering = true
-                if (painting()) vm.showCursor(Offset(e.x, e.y), hovering = true)
+                // not over the bars, where the gaps between their buttons come here and the
+                // buttons don't: it came and went as the pen crossed them
+                val at = Offset(e.x, e.y)
+                val overBars = vm.overBars(at)
+                if (overBars) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true)
                 // and Liquify's ring where the pen hovers
-                if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(Offset(e.x, e.y))
+                if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { overBars })
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
                 session?.setTouchPenHovering(false)?.let(::obey)

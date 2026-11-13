@@ -6650,6 +6650,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var dropButton: Offset? = null
     var sideBarBounds: androidx.compose.ui.geometry.Rect? = null
 
+    /** Whether window point [p] is over the top bar or the side bar while they show. */
+    fun overBars(p: Offset): Boolean =
+        io.github.artcraftandroid.procraft.ui.overBars(p, io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density, sideBarBounds, barsHidden)
+
     /** The threshold the colour fills with (0..1), kept from one drop to the next. */
     var dropThreshold by mutableFloatStateOf(transformPrefs.getFloat(DROP_THRESHOLD, 0.5f))
         private set
