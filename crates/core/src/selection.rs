@@ -148,8 +148,9 @@ impl CanvasSession {
         self.select_window_polygon(&window, join);
     }
 
-    /// Selects by colour: the pixels of the current layer joined to window point (`x`, `y`) whose
-    /// colour is within `threshold` (0..1) of its colour join the selection. While `live` (the
+    /// Selects by colour: the pixels of the current layer (or of the reference layer, when another
+    /// layer is it, as ColorDrop reads) joined to window point (`x`, `y`) whose colour is within
+    /// `threshold` (0..1) of its colour join the selection. While `live` (the
     /// threshold being dragged) each call replaces the last one's shape; the last call is not live.
     pub fn select_by_colour(&self, x: f32, y: f32, threshold: f32, join: SelectionJoin, live: bool) {
         let mut guard = self.shared.lock();
@@ -161,7 +162,9 @@ impl CanvasSession {
             Some((px, flood)) if flood.seed() == seed => (px, Some(flood)),
             Some((px, _)) => (px, None),
             None => {
-                let Some(px) = st.current_pixels() else { return };
+                let current = st.doc.current();
+                let source = st.doc.reference().filter(|&r| r != current).unwrap_or(current);
+                let Some(px) = st.layer_pixels(source) else { return };
                 st.selection_before = Some(st.selection.clone());
                 (px, None)
             }

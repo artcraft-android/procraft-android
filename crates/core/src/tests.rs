@@ -2032,6 +2032,43 @@ fn a_selection_limits_painting_and_its_tools_work() {
 }
 
 #[test]
+fn an_automatic_selection_reads_the_reference_layer_as_colordrop_does() {
+    use crate::selection::SelectionJoin;
+    let Some(s) = session(100, 100) else { return };
+    // a ring on the bottom layer, made the reference; an empty layer above it current
+    s.set_brush_size(0.05);
+    s.set_color(0.0, 0.0, 0.0);
+    let ring: Vec<PenSample> = (0..=64)
+        .map(|i| {
+            let t = i as f32 / 64.0 * std::f32::consts::TAU;
+            sample(50.0 + 30.0 * t.cos(), 50.0 + 30.0 * t.sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    s.stroke_begin(PointerKind::Finger, ring[..1].to_vec());
+    s.stroke_add(ring[1..].to_vec());
+    s.stroke_end(vec![]);
+    let bottom = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    assert!(s.set_layer_reference(bottom, true));
+    s.add_layer();
+    // a tap inside the ring selects inside it, not the whole empty layer
+    s.select_by_colour(50.0, 50.0, 0.2, SelectionJoin::Add, false);
+    let selected = |x: usize, y: usize| {
+        s.shared
+            .lock()
+            .selection
+            .as_ref()
+            .is_some_and(|m| m.data.get(y * m.width as usize + x).is_some_and(|&v| v > 127))
+    };
+    assert!(selected(50, 50) && selected(60, 45));
+    assert!(!selected(5, 5) && !selected(95, 50), "outside the ring left out");
+    // with no reference, the current layer: all of the empty layer
+    s.select_none();
+    assert!(s.set_layer_reference(bottom, false));
+    s.select_by_colour(50.0, 50.0, 0.2, SelectionJoin::Add, false);
+    assert!(selected(50, 50) && selected(5, 5));
+}
+
+#[test]
 fn a_transform_with_a_selection_moves_only_what_it_takes() {
     use crate::selection::SelectionJoin;
     use crate::transform::{TransformAction, TransformHandle};
