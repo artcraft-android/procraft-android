@@ -591,6 +591,32 @@ impl Export {
     }
 }
 
+/// A point the app asks about ([`Layer::hit`]): where (canvas pixels), and how far about it counts
+/// as there.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Hit {
+    pub x: f32,
+    pub y: f32,
+    pub reach: f32,
+}
+
+impl Hit {
+    /// What `bytes` (the app's record of it) holds.
+    pub fn read(bytes: &[u8]) -> Hit {
+        let mut out = Hit::default();
+        for (id, value) in fields(bytes) {
+            let v = f32_at(value, 0).filter(|v| v.is_finite()).unwrap_or(0.0);
+            match id {
+                1 => out.x = v,
+                2 => out.y = v,
+                3 => out.reach = v.max(0.0),
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
 /// A change the app asks of one item ([`Layer::edit`]): which, by its id, and whether it goes, or
 /// the fields it takes in place of its own.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -692,6 +718,11 @@ pub trait Layer: Sized + Send {
     fn export(_export: &Export) -> Option<Vec<u8>> {
         None
     }
+    /// The id of the item at `hit`, topmost first (none, unless it says): a tap of the selection
+    /// tool takes it.
+    fn hit(&self, _hit: &Hit) -> Option<u32> {
+        None
+    }
 }
 
 /// The layer being worked on (the app hands one over for each change), and what the app reads from
@@ -782,6 +813,14 @@ impl<L: Layer> Held<L> {
         i32::from(lock(&self.layer).as_mut().is_some_and(|layer| layer.fill(&dropped)))
     }
 
+    pub fn hit(&self, _len: i32) -> i32 {
+        let hit = Hit::read(&std::mem::take(&mut *lock(&self.input)));
+        match lock(&self.layer).as_ref().and_then(|layer| layer.hit(&hit)) {
+            Some(id) => self.put(id.to_le_bytes().to_vec()),
+            None => 0,
+        }
+    }
+
     pub fn export(&self, _len: i32) -> i32 {
         let export = Export::read(&std::mem::take(&mut *lock(&self.input)));
         match L::export(&export) {
@@ -846,6 +885,11 @@ macro_rules! layers {
         #[unsafe(no_mangle)]
         pub extern "C" fn procraft_layer_export(len: i32) -> i32 {
             LAYER.export(len)
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn procraft_layer_hit(len: i32) -> i32 {
+            LAYER.hit(len)
         }
     };
 }
@@ -1017,7 +1061,10 @@ mod tests {
         assert_eq!(held.load(0, len), 0);
         assert_eq!(held.layer.lock().unwrap().as_ref().unwrap().0, [item]);
         // one that selects, edits, fills and exports nothing says so
-        assert_eq!((held.select(0), held.edit(0), held.fill(0), held.export(0)), (0, 0, 0, -1));
+        assert_eq!((held.select(0), held.edit(0), held.fill(0), held.export(0), held.hit(0)), (0, 0, 0, -1, 0));
+        let mut point = Record::default();
+        point.field(1, &2.5f32.to_le_bytes()).field(2, &3.0f32.to_le_bytes()).field(3, &(-1.0f32).to_le_bytes());
+        assert_eq!(Hit::read(&point.bytes()), Hit { x: 2.5, y: 3.0, reach: 0.0 });
         // an export asked for, as the app hands it over
         let mut one = Record::default();
         one.field(1, b"Ink").field(2, &[1]).field(3, &0.5f32.to_le_bytes()).field(4, b"data");

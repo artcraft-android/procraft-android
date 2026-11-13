@@ -849,6 +849,7 @@ procraft_layer_select(len: i32) -> i32           // if it exports it: the ids a 
 procraft_layer_edit(len: i32) -> i32             // if it exports it: changes to items, not 0 if made
 procraft_layer_fill(len: i32) -> i32             // if it exports it: a colour dropped, not 0 if items changed
 procraft_layer_export(len: i32) -> i32           // if it exports it: a file of an artwork's layers: its length
+procraft_layer_hit(len: i32) -> i32              // if it exports it: the item at a point: 4 (its id), or 0
 ```
 
 For each change, the app first hands over the layer's data with `procraft_layer_load`. `kind` is the
@@ -898,6 +899,13 @@ layer's own pixels, which saving and exporting read, stay as they are.
 
 The plugin answers not 0 if it changed its items. The app then asks for the data and the items to
 draw, and lays the layer again as one step called ColorDrop.
+
+`procraft_layer_hit` is handed a point as a record: x and y (fields 1 and 2) in canvas pixels, and
+how far about it counts as there (field 3), each a 32-bit float. It answers 4 with the id of the
+topmost item there at `procraft_layer_out()` (u32), or 0 for none. With it, a tap of the Selection
+tool on the layer selects the item under it as a selection of that item alone would, joined to the
+selection as Add or Remove says, and a tap on nothing lets the selection go (a freehand path being
+tapped out point by point goes on as it does).
 
 `procraft_layer_export` is handed what a file is to be made of, as a record, and needs no layer
 loaded first:
@@ -958,7 +966,8 @@ the eraser does, and what a selection takes:
   strokes of its own, its samples as they were, cut where the eraser's edge crosses it.
 - Erasing reaches a stroke's symmetry copies as well as the stroke itself.
 - A selection takes the strokes wholly inside it. It takes those it touches too while "Selections
-  take touching strokes" is on, and masks too while "Selections take masks" is on.
+  take touching strokes" is on, and masks too while "Selections take masks" is on. A tap takes the
+  stroke or fill under it.
 - A colour dropped on the layer fills the region round where it lands, bounded by what is drawn, and
   kept out of gaps in the lines up to "Fills close gaps" wide. The fill is an item of its own, behind
   the strokes: it moves, recolours and deletes as a stroke does, and a selection takes it by its

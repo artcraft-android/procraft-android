@@ -105,7 +105,8 @@
 //!   ask of its items (not 0: something changed); `procraft_layer_fill(len: i32) -> i32` takes a
 //!   colour dropped on the layer (not 0: its items changed); `procraft_layer_export(len: i32) -> i32`
 //!   makes a file of an artwork's layers of a kind (its length at `procraft_layer_out()`, below 0
-//!   none).
+//!   none); `procraft_layer_hit(len: i32) -> i32` says which item is at a point (4 bytes, its id, at
+//!   `procraft_layer_out()`, or 0 for none).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
@@ -230,6 +231,7 @@ const LAYER_SELECT: &str = "procraft_layer_select";
 const LAYER_EDIT: &str = "procraft_layer_edit";
 const LAYER_FILL: &str = "procraft_layer_fill";
 const LAYER_EXPORT: &str = "procraft_layer_export";
+const LAYER_HIT: &str = "procraft_layer_hit";
 /// What a call on a plugin's own artwork may spend (its drawing, its saving), and how long; a touch,
 /// which comes with each sample while the canvas waits, far less.
 const CANVAS_FUEL: u64 = 800_000_000;
@@ -600,6 +602,8 @@ struct LayerCalls {
     fill: Option<TypedFunc<i32, i32>>,
     /// A file of an artwork's layers, if it makes any.
     export: Option<TypedFunc<i32, i32>>,
+    /// The item at a point, if it says.
+    hit: Option<TypedFunc<i32, i32>>,
 }
 
 /// What a plugin says of an item recorded on its layer.
@@ -877,6 +881,7 @@ impl Running {
                     edit: instance.get_typed_func(&store, LAYER_EDIT).ok(),
                     fill: instance.get_typed_func(&store, LAYER_FILL).ok(),
                     export: instance.get_typed_func(&store, LAYER_EXPORT).ok(),
+                    hit: instance.get_typed_func(&store, LAYER_HIT).ok(),
                 })
             })();
             let key_buffer = instance.get_typed_func(&store, KEY_BUFFER).ok();
@@ -1306,6 +1311,32 @@ impl Running {
         let Running { store, layers, .. } = self;
         let Some(fill) = layers.as_ref().and_then(|calls| calls.fill.as_ref()) else { return Ok(false) };
         Ok(guarded(|| long_call(store, fill, len, &mut left, until))? != 0)
+    }
+
+    /// The id of the item of the layer it works on at the point `request` (a record) says: none if
+    /// there is none there, or it doesn't say (`Ok(None)` either way).
+    pub(crate) fn layer_hit(&mut self, request: &[u8]) -> Result<Option<u32>, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(request, &mut left, until)?;
+        let Running { store, layers, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (layers.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let Some(hit) = calls.hit.as_ref() else { return Ok(None) };
+        guarded(|| match long_call(store, hit, len, &mut left, until)? {
+            0 => Ok(None),
+            4 => {
+                let at =
+                    usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+                let mut id = [0_u8; 4];
+                memory.read(&*store, at, &mut id).map_err(|_| Stop::Nonsense)?;
+                Ok(Some(u32::from_le_bytes(id)))
+            }
+            _ => Err(Stop::Nonsense),
+        })
+    }
+
+    /// Whether it says which item is at a point.
+    pub(crate) fn layer_hits(&self) -> bool {
+        self.layers.as_ref().is_some_and(|calls| calls.hit.is_some())
     }
 
     /// The file it makes of the layers `request` hands it (a record), at most `most` bytes: none if

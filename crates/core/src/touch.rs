@@ -33,6 +33,8 @@ const LIQUIFY_HELD_WAIT_MS: f64 = 110.0;
 const LIQUIFY_HELD_STEP_MS: f64 = 16.0;
 const LIQUIFY_HELD_SLOP: f32 = 3.0;
 const TAP_SLOP: f32 = 24.0;
+/// How far from an item (points) a tap of the selection tool on a plugin's layer still takes it.
+const TAP_REACH: f32 = 6.0;
 /// Each of the fingers tapped together stays short of this (points) from where it landed: this
 /// far, they are moving the canvas.
 const FINGERS_TAP_SLOP: f32 = 15.0;
@@ -2120,6 +2122,25 @@ impl CanvasSession {
             t.select_moved = true;
         }
         let moved = t.select_moved;
+        // on a plugin's layer a tap takes the item under it, or on nothing lets the selection go
+        // (but for a freehand path, tapped out point by point: on nothing that goes on)
+        let freehand = how.kind == SelectKind::Freehand;
+        if done && !moved && !(freehand && !t.freehand.is_empty()) {
+            let reach = TAP_REACH * t.scale;
+            drop(t);
+            let tapped = {
+                let mut st = self.shared.lock();
+                let current = st.doc.current();
+                let zoom = st.view.map_or(1.0, |v| v.zoom()).max(1e-6);
+                st.window_to_canvas(at.0, at.1)
+                    .is_some_and(|p| st.tap_items(current, p, reach / zoom, how.join, !freehand))
+            };
+            if tapped {
+                out.push(TouchCommand::SelectionChanged);
+                return;
+            }
+            t = self.touches();
+        }
         match how.kind {
             SelectKind::Rectangle | SelectKind::Ellipse => {
                 drop(t);

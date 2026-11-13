@@ -1745,6 +1745,49 @@ impl State {
         self.items_changed_by(layer, "ColorDrop", |running| running.layer_fill(&record))
     }
 
+    /// A tap of the selection tool at canvas point `at` on `layer`, `reach` canvas pixels about it:
+    /// the item there joined to the selection as `how` says (as a selection of it alone would take
+    /// it), or, with none there, the selection let go (if `clears`). False if it isn't a plugin's
+    /// layer whose plugin says what is at a point, or nothing is there and it doesn't clear (the
+    /// tap does as it does elsewhere).
+    pub(crate) fn tap_items(
+        &mut self,
+        layer: LayerId,
+        at: Vec2,
+        reach: f32,
+        how: crate::SelectionJoin,
+        clears: bool,
+    ) -> bool {
+        if self.doc.is_locked(layer) {
+            return false;
+        }
+        let mut r = Record::default();
+        r.floats(1, &[at.x]).floats(2, &[at.y]).floats(3, &[reach.max(0.0)]);
+        let request = r.bytes();
+        let hit = self.on_layer_data(layer, |running| {
+            if !running.layer_hits() {
+                return Ok(None);
+            }
+            running.layer_hit(&request).map(Some)
+        });
+        let Some(Some(hit)) = hit else { return false };
+        match hit.and_then(|id| self.layer_items(layer)?.into_iter().find(|i| i.id == Some(id))) {
+            Some(item) => {
+                let (width, height) = (self.doc.width(), self.doc.height());
+                match item_mask(&item, width, height) {
+                    Some(mask) => self.join(mask, how, true),
+                    None => return false,
+                }
+            }
+            None if clears => {
+                let before = self.selection.take();
+                self.record_selection(before, "clear selection");
+            }
+            None => return false,
+        }
+        true
+    }
+
     /// Deletes the items of `layer` the selection takes (every one with nothing selected), as one
     /// step: false if none went.
     pub(crate) fn delete_taken_items(&mut self, layer: LayerId) -> bool {
@@ -1829,6 +1872,85 @@ fn moved_change(item: &Item, t: Affine) -> Option<Change> {
     let mut fields = Record::default();
     fields.floats(field::TRANSFORM, &affine_floats(now));
     Some(Change { id, delete: false, fields: fields.bytes() })
+}
+
+/// A selection of the pixels `item` covers on a `width` × `height` canvas, near enough: its paths
+/// as wide as its brush, or its region; none if it covers none.
+fn item_mask(item: &Item, width: u32, height: u32) -> Option<Mask> {
+    let [l, t, r, b] = items_reach(std::slice::from_ref(item))?;
+    let rect = IRect::new(
+        (l - 1.0).floor() as i32,
+        (t - 1.0).floor() as i32,
+        (r + 1.0).ceil() as i32,
+        (b + 1.0).ceil() as i32,
+    )
+    .intersect(IRect::from_size(width, height));
+    if rect.is_empty() {
+        return None;
+    }
+    let to = item.transform.unwrap_or(Affine::IDENTITY);
+    let (ox, oy) = (rect.x0 as f32, rect.y0 as f32);
+    let mut path = tiny_skia::PathBuilder::new();
+    let filled = match &item.region {
+        Some(region) => {
+            for outline in &region.outlines {
+                for (i, p) in outline.iter().map(|p| to.apply(*p)).enumerate() {
+                    if i == 0 { path.move_to(p.x - ox, p.y - oy) } else { path.line_to(p.x - ox, p.y - oy) }
+                }
+                path.close();
+            }
+            true
+        }
+        None => {
+            // the stroke and each copy its symmetry makes
+            let own: Vec<Vec2> = item.samples.iter().map(|s| s.pos).collect();
+            let mut paths = vec![own.clone()];
+            if let Some(symmetry) = item.symmetry {
+                let guide = symmetry.guide();
+                let copies: Vec<Vec<Vec2>> =
+                    own.iter().map(|p| guide.copies(*p).into_iter().map(|c| c.0).collect()).collect();
+                for k in 0..copies.first().map_or(0, Vec::len) {
+                    paths.push(copies.iter().filter_map(|c| c.get(k).copied()).collect());
+                }
+            }
+            for copy in &paths {
+                for (i, p) in copy.iter().map(|p| to.apply(*p)).enumerate() {
+                    if i == 0 { path.move_to(p.x - ox, p.y - oy) } else { path.line_to(p.x - ox, p.y - oy) }
+                }
+                if let [only] = copy.as_slice() {
+                    let p = to.apply(*only);
+                    path.line_to(p.x - ox + 0.01, p.y - oy);
+                }
+            }
+            false
+        }
+    };
+    let path = path.finish()?;
+    let mut pixmap = tiny_skia::Pixmap::new(rect.width(), rect.height())?;
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 255);
+    paint.anti_alias = true;
+    if filled {
+        pixmap.fill_path(&path, &paint, tiny_skia::FillRule::EvenOdd, tiny_skia::Transform::identity(), None);
+    } else {
+        let stroke = tiny_skia::Stroke {
+            width: (item.width * to.scale_factor()).max(1.0),
+            line_cap: tiny_skia::LineCap::Round,
+            line_join: tiny_skia::LineJoin::Round,
+            ..tiny_skia::Stroke::default()
+        };
+        pixmap.stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
+    }
+    let mut mask = Mask::empty(width, height);
+    for (row, line) in pixmap.data().as_chunks::<4>().0.chunks(rect.width() as usize).enumerate() {
+        let at = (rect.y0 as usize + row) * width as usize + rect.x0 as usize;
+        if let Some(out) = mask.data.get_mut(at..at + line.len()) {
+            for (o, px) in out.iter_mut().zip(line) {
+                *o = px[3];
+            }
+        }
+    }
+    Some(mask)
 }
 
 /// What a selection's items reach: left, top, right and bottom, canvas pixels, their brushes'

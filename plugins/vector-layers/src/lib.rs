@@ -35,7 +35,7 @@
 mod fill;
 mod svg;
 
-use kit::layer::{Added, Area, Change, Drawn, Dropped, Export, Item, Layer, Record, Sample, Tool, field, fields};
+use kit::layer::{Added, Area, Change, Drawn, Dropped, Export, Hit, Item, Layer, Record, Sample, Tool, field, fields};
 
 /// What its data starts with, and the version of what follows (1 had no ids).
 const MAGIC: &[u8; 4] = b"PCVL";
@@ -355,6 +355,11 @@ impl Vectors {
 
     /// The topmost stroke or fill (no mask) at canvas point `p`, by place.
     fn under(&self, p: (f32, f32)) -> Option<usize> {
+        self.under_within(p, 1.0)
+    }
+
+    /// The topmost stroke or fill (no mask) at canvas point `p` or `reach` about it, by place.
+    fn under_within(&self, p: (f32, f32), reach: f32) -> Option<usize> {
         self.items.iter().enumerate().rev().filter(|(_, k)| k.tool != Tool::Mask).find_map(|(at, kept)| {
             let item = kept.item();
             let hit = if item.is_fill() {
@@ -366,7 +371,7 @@ impl Vectors {
                     .collect();
                 fill::inside(&outlines, p)
             } else {
-                let reach = item.width() / 2.0 + 1.0;
+                let reach = item.width() / 2.0 + reach;
                 item.paths().iter().any(|path| distance(p, path) <= reach)
             };
             hit.then_some(at)
@@ -554,6 +559,11 @@ impl Layer for Vectors {
             })
             .map(|kept| kept.id)
             .collect()
+    }
+
+    fn hit(&self, hit: &Hit) -> Option<u32> {
+        let at = self.under_within((hit.x, hit.y), hit.reach.max(1.0))?;
+        self.items.get(at).map(|kept| kept.id)
     }
 
     fn export(export: &Export) -> Option<Vec<u8>> {
@@ -899,6 +909,21 @@ mod tests {
         layer.add(stroke(2, 20.0, b"blender", &[(40.0, 115.0), (40.0, 125.0)]));
         let nudged = layer.items[1].item().points();
         assert!(nudged.iter().any(|p| p.1 > 124.0), "{nudged:?}");
+    }
+
+    #[test]
+    fn a_tap_finds_the_topmost_stroke_or_fill_under_it() {
+        let mut layer = Vectors::new(0);
+        layer.add(stroke(0, 10.0, b"pen", &line(20.0)));
+        layer.add(stroke(0, 10.0, b"pen", &line(22.0)));
+        let fill = Item::fill(&[vec![(0.0, 60.0), (50.0, 60.0), (50.0, 90.0), (0.0, 90.0)]], [1.0, 0.0, 0.0], 1.0);
+        let kept = layer.kept(&fill, None).unwrap();
+        layer.items.push(kept);
+        let at = |x: f32, y: f32, reach: f32| layer.hit(&Hit { x, y, reach });
+        assert_eq!(at(50.0, 21.0, 1.0), Some(layer.items[1].id), "the one on top");
+        assert_eq!(at(50.0, 33.0, 1.0), None);
+        assert_eq!(at(50.0, 33.0, 8.0), Some(layer.items[1].id), "within a finger's reach");
+        assert_eq!(at(20.0, 70.0, 1.0), Some(layer.items[2].id), "inside the fill");
     }
 
     #[test]

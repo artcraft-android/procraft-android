@@ -66,7 +66,7 @@ impl State {
 
     /// Joins `shape` to the selection; `record` makes it an undo step (otherwise it is only shown,
     /// as while a colour threshold is dragged).
-    fn join(&mut self, shape: Mask, how: SelectionJoin, record: bool) {
+    pub(crate) fn join(&mut self, shape: Mask, how: SelectionJoin, record: bool) {
         self.feather_base = None;
         let before = self.selection.clone();
         match (self.selection.as_mut(), how) {

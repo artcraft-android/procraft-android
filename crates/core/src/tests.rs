@@ -13010,3 +13010,41 @@ fn on_a_vector_layer_a_soft_mask_hides_half_and_the_smudge_tool_nudges_strokes()
     assert_eq!(layer_rgba(&s, vector), drawn);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_tap_of_the_selection_tool_on_a_vector_layer_takes_the_stroke_under_it_or_lets_the_selection_go() {
+    let Some((s, _plugins, dir)) = vector_session(160, "tap") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.2);
+    stroke_across(&s, 40.0, 20.0, 140.0);
+    stroke_across(&s, 100.0, 20.0, 140.0);
+    let items = vector_items(&s, vector);
+    let tool = |kind| Some(crate::touch::SelectTouch { kind, join: crate::SelectionJoin::Add, threshold: 0.5 });
+    let tap = |x: f32, y: f32, ms: f64| {
+        s.touch_down(1, PointerKind::Stylus, vec![sample(x, y, ms)]);
+        s.touch_up(1, vec![sample(x, y, ms + 30.0)])
+    };
+    s.set_touch_selecting(tool(crate::touch::SelectKind::Rectangle));
+    // on the second stroke: it, and it alone, is taken
+    let out = tap(80.0, 101.0, 0.0);
+    assert!(out.contains(&crate::touch::TouchCommand::SelectionChanged), "{out:?}");
+    assert_eq!(s.taken_plugin_items(), [items[1].id.unwrap()]);
+    // the first added to it
+    tap(60.0, 40.0, 500.0);
+    let mut taken = s.taken_plugin_items();
+    taken.sort_unstable();
+    assert_eq!(taken, [items[0].id.unwrap(), items[1].id.unwrap()]);
+    // moved together as strokes
+    assert!(s.transform_plugin_items(vec![1.0, 0.0, 0.0, 1.0, 0.0, 5.0]));
+    assert!(vector_items(&s, vector).iter().all(|i| i.transform.map(|t| t.f) == Some(5.0)));
+    // on nothing: the selection let go
+    tap(80.0, 150.0, 1000.0);
+    assert!(!s.has_selection());
+    // a freehand path still taps out point by point
+    s.set_touch_selecting(tool(crate::touch::SelectKind::Freehand));
+    tap(10.0, 10.0, 1500.0);
+    tap(150.0, 10.0, 2000.0);
+    assert_eq!(s.freehand_path().len(), 4, "two points of a path");
+    s.set_touch_selecting(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
