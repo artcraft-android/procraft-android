@@ -524,6 +524,15 @@ impl Hooks {
         working.on.iter().find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).map(|k| k.label.clone()))
     }
 
+    /// What layers of `kind` are known by on their thumbnails, if a plugin on adds them and draws it.
+    pub(crate) fn layer_kind_badge(&self, kind: &str) -> Option<crate::PluginBadge> {
+        if !self.has(Hook::Layers) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).and_then(|k| k.badge.clone()))
+    }
+
     /// `work` done by the plugin on that adds layers of `kind`, handed its code and the kind's place
     /// among its kinds: none if no plugin on adds them, or it stopped (it goes off, and says why).
     pub(crate) fn on_layer<T>(

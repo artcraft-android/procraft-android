@@ -885,18 +885,32 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
                 Image(it, contentDescription = null, contentScale = ContentScale.Fit, filterQuality = FilterQuality.None, modifier = Modifier.fillMaxSize())
             }
         }
-        // a plugin's layer, its strokes kept as strokes: a curve between two nodes in its corner
-        if (l.pluginKind != null) {
+        // a plugin's layer: its kind's badge in its corner, as its manifest draws it
+        l.pluginBadge?.let { badge ->
             androidx.compose.foundation.Canvas(Modifier.align(Alignment.BottomEnd).padding(3.dp).size(18.dp, 14.dp)) {
                 val (w, h) = size.width to size.height
-                drawRoundRect(VectorBadge, cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()))
-                val curve = Path().apply {
-                    moveTo(w * 0.22f, h * 0.72f)
-                    cubicTo(w * 0.38f, h * 0.05f, w * 0.62f, h * 0.95f, w * 0.78f, h * 0.28f)
+                drawRoundRect(PluginBadgeBehind, cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()))
+                for (line in badge.lines) {
+                    val p = line.points
+                    if (p.size < 4) continue
+                    val path = Path().apply {
+                        moveTo(w * p[0], h * p[1])
+                        var i = 2
+                        while (i + 1 < p.size) {
+                            if (line.curved && i + 5 < p.size) {
+                                cubicTo(w * p[i], h * p[i + 1], w * p[i + 2], h * p[i + 3], w * p[i + 4], h * p[i + 5])
+                                i += 6
+                            } else {
+                                lineTo(w * p[i], h * p[i + 1])
+                                i += 2
+                            }
+                        }
+                    }
+                    drawPath(path, Color.White, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx()))
                 }
-                drawPath(curve, Color.White, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx()))
                 val node = 3.dp.toPx()
-                for ((x, y) in listOf(w * 0.22f to h * 0.72f, w * 0.78f to h * 0.28f)) {
+                for (i in 0 until badge.dots.size / 2) {
+                    val (x, y) = w * badge.dots[2 * i] to h * badge.dots[2 * i + 1]
                     drawRect(Color.White, Offset(x - node / 2, y - node / 2), Size(node, node))
                 }
             }
@@ -905,7 +919,7 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
 }
 
 /** The badge behind a plugin's layer's glyph on its thumbnail. */
-private val VectorBadge = Color(0x99000000)
+private val PluginBadgeBehind = Color(0x99000000)
 
 /** The transparency checkerboard behind thumbnails. */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.checker() {

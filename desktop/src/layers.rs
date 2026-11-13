@@ -1745,22 +1745,38 @@ impl Layers {
             let shown = Rect::from_center_size(rect.center(), size * fit);
             painter.image(t.id(), shown, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
-        // a plugin's layer, its strokes kept as strokes: a curve between two nodes in its corner
-        if l.plugin_kind.is_some() {
-            let badge = Rect::from_min_size(rect.right_bottom() - vec2(3.0 + 18.0, 3.0 + 14.0), vec2(18.0, 14.0));
-            painter.rect_filled(badge, 4u8, Color32::from_black_alpha(0x99));
-            let at = |x: f32, y: f32| pos2(badge.left() + badge.width() * x, badge.top() + badge.height() * y);
-            let (start, end) = (at(0.22, 0.72), at(0.78, 0.28));
-            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                [start, at(0.38, 0.05), at(0.62, 0.95), end],
-                false,
-                Color32::TRANSPARENT,
-                egui::Stroke::new(1.5, Color32::WHITE),
-            ));
-            for node in [start, end] {
-                painter.rect_filled(Rect::from_center_size(node, vec2(3.0, 3.0)), 0u8, Color32::WHITE);
-            }
+        // a plugin's layer: its kind's badge in its corner, as its manifest draws it
+        if let Some(badge) = &l.plugin_badge {
+            plugin_badge(&painter, rect, badge);
         }
+    }
+}
+
+/// A plugin's layer's badge (its lines and dots in white over a dark rounded box) in the bottom
+/// right corner of its thumbnail's `rect`.
+fn plugin_badge(painter: &egui::Painter, rect: Rect, badge: &procraft_core::PluginBadge) {
+    let area = Rect::from_min_size(rect.right_bottom() - vec2(3.0 + 18.0, 3.0 + 14.0), vec2(18.0, 14.0));
+    painter.rect_filled(area, 4u8, Color32::from_black_alpha(0x99));
+    let at = |x: f32, y: f32| pos2(area.left() + area.width() * x, area.top() + area.height() * y);
+    let ink = egui::Stroke::new(1.5, Color32::WHITE);
+    for line in &badge.lines {
+        let points: Vec<Pos2> = line.points.as_chunks::<2>().0.iter().map(|&[x, y]| at(x, y)).collect();
+        if points.len() < 2 {
+            continue;
+        }
+        if line.curved {
+            for piece in points.windows(4).step_by(3) {
+                let &[a, b, c, d] = piece else { continue };
+                let curve =
+                    egui::epaint::CubicBezierShape::from_points_stroke([a, b, c, d], false, Color32::TRANSPARENT, ink);
+                painter.add(curve);
+            }
+        } else {
+            painter.add(egui::Shape::line(points, ink));
+        }
+    }
+    for &[x, y] in badge.dots.as_chunks::<2>().0 {
+        painter.rect_filled(Rect::from_center_size(at(x, y), vec2(3.0, 3.0)), 0u8, Color32::WHITE);
     }
 }
 

@@ -11892,8 +11892,9 @@ fn most_apart(a: &[u8], b: &[u8]) -> u8 {
 #[test]
 fn a_stroke_on_a_vector_layer_is_painted_as_on_any_layer_and_kept_as_an_item() {
     let Some((s, plugins, dir)) = vector_session(160, "record") else { return };
-    let kind = crate::PluginKind { key: VECTOR_KIND.to_owned(), label: "Vector layer".to_owned() };
-    assert_eq!(plugins.layer_kinds(), [kind]);
+    let kinds = plugins.layer_kinds();
+    assert_eq!(kinds.len(), 1);
+    assert_eq!((kinds[0].key.as_str(), kinds[0].label.as_str()), (VECTOR_KIND, "Vector layer"));
     s.set_color(0.0, 0.4, 1.0);
     s.set_brush_size(0.4);
     // the same stroke on a pixel layer, then on a vector layer
@@ -11905,6 +11906,9 @@ fn a_stroke_on_a_vector_layer_is_painted_as_on_any_layer_and_kept_as_an_item() {
     assert_ne!(vector, 0);
     let info = s.layers().into_iter().find(|l| l.id == vector).unwrap();
     assert_eq!((info.plugin_kind.as_deref(), info.locked), (Some(VECTOR_KIND), false));
+    assert_eq!(info.plugin_badge, kinds[0].badge, "its kind's badge");
+    assert!(info.plugin_badge.as_ref().is_some_and(|b| b.lines[0].curved));
+    assert_eq!(s.layers().into_iter().find(|l| l.id == pixel).unwrap().plugin_badge, None);
     assert!(info.name.starts_with("Vector layer"));
     assert_eq!(s.add_plugin_layer("org.example.none.vector".to_owned()), 0, "a kind no plugin on adds");
     stroke_across(&s, 80.0, 20.0, 140.0);
@@ -11973,13 +11977,13 @@ fn a_vector_layer_is_saved_with_its_items_beside_its_pixels_and_opens_again() {
     let folder = std::path::Path::new(&dir).join("artwork");
     let path = folder.to_string_lossy().into_owned();
     s.save(path.clone()).unwrap();
-    let data = folder.join("layers").join(format!("{vector}.vector"));
+    let data = folder.join("layers").join(format!("{vector}.layerdata"));
     let written = std::fs::read(&data).unwrap();
     assert!(written.starts_with(b"PCVL"), "the plugin's own data, whole");
-    assert_eq!(std::fs::read(folder.join("layers").join(format!("{empty}.vector"))).unwrap(), b"", "none yet");
+    assert_eq!(std::fs::read(folder.join("layers").join(format!("{empty}.layerdata"))).unwrap(), b"", "none yet");
     assert!(std::fs::read_to_string(folder.join("artwork.json")).unwrap().contains(VECTOR_KIND));
     // saved again, a file of a layer no longer there goes, and the data stays
-    let stray = folder.join("layers").join("999.vector");
+    let stray = folder.join("layers").join("999.layerdata");
     std::fs::write(&stray, b"old").unwrap();
     s.save(path.clone()).unwrap();
     assert!(!stray.exists() && data.exists());
@@ -12131,7 +12135,7 @@ fn with_its_plugin_off_a_vector_layer_shows_its_pixels_takes_no_strokes_and_keep
     let folder = std::path::Path::new(&dir).join("artwork");
     let path = folder.to_string_lossy().into_owned();
     s.save(path.clone()).unwrap();
-    let data = folder.join("layers").join(format!("{vector}.vector"));
+    let data = folder.join("layers").join(format!("{vector}.layerdata"));
     let written = std::fs::read(&data).unwrap();
     assert!(plugins.set_on(VECTOR_ID.to_owned(), false));
     assert!(plugins.layer_kinds().is_empty());
@@ -12154,6 +12158,91 @@ fn with_its_plugin_off_a_vector_layer_shows_its_pixels_takes_no_strokes_and_keep
     assert!(plugins.set_on(VECTOR_ID.to_owned(), true));
     stroke_across(&s, 30.0, 10.0, 110.0);
     assert_eq!(vector_items(&s, vector).len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_its_plugin_removed_a_vector_layer_shows_its_saved_pixels_and_imported_again_its_strokes_come_back() {
+    let Some((s, plugins, dir)) = vector_session(120, "removed") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.3);
+    stroke_across(&s, 40.0, 10.0, 110.0);
+    stroke_across(&s, 80.0, 10.0, 110.0);
+    let pixels = layer_rgba(&s, vector);
+    let items = vector_items(&s, vector);
+    let folder = std::path::Path::new(&dir).join("artwork");
+    let path = folder.to_string_lossy().into_owned();
+    s.save(path.clone()).unwrap();
+    let data = folder.join("layers").join(format!("{vector}.layerdata"));
+    let written = std::fs::read(&data).unwrap();
+    // removed: the layer shows its pixels, locked, and every way of changing its items does nothing
+    assert!(plugins.remove(VECTOR_ID.to_owned()).is_some());
+    assert!(plugins.plugins().iter().all(|p| p.id != VECTOR_ID));
+    let info = s.layers().into_iter().find(|l| l.id == vector).unwrap();
+    assert!(info.locked && info.plugin_kind.as_deref() == Some(VECTOR_KIND));
+    assert_eq!(info.plugin_badge, Some(crate::PluginBadge::plug()), "a plug: its kind is gone");
+    stroke_across(&s, 60.0, 10.0, 110.0);
+    s.select_shape(false, 0.0, 0.0, 120.0, 120.0, crate::SelectionJoin::Add);
+    assert!(s.taken_plugin_items().is_empty() && s.taken_plugin_items_reach().is_empty());
+    assert!(!s.delete_plugin_items() && !s.transform_plugin_items(vec![1.0, 0.0, 0.0, 1.0, 5.0, 0.0]));
+    assert!(!s.restyle_plugin_items(true, false, false, false) && !s.draw_plugin_layer_again(vector));
+    s.select_none();
+    assert_eq!(layer_rgba(&s, vector), pixels, "as saved");
+    // opened so: from its saved pixels, locked; saved again, its data stays as it was
+    let opened = CanvasSession::open(path.clone()).unwrap();
+    {
+        let gpu = s.shared.lock().gpu.clone().unwrap();
+        opened.use_plugins(std::sync::Arc::clone(&plugins));
+        let mut st = opened.shared.lock();
+        st.window_size = (120, 120);
+        st.view = Some(View::fit((120, 120), (120, 120)));
+        st.gpu = Some(gpu);
+        st.ensure_canvas();
+    }
+    assert!(opened.layers().iter().any(|l| l.id == vector && l.locked));
+    assert_eq!(layer_rgba(&opened, vector), pixels);
+    opened.save(path.clone()).unwrap();
+    assert_eq!(std::fs::read(&data).unwrap(), written);
+    // imported again and on: its strokes are there to change, and it takes more
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(folder, _)| *folder == "vector-layers").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    assert!(plugins.set_on(VECTOR_ID.to_owned(), true));
+    assert!(!opened.layers().iter().any(|l| l.id == vector && l.locked));
+    assert_eq!(vector_items(&opened, vector), items);
+    opened.select_layer(vector);
+    assert!(opened.transform_plugin_items(vec![1.0, 0.0, 0.0, 1.0, 0.0, 10.0]));
+    stroke_across(&opened, 100.0, 10.0, 110.0);
+    assert_eq!(vector_items(&opened, vector).len(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_vector_layer_s_data_saved_under_its_earlier_name_still_opens() {
+    let Some((s, plugins, dir)) = vector_session(120, "earlier") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    stroke_across(&s, 60.0, 10.0, 110.0);
+    let items = vector_items(&s, vector);
+    let folder = std::path::Path::new(&dir).join("artwork");
+    let path = folder.to_string_lossy().into_owned();
+    s.save(path.clone()).unwrap();
+    // as an earlier version saved it
+    let data = folder.join("layers").join(format!("{vector}.layerdata"));
+    let earlier = folder.join("layers").join(format!("{vector}.vector"));
+    std::fs::rename(&data, &earlier).unwrap();
+    let opened = CanvasSession::open(path.clone()).unwrap();
+    {
+        let gpu = s.shared.lock().gpu.clone().unwrap();
+        opened.use_plugins(std::sync::Arc::clone(&plugins));
+        let mut st = opened.shared.lock();
+        st.gpu = Some(gpu);
+        st.ensure_canvas();
+    }
+    assert_eq!(vector_items(&opened, vector), items);
+    assert!(!opened.layers().iter().any(|l| l.id == vector && l.locked));
+    // saved, it has its own name, the earlier one gone
+    opened.save(path.clone()).unwrap();
+    assert!(data.exists() && !earlier.exists());
+    assert_eq!(vector_items(&opened, vector), items);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

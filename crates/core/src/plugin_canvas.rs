@@ -238,11 +238,46 @@ pub(crate) fn svg(paths: &[DrawPath], width: u32, height: u32) -> String {
     out
 }
 
-/// A plugin's kind of artwork, as the gallery lists it: `key` is `<id>.<key>`.
+/// A plugin's kind of artwork, as the gallery lists it, or of layer: `key` is `<id>.<key>`.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct PluginKind {
     pub key: String,
     pub label: String,
+    /// What a kind of layer's layers are known by on their thumbnails, if its manifest draws it.
+    #[uniffi(default = None)]
+    pub badge: Option<PluginBadge>,
+}
+
+/// A small drawing a kind of layer is known by on its layers' thumbnails: lines and dots in a box
+/// 1 across and 1 down (x to the right, y down), drawn light over a dark badge.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginBadge {
+    pub lines: Vec<BadgeLine>,
+    /// Small squares at these points: x, y, x, y and so on.
+    pub dots: Vec<f32>,
+}
+
+/// One of a badge's lines: its points (x, y, x, y and so on), straight from each to the next, or
+/// `curved`: cubic curves, a start, then two handles and an end for each.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct BadgeLine {
+    pub points: Vec<f32>,
+    pub curved: bool,
+}
+
+impl PluginBadge {
+    /// The badge of a layer whose kind draws none, or whose plugin is gone: a plug.
+    pub(crate) fn plug() -> PluginBadge {
+        let line = |points: &[f32]| BadgeLine { points: points.to_vec(), curved: false };
+        PluginBadge {
+            lines: vec![
+                line(&[0.33, 0.42, 0.67, 0.42, 0.67, 0.62, 0.5, 0.8, 0.33, 0.62, 0.33, 0.42]),
+                line(&[0.43, 0.42, 0.43, 0.2]),
+                line(&[0.57, 0.42, 0.57, 0.2]),
+            ],
+            dots: Vec::new(),
+        }
+    }
 }
 
 /// A plugin's artwork open: the copy of its code that keeps it, and its size.

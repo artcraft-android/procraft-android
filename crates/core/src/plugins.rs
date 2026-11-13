@@ -2130,7 +2130,7 @@ mod tests {
         assert!(plugins.kinds().is_empty(), "off until turned on");
         assert!(plugins.set_on(id.to_owned(), true));
         let kind = format!("{id}.dots");
-        assert_eq!(plugins.kinds(), [crate::PluginKind { key: kind.clone(), label: "Dots".to_owned() }]);
+        assert_eq!(plugins.kinds(), [crate::PluginKind { key: kind.clone(), label: "Dots".to_owned(), badge: None }]);
         let canvas = plugins.open_canvas(kind.clone(), 40, 30, None).expect("opened");
         assert_eq!((canvas.width(), canvas.height()), (40, 30));
         let red_at = |c: &crate::PluginCanvas, x: usize, y: usize| {

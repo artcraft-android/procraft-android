@@ -4,7 +4,7 @@
 //! an item (its samples, its brush, colour, size and opacity, and its tool) and handed to the plugin
 //! that adds the kind, which keeps the layer's items in its data, in its own format. The app holds
 //! that data in the document (see [`procraft_engine::document::PluginLayer`]), saves it beside the
-//! layer's pixels in `layers/<id>.vector`, and ties each change of it to the canvas step that changed
+//! layer's pixels in `layers/<id>.layerdata`, and ties each change of it to the canvas step that changed
 //! the pixels: undo and redo put back both together, between other layers' steps. When the plugin
 //! changes items already drawn (the eraser taking whole strokes away, say), the app clears the layer
 //! and lays its items again through the brush engine, in canvas pixels, as one step.

@@ -35,6 +35,10 @@ pub struct LayerInfo {
     /// The kind of layer a plugin adds (`<id>.<key>`), if it is one: its strokes are kept as items
     /// too. Shown locked while its plugin is off.
     pub plugin_kind: Option<String>,
+    /// What a plugin's layer is known by on its thumbnail: its kind's badge, or a plug when its kind
+    /// draws none or its plugin is off or gone.
+    #[uniffi(default = None)]
+    pub plugin_badge: Option<crate::PluginBadge>,
     /// How many groups it is inside.
     pub depth: u32,
     /// Left out of the picture while another layer is shown alone (solo visibility): its box
@@ -399,6 +403,10 @@ impl CanvasSession {
                 collapsed: l.collapsed,
                 text: l.text.is_some(),
                 plugin_kind: l.plugin.as_ref().map(|p| p.kind.clone()),
+                plugin_badge: l.plugin.as_ref().map(|p| {
+                    let badge = st.hooks.as_ref().and_then(|hooks| hooks.layer_kind_badge(&p.kind));
+                    badge.unwrap_or_else(crate::PluginBadge::plug)
+                }),
                 depth: u32::try_from(st.doc.depth(l.id)).unwrap_or(u32::MAX),
                 soloed_out: st.doc.soloed_out(l.id),
                 // as measured, not onto a locked layer: both left out of its menu then

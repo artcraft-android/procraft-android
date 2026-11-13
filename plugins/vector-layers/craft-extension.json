@@ -10,7 +10,14 @@
   "permissions": [],
   "hooks": [],
   "layer_kinds": [
-    { "key": "vector", "label": "Vector layer" }
+    {
+      "key": "vector",
+      "label": "Vector layer",
+      "badge": {
+        "lines": [{ "points": [0.22, 0.72, 0.38, 0.05, 0.62, 0.95, 0.78, 0.28], "curved": true }],
+        "dots": [0.22, 0.72, 0.78, 0.28]
+      }
+    }
   ],
   "controls": [
     { "key": "eraser", "type": "slider", "label": "Eraser", "least": 0, "most": 2, "step": 1, "starts": 0, "names": ["Mask", "Whole", "Cut"] },

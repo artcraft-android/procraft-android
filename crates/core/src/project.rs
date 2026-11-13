@@ -689,8 +689,12 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     saved.layers.retain(|id, _| file.document.layer(*id).is_some());
     saved.layer_data.retain(|id, _| file.document.layer(*id).is_some());
     if let Ok(entries) = fs::read_dir(dir.join("layers")) {
-        // (a plugin's layer's data file stays while the layer is there, even one never read)
-        let plugins = file.document.layers().iter().filter(|l| l.plugin.is_some()).map(|l| layer_data_path(dir, l.id));
+        // (a plugin's layer's data file stays while the layer is there, even one never read, under
+        // its earlier name until there is one under its own)
+        let plugins = file.document.layers().iter().filter(|l| l.plugin.is_some()).map(|l| {
+            let path = layer_data_path(dir, l.id);
+            if path.exists() { path } else { old_layer_data_path(dir, l.id) }
+        });
         let keep: Vec<PathBuf> = file.document.layer_ids().map(|id| layer_path(dir, id)).chain(plugins).collect();
         for entry in entries.flatten() {
             let path = entry.path();
@@ -793,6 +797,7 @@ impl CanvasSession {
         let plugin_layers: Vec<LayerId> = doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
         for id in plugin_layers {
             let path = layer_data_path(&dir, id);
+            let path = if path.exists() { path } else { old_layer_data_path(&dir, id) };
             match fs::read(&path).or_else(|_| fs::read(&path)) {
                 Ok(bytes) => {
                     data_hashes.push((id, pixels_hash(&bytes)));
@@ -1375,6 +1380,12 @@ fn layer_path(dir: &Path, id: LayerId) -> PathBuf {
 
 /// Where a plugin's layer's data is kept, beside its pixels.
 pub(crate) fn layer_data_path(dir: &Path, id: LayerId) -> PathBuf {
+    dir.join("layers").join(format!("{}.layerdata", id.0))
+}
+
+/// Where earlier versions kept it: read when the file above isn't there, and left until a save
+/// writes that.
+fn old_layer_data_path(dir: &Path, id: LayerId) -> PathBuf {
     dir.join("layers").join(format!("{}.vector", id.0))
 }
 

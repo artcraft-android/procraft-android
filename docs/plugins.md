@@ -784,15 +784,35 @@ kinds:
 
 ```json
   "compat": { "procraft": { "interface": 3 } },
-  "layer_kinds": [{ "key": "vector", "label": "Vector layer" }]
+  "layer_kinds": [
+    {
+      "key": "vector",
+      "label": "Vector layer",
+      "badge": {
+        "lines": [{ "points": [0.22, 0.72, 0.38, 0.05, 0.62, 0.95, 0.78, 0.28], "curved": true }],
+        "dots": [0.22, 0.72, 0.78, 0.28]
+      }
+    }
+  ]
 ```
 
 While the plugin is on, the Layers panel's + offers each kind beside a plain layer, named after its
 `label`. A plugin can list up to four kinds. The import screen says the plugin can add kinds of layer.
 
-- The app keeps each such layer's data in the artwork beside the layer's pixels (`layers/<id>.vector`
-  next to `layers/<id>.png`), written whole, and puts it back with the pixels when a stroke is undone
-  or redone.
+`badge` is optional. It is what the kind's layers show in the corner of their thumbnails, drawn in
+white over a small dark box. Its numbers are places in that box, 0 to 1 across and down:
+
+- `lines`: up to eight, each up to 32 points, x then y. A line goes straight from point to point, or
+  with `"curved": true` it is cubic curves: a start, then two handles and an end for each curve.
+- `dots`: up to eight small squares, x then y.
+
+Without a badge, or while the plugin is off or gone, the layer shows a plug.
+
+- The app keeps each such layer's data in the artwork beside the layer's pixels
+  (`layers/<id>.layerdata` next to `layers/<id>.png`), written whole, and puts it back with the pixels
+  when a stroke is undone or redone. Artworks saved by earlier versions have it in
+  `layers/<id>.vector`, which is read when there is no `.layerdata` file and replaced by one at the next
+  save.
 - With its plugin off or removed, or its data file gone or unreadable, the layer shows its pixels, as
   locked: it takes no strokes, and its data is left as it is through saves.
 - A file in another app's format, such as a layered PSD or the package format, has the layer as its

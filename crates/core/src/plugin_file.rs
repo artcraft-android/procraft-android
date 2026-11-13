@@ -198,11 +198,54 @@ struct RawManifest {
     layer_kinds: Vec<RawKind>,
 }
 
-/// A kind of artwork a plugin makes: its key and its name in the gallery's menu.
+/// A kind of artwork a plugin makes: its key and its name in the gallery's menu (or a kind of
+/// layer, and what its thumbnails show it by).
 #[derive(Deserialize)]
 struct RawKind {
     key: String,
     label: String,
+    #[serde(default)]
+    badge: Option<RawBadge>,
+}
+
+/// A kind of layer's badge, as its manifest draws it (see [`crate::PluginBadge`]).
+#[derive(Deserialize)]
+struct RawBadge {
+    #[serde(default)]
+    lines: Vec<RawBadgeLine>,
+    #[serde(default)]
+    dots: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+struct RawBadgeLine {
+    points: Vec<f32>,
+    #[serde(default)]
+    curved: bool,
+}
+
+/// The most lines a badge has, numbers a line has, and dots a badge has.
+const MOST_BADGE_LINES: usize = 8;
+const MOST_LINE_NUMBERS: usize = 64;
+const MOST_BADGE_DOTS: usize = 8;
+
+/// The badge `raw` draws, if it holds up: a few lines of whole points (a curved one a start and
+/// three for each curve), a few dots, every number in its box.
+fn badge_of(raw: RawBadge) -> Option<crate::PluginBadge> {
+    let in_box = |v: &[f32]| v.len().is_multiple_of(2) && v.iter().all(|n| n.is_finite() && (0.0..=1.0).contains(n));
+    let lines_fit = raw.lines.len() <= MOST_BADGE_LINES
+        && raw.lines.iter().all(|l| {
+            let points = l.points.len() / 2;
+            in_box(&l.points)
+                && l.points.len() <= MOST_LINE_NUMBERS
+                && points >= 2
+                && (!l.curved || (points - 1).is_multiple_of(3))
+        });
+    let dots_fit = raw.dots.len() <= MOST_BADGE_DOTS * 2 && in_box(&raw.dots);
+    (lines_fit && dots_fit && !(raw.lines.is_empty() && raw.dots.is_empty())).then(|| crate::PluginBadge {
+        lines: raw.lines.into_iter().map(|l| crate::BadgeLine { points: l.points, curved: l.curved }).collect(),
+        dots: raw.dots,
+    })
 }
 
 /// The most kinds of artwork a plugin may make.
@@ -601,7 +644,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     let kinds: Vec<crate::plugin_canvas::PluginKind> = raw
         .kinds
         .into_iter()
-        .map(|k| crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label })
+        .map(|k| crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label, badge: None })
         .collect();
     // kinds of layer, for code written to interface 3 or later: on the layers hook while it has any
     let layered = has(PluginPart::Hooks) && compat.interface.is_some_and(|interface| interface >= 3);
@@ -611,11 +654,15 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     if !layer_kinds_fit || (!layered && !raw.layer_kinds.is_empty()) {
         return Err(Refusal::Described);
     }
-    let layer_kinds: Vec<crate::plugin_canvas::PluginKind> = raw
-        .layer_kinds
-        .into_iter()
-        .map(|k| crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label })
-        .collect();
+    // each with the badge its thumbnails show it by, if it draws one that holds up
+    let mut layer_kinds: Vec<crate::plugin_canvas::PluginKind> = Vec::new();
+    for k in raw.layer_kinds {
+        let badge = match k.badge {
+            Some(raw) => Some(badge_of(raw).ok_or(Refusal::Described)?),
+            None => None,
+        };
+        layer_kinds.push(crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label, badge });
+    }
     if !layer_kinds.is_empty() {
         hooks.push(Hook::Layers);
     }
@@ -1781,8 +1828,11 @@ pub(crate) mod tests {
     fn a_plugin_lists_the_kinds_of_artwork_it_makes() {
         let dots = json!([{ "key": "dots", "label": "Dots" }]);
         let package = read_package(&dots_file("org.example.dots", dots)).unwrap();
-        let kind =
-            crate::plugin_canvas::PluginKind { key: "org.example.dots.dots".to_owned(), label: "Dots".to_owned() };
+        let kind = crate::plugin_canvas::PluginKind {
+            key: "org.example.dots.dots".to_owned(),
+            label: "Dots".to_owned(),
+            badge: None,
+        };
         assert_eq!(package.manifest.kinds, [kind]);
         // each key once, words to show, not too many
         let twice = json!([{ "key": "a", "label": "A" }, { "key": "a", "label": "B" }]);
@@ -1803,7 +1853,14 @@ pub(crate) mod tests {
         let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-layers").unwrap();
         let package = read_package(file).unwrap();
         let id = "io.github.artcraftandroid.vector-layers";
-        let kind = crate::plugin_canvas::PluginKind { key: format!("{id}.vector"), label: "Vector layer".to_owned() };
+        // its badge a curve between two nodes
+        let curve = crate::BadgeLine { points: vec![0.22, 0.72, 0.38, 0.05, 0.62, 0.95, 0.78, 0.28], curved: true };
+        let badge = crate::PluginBadge { lines: vec![curve], dots: vec![0.22, 0.72, 0.78, 0.28] };
+        let kind = crate::plugin_canvas::PluginKind {
+            key: format!("{id}.vector"),
+            label: "Vector layer".to_owned(),
+            badge: Some(badge),
+        };
         assert_eq!(package.manifest.layer_kinds, [kind]);
         assert_eq!(package.manifest.hooks, [Hook::Layers], "on the layers hook, not named");
         let module = package.file(MODULE).unwrap().to_vec();
@@ -1816,6 +1873,16 @@ pub(crate) mod tests {
         assert_eq!(of("/layer_kinds", json!([{ "key": "a", "label": " " }])), Refusal::Described);
         let many: Vec<Value> = (0..5).map(|i| json!({ "key": format!("k{i}"), "label": "K" })).collect();
         assert_eq!(of("/layer_kinds", json!(many)), Refusal::Described);
+        // a badge of whole points in its box, curves of a start and three each, or none at all
+        let badged = |badge: Value| json!([{ "key": "a", "label": "A", "badge": badge }]);
+        assert_eq!(of("/layer_kinds", badged(json!({ "lines": [{ "points": [0, 0, 2, 1] }] }))), Refusal::Described);
+        let bent = json!({ "lines": [{ "points": [0, 0, 1, 1, 0, 1], "curved": true }] });
+        assert_eq!(of("/layer_kinds", badged(bent)), Refusal::Described);
+        assert_eq!(of("/layer_kinds", badged(json!({ "dots": [0.5] }))), Refusal::Described);
+        assert_eq!(of("/layer_kinds", badged(json!({}))), Refusal::Described);
+        let plain = json!([{ "key": "a", "label": "A" }]);
+        let unbadged = read_package(&a_coded_file(&with(manifest.clone(), "/layer_kinds", plain), &module)).unwrap();
+        assert_eq!(unbadged.manifest.layer_kinds[0].badge, None);
         // the layers hook can't be named, and code without its calls can't say it adds any
         assert_eq!(of("/hooks", json!(["layers"])), Refusal::Newer);
         let other = a_module();
