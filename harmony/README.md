@@ -91,10 +91,14 @@ OHOS_NDK_HOME=/some/empty/folder cargo clippy --target aarch64-unknown-linux-oho
 
 ## Packaging and releases
 
-How a HarmonyOS release is packaged and signed, and a draft GitHub Actions job, are in
-`release-harmony.yml.draft`. That file is not under `.github/`, so it never runs. In short:
-- **Builds:** `hvigorw assembleHap` builds a `.hap` per module (installed with `hdc install`), and
-  `hvigorw assembleApp` builds the `.app` that AppGallery Connect takes.
-- **Signing:** a keystore (`.p12`), a certificate (`.cer`) and a profile (`.p7b`). Debug-signed
-  builds install only on devices registered in the profile; release-signed ones go through
-  AppGallery.
+The release workflow builds the HarmonyOS app (job `harmony` in `.github/workflows/release.yml`)
+once the repository variable `RELEASE_HARMONY` is true. Like the Mac job, it is signed in CI from
+secrets and left out of a release when it fails. `SIGNING.md` has the steps (Huawei ID,
+certificates and profiles from AppGallery Connect, the secrets) and what a signed `.hap` can and
+can't do. In short:
+- **Builds:** `hvigorw assembleHap` builds a `.hap` per module (installed with `hdc install`),
+  and `hvigorw assembleApp` builds the `.app` that AppGallery Connect takes.
+- **Signing:** a keystore (`.p12`), plus a certificate (`.cer`) and profile (`.p7b`) that Huawei
+  issues.
+- **Installing:** a debug-signed `.hap` installs only on the devices registered in its profile; a
+  release-signed one only through AppGallery.
