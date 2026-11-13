@@ -186,9 +186,7 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
     if (lu.stroke_mode != 0u) {
         let px = stroke_pixel(p);
         let s = px.s;
-        // where the stroke left nothing (no paint, no burnt edge) the layer is as it was: and
-        // Samsung's Xclipse compiler, given the blend below for those pixels, made them opaque
-        // black while a stroke was drawn (the boxes of #153)
+        // where the stroke left nothing (no paint, no burnt edge) the layer is as it was
         if (s.a <= 0.0 && px.burn <= 0.0) {
             return c0;
         }
@@ -288,16 +286,19 @@ fn unsquared(c: vec4<f32>) -> vec4<f32> {
 
 // the stroke `s` into the layer `b`: blended by its mode, and with luminance blending mixed in
 // by its coverage in squared colour (the colour it lays down where it covers fully, mixed with
-// the layer's)
+// the layer's). One way out, at the end: Samsung's Xclipse compiler, given a return part way
+// with more after it, drew every pixel of an open stroke's layer wrong (black, or partly covered
+// pixels solid: #153), whichever way the pixel went.
 fn stroke_into(b: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
     let mode = lu.stroke_blend & 255u;
-    if ((lu.stroke_blend & STROKE_LUMINANCE) == 0u || mode == 26u || mode == 29u || s.a <= 0.0) {
-        return blend(b, s, mode);
+    var into = blend(b, s, mode);
+    if ((lu.stroke_blend & STROKE_LUMINANCE) != 0u && mode != 26u && mode != 29u && s.a > 0.0) {
+        let cb = unpremultiply(b);
+        let cs = unpremultiply(s);
+        let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
+        let full = vec4<f32>((1.0 - b.a) * cs + b.a * mixed, 1.0);
+        into = unsquared(mix(squared(b), squared(full), s.a));
     }
-    let cb = unpremultiply(b);
-    let cs = unpremultiply(s);
-    let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
-    let full = vec4<f32>((1.0 - b.a) * cs + b.a * mixed, 1.0);
-    return unsquared(mix(squared(b), squared(full), s.a));
+    return into;
 }
 
