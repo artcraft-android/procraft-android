@@ -4,6 +4,11 @@ The release workflow's `harmony` job (`.github/workflows/release.yml`) builds th
 and, as the Mac job does, signs it in CI from GitHub secrets. It is skipped until set up. This is
 what sets it up and what a signed `.hap` can and can't do.
 
+While the app is being made it lives on the `harmony` branch, and nothing is released. Its own
+workflow (`.github/workflows/harmony.yml`) checks the Rust on each push there and, with steps 1, 2
+and 4's tools set, builds the unsigned `.hap` as the run's artifact. The release job takes part
+once the branch is merged and `RELEASE_HARMONY` is true.
+
 **Signing is optional.** With only the command-line tools set up (steps 1, 2 and 4: a free Huawei
 ID, no certificates), the job releases `procraft-<version>-harmonyos-arm64-unsigned.hap`. That
 installs once someone signs it with their own Huawei account (harmony/README.md, "Install the

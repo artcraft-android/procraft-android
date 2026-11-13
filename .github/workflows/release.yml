@@ -325,22 +325,7 @@ jobs:
         env:
           HARMONY_TOOLS_URL: ${{ secrets.HARMONY_TOOLS_URL }}
           HARMONY_TOOLS_SHA256: ${{ vars.HARMONY_TOOLS_SHA256 }}
-        run: |
-          if [ -z "$HARMONY_TOOLS_URL" ] || [ -z "$HARMONY_TOOLS_SHA256" ]; then
-            echo "::error::HARMONY_TOOLS_URL (secret) and HARMONY_TOOLS_SHA256 (variable) aren't set: see harmony/SIGNING.md"
-            exit 1
-          fi
-          curl -fsSL "$HARMONY_TOOLS_URL" -o "$RUNNER_TEMP/tools.zip"
-          echo "$HARMONY_TOOLS_SHA256  $RUNNER_TEMP/tools.zip" | sha256sum -c
-          unzip -q "$RUNNER_TEMP/tools.zip" -d "$RUNNER_TEMP/hos"
-          rm "$RUNNER_TEMP/tools.zip"
-          tools="$(dirname "$(find "$RUNNER_TEMP/hos" -maxdepth 3 -type f -name hvigorw | head -n 1)")/.."
-          tools="$(cd "$tools" && pwd)"
-          echo "$tools/bin" >>"$GITHUB_PATH"
-          echo "$tools/tool/node/bin" >>"$GITHUB_PATH"
-          echo "DEVECO_SDK_HOME=$tools/sdk" >>"$GITHUB_ENV"
-          echo "OHOS_NDK_HOME=$tools/sdk/default/openharmony" >>"$GITHUB_ENV"
-          echo "HAP_SIGN_TOOL=$tools/sdk/default/openharmony/toolchains/lib/hap-sign-tool.jar" >>"$GITHUB_ENV"
+        run: bash harmony/ci-tools.sh
 
       - name: The native library and the icons
         run: bash harmony/build-rust.sh arm64

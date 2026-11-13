@@ -9,9 +9,11 @@ native side drives the app the way winit does on the desktop. An ArkUI interface
 the core's `CanvasSession`, comes later; `bridge/src/canvas.rs` and `app/.../canvas/CanvasView.ets`
 are its start.
 
-**Status:** the Rust type-checks and passes clippy for `aarch64-unknown-linux-ohos` (CI checks
-it too). Nothing has been linked, packaged or run yet, and the ArkTS has not been compiled: that
-needs DevEco Studio.
+**Status:** the Rust type-checks and passes clippy for `aarch64-unknown-linux-ohos`. The app is
+made on the `harmony` branch: each push there checks it again and, once Huawei's tools are set up
+for CI (SIGNING.md), builds the unsigned `.hap` as the run's artifact
+(`.github/workflows/harmony.yml`). Nothing has been linked, packaged or run yet, and the ArkTS has
+not been compiled: that needs DevEco Studio.
 
 ## What is here
 

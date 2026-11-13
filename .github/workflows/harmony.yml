@@ -1,0 +1,104 @@
+# The HarmonyOS app while it is being made: each push to the `harmony` branch checks its Rust with
+# clippy and, once HARMONY_TOOLS_URL (secret) and HARMONY_TOOLS_SHA256 (variable) are set
+# (harmony/SIGNING.md), builds its unsigned .hap, kept as the run's artifact. Nothing is released.
+# Public repository only.
+name: HarmonyOS
+
+on:
+  push:
+    branches: [harmony]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harmony-${{ github.ref }}
+  # a newer push's build replaces one still running
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_VERSION: "1.99.0"
+
+jobs:
+  hap:
+    name: HarmonyOS (unsigned .hap)
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-unknown-linux-ohos
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: harmony
+
+      # without Huawei's tools: the bridge's build script only adds the SDK's link paths
+      - name: Clippy
+        run: |
+          mkdir -p "$RUNNER_TEMP/no-ohos-sdk"
+          OHOS_NDK_HOME="$RUNNER_TEMP/no-ohos-sdk" cargo clippy --target aarch64-unknown-linux-ohos \
+            -p procraft-engine -p procraft-gpu -p procraft-core -p procraft-desktop -p procraft-harmony \
+            --all-targets -- -D warnings
+
+      - id: tools
+        name: Are Huawei's tools set?
+        env:
+          HARMONY_TOOLS_URL: ${{ secrets.HARMONY_TOOLS_URL }}
+          HARMONY_TOOLS_SHA256: ${{ vars.HARMONY_TOOLS_SHA256 }}
+        run: |
+          if [ -n "$HARMONY_TOOLS_URL" ] && [ -n "$HARMONY_TOOLS_SHA256" ]; then
+            echo "set=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::notice::No .hap: HARMONY_TOOLS_URL (secret) and HARMONY_TOOLS_SHA256 (variable) aren't set (harmony/SIGNING.md)"
+          fi
+
+      # hvigor's tools run on Java (21 for the 26.0 tools and later); its texture compression needs
+      # libGL
+      - uses: actions/setup-java@v4
+        if: steps.tools.outputs.set == 'true'
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Runner dependencies
+        if: steps.tools.outputs.set == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 unzip
+
+      - name: Huawei's command-line tools
+        if: steps.tools.outputs.set == 'true'
+        env:
+          HARMONY_TOOLS_URL: ${{ secrets.HARMONY_TOOLS_URL }}
+          HARMONY_TOOLS_SHA256: ${{ vars.HARMONY_TOOLS_SHA256 }}
+        run: bash harmony/ci-tools.sh
+
+      - name: The native library and the icons
+        if: steps.tools.outputs.set == 'true'
+        run: bash harmony/build-rust.sh arm64
+
+      - name: The .hap, unsigned
+        if: steps.tools.outputs.set == 'true'
+        working-directory: harmony/app
+        run: |
+          ohpm install
+          hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=release --no-daemon
+          unsigned="$(find entry/build -name '*-unsigned.hap' | head -n 1)"
+          test -n "$unsigned"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$unsigned" "$GITHUB_WORKSPACE/dist/procraft-harmony-${GITHUB_SHA::8}-arm64-unsigned.hap"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.tools.outputs.set == 'true'
+        with:
+          name: harmonyos-work-in-progress
+          path: dist/*
+          if-no-files-found: error
