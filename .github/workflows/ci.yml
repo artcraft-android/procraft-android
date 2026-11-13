@@ -29,7 +29,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          targets: aarch64-apple-darwin, aarch64-apple-ios
+          targets: aarch64-apple-darwin, aarch64-apple-ios, aarch64-unknown-linux-ohos
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
@@ -40,6 +40,14 @@ jobs:
         run: |
           cargo clippy --target aarch64-apple-darwin -p procraft-desktop -- -D warnings
           cargo clippy --target aarch64-apple-ios -p procraft-core --lib -- -D warnings
+      # the HarmonyOS app (the desktop app in the canvas component, harmony/bridge), checked without
+      # linking: no Huawei tools needed (the bridge's build script only adds the SDK's link paths)
+      - name: Clippy for HarmonyOS
+        run: |
+          mkdir -p "$RUNNER_TEMP/no-ohos-sdk"
+          OHOS_NDK_HOME="$RUNNER_TEMP/no-ohos-sdk" cargo clippy --target aarch64-unknown-linux-ohos \
+            -p procraft-engine -p procraft-gpu -p procraft-core -p procraft-desktop -p procraft-harmony \
+            --all-targets -- -D warnings
       # the GPU tests skip themselves: the runner has no GPU
       - run: cargo test --workspace
 
