@@ -200,6 +200,10 @@ pub struct Library {
     card_rects: Vec<(usize, Rect)>,
     /// The cards' brush strokes, drawn small, by library, set and place (none: it can't be).
     card_previews: HashMap<(u32, u32, u32), Option<TextureHandle>>,
+    /// The cards' strokes still to draw, and those being drawn on a thread of their own (another
+    /// library's brushes are read from its file, which can be large).
+    card_wanted: Vec<(u32, u32, u32)>,
+    card_drawing: Option<std::sync::mpsc::Receiver<libraries::CardStroke>>,
     press: Option<Press>,
     set_press: Option<SetPress>,
     /// How far each brush is slid (points, left negative), and the brush slid open.
@@ -320,7 +324,7 @@ impl Library {
     /// The library changed: its sample strokes are drawn again (they go by place), and it is kept.
     pub fn library_changed(&mut self) {
         self.stale = true;
-        self.card_previews.clear();
+        self.forget_cards();
         self.slid.clear();
         self.swiped = None;
         self.picked.clear();

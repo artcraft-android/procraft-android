@@ -1,6 +1,8 @@
 //! The brush libraries in the library panel: the title's menu, every library's card and its
 //! menu, and a library with no sets yet.
 
+use std::sync::Arc;
+
 use egui::{Align2, Color32, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{BrushLibraryInfo, CanvasSession};
 
@@ -16,20 +18,80 @@ const CARD_GAP: f32 = 8.0;
 const CARD_CORNER: u8 = 16;
 const CARD_SET_ROW: f32 = 19.0;
 const CARD_SET_GAP: f32 = 3.0;
-/// A brush's row on a card, and how many cards' strokes are drawn a frame.
+/// A brush's row on a card, and how many cards' strokes a thread draws before the next takes over.
 const CARD_BRUSH: f32 = 30.0;
-const CARD_PREVIEWS_A_FRAME: usize = 4;
+const CARD_PREVIEWS_AT_A_TIME: usize = 12;
+/// How often the panel looks for strokes drawn meanwhile.
+const CARD_LOOK: std::time::Duration = std::time::Duration::from_millis(50);
 /// A set's row on a card, not the one shown.
 const CARD_SET_FILL: Themed = Themed(0x59000000, 0x14000000);
 
+/// A card's stroke drawn on a thread: its library, set and place, and its picture (none: it can't
+/// be drawn).
+pub(super) type CardStroke = ((u32, u32, u32), Option<egui::ColorImage>);
+
 impl Library {
+    /// The cards' strokes forgotten, and any being drawn left to finish unread: the libraries
+    /// changed.
+    pub(super) fn forget_cards(&mut self) {
+        self.card_previews.clear();
+        self.card_wanted.clear();
+        self.card_drawing = None;
+    }
+
+    /// Takes the cards' strokes drawn so far, and has those wanted drawn on a thread of their own.
+    fn draw_card_previews(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>) {
+        if let Some(drawing) = &self.card_drawing {
+            loop {
+                match drawing.try_recv() {
+                    Ok((key, image)) => {
+                        let texture = image.map(|image| {
+                            ctx.load_texture(format!("card brush {key:?}"), image, egui::TextureOptions::LINEAR)
+                        });
+                        self.card_previews.insert(key, texture);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.card_drawing = None;
+                        break;
+                    }
+                }
+            }
+        }
+        let previews = &self.card_previews;
+        self.card_wanted.retain(|key| !previews.contains_key(key));
+        if self.card_drawing.is_none() && !self.card_wanted.is_empty() {
+            let (done, drawing) = std::sync::mpsc::channel();
+            let batch: Vec<_> = self.card_wanted.drain(..self.card_wanted.len().min(CARD_PREVIEWS_AT_A_TIME)).collect();
+            let session = Arc::clone(session);
+            let started = std::thread::Builder::new().name("library cards".into()).spawn(move || {
+                for key in batch {
+                    let image = session.brush_library_preview(key.0, key.1, key.2, 212, 65).map(|t| {
+                        egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba)
+                    });
+                    // (the libraries changed meanwhile: these are no longer wanted)
+                    if done.send((key, image)).is_err() {
+                        return;
+                    }
+                }
+            });
+            match started {
+                Ok(_) => self.card_drawing = Some(drawing),
+                Err(e) => log::warn!("the library cards' strokes aren't drawn: {e}"),
+            }
+        }
+        if self.card_drawing.is_some() {
+            ctx.request_repaint_after(CARD_LOOK);
+        }
+    }
+
     /// The panel's lists' place (`lists`) showing every library's card, or, with the one in use
     /// empty, that it has no brushes yet.
     pub(super) fn libraries_body(
         &mut self,
         ui: &mut Ui,
         look: &mut Look,
-        session: &CanvasSession,
+        session: &Arc<CanvasSession>,
         libraries: &[BrushLibraryInfo],
         lists: Rect,
         shown: usize,
@@ -57,7 +119,6 @@ impl Library {
             return;
         }
         let mut cards = Vec::new();
-        let mut made = 0;
         let mut opened = None;
         let mut menu_for = None;
         ui.scope_builder(UiBuilder::new().max_rect(lists), |ui| {
@@ -80,7 +141,7 @@ impl Library {
                         );
                         cards.push((i, card));
                         let response = ui.interact(card, ui.scope_id().with(("library card", i)), Sense::click());
-                        self.library_card(ui, look, session, i, library, card, shown, &mut made);
+                        self.library_card(ui, look, session, i, library, card, shown);
                         if response.secondary_clicked() || response.long_touched() {
                             menu_for = Some(i);
                         } else if response.clicked() {
@@ -90,6 +151,7 @@ impl Library {
                 });
         });
         self.card_rects = cards;
+        self.draw_card_previews(ui.ctx(), session);
         if let Some(i) = menu_for {
             self.card_menu_for = Some(i);
             self.card_menu.open();
@@ -124,7 +186,6 @@ impl Library {
         library: &BrushLibraryInfo,
         card: Rect,
         shown: usize,
-        made: &mut usize,
     ) {
         let painter = ui.painter_at(card);
         painter.rect_filled(card, CARD_CORNER, argb(SET_CELL));
@@ -165,17 +226,8 @@ impl Library {
             // its name over its stroke, drawn small
             let row = Rect::from_min_size(pos2(left, y), vec2(width, CARD_BRUSH));
             let key = (i as u32, b.set, b.index);
-            if let std::collections::hash_map::Entry::Vacant(slot) = self.card_previews.entry(key) {
-                if *made < CARD_PREVIEWS_A_FRAME {
-                    *made += 1;
-                    slot.insert(session.brush_library_preview(key.0, key.1, key.2, 212, 65).map(|t| {
-                        let image =
-                            egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
-                        ui.ctx().load_texture(format!("card brush {key:?}"), image, egui::TextureOptions::LINEAR)
-                    }));
-                } else {
-                    ui.ctx().request_repaint();
-                }
+            if !self.card_previews.contains_key(&key) && !self.card_wanted.contains(&key) {
+                self.card_wanted.push(key);
             }
             if let Some(Some(stroke)) = self.card_previews.get(&key) {
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -263,7 +315,7 @@ impl Library {
             }
             "Back to libraries" => self.showing_libraries = true,
             _ => {
-                self.card_previews.clear();
+                self.forget_cards();
                 if session.restore_stock_brush_library().is_none() {
                     log::error!("the shipped brush library couldn't be put back");
                 }
@@ -300,7 +352,7 @@ impl Library {
         );
         let Some(tapped) = tapped else { return };
         self.libraries_plus.close();
-        self.card_previews.clear();
+        self.forget_cards();
         if tapped == 0 {
             if session.new_brush_library().is_none() {
                 log::error!("a new brush library couldn't be made");
@@ -345,7 +397,7 @@ impl Library {
                 self.renaming_library = Some((i, name, false));
             }
             "Duplicate" => {
-                self.card_previews.clear();
+                self.forget_cards();
                 if session.duplicate_brush_library(i as u32).is_none() {
                     log::error!("brush library {i} couldn't be copied");
                 }
