@@ -799,13 +799,15 @@ While the plugin is on, the Layers panel's + offers each kind beside a plain lay
 `label`. A plugin can list up to four kinds. The import screen says the plugin can add kinds of layer.
 
 `badge` is optional. It is what the kind's layers show in the corner of their thumbnails, drawn in
-white over a small dark box. Its numbers are places in that box, 0 to 1 across and down:
+white over a small dark box, and what the + shows beside the kind's name, drawn larger in the menu's
+colour. Its numbers are places in that box, 0 to 1 across and down:
 
 - `lines`: up to eight, each up to 32 points, x then y. A line goes straight from point to point, or
   with `"curved": true` it is cubic curves: a start, then two handles and an end for each curve.
 - `dots`: up to eight small squares, x then y.
 
-Without a badge, or while the plugin is off or gone, the layer shows a plug.
+Without a badge, the + and the kind's layers show a plug, as do its layers while the plugin is off or
+gone.
 
 `exports` is optional too: up to four files the plugin makes of an artwork's layers of the kind. While
 the plugin is on and the artwork has a layer of the kind, Share Image lists each under its `label`,

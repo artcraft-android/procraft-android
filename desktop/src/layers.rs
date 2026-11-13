@@ -681,9 +681,7 @@ impl Layers {
         if self.layer_kinds.is_empty() {
             self.add_menu.close();
         }
-        let ink = menu::INK;
-        let mut entries = vec![Entry::Item(&icons::MENU_NEW_SET, "Layer", ink)];
-        entries.extend(self.layer_kinds.iter().map(|k| Entry::Item(&icons::MENU_NEW_BRUSH, k.label.as_str(), ink)));
+        let entries = add_entries(&self.layer_kinds);
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let screen = ctx.content_rect();
         let left = (plus.right() - size.x).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
@@ -1752,13 +1750,34 @@ impl Layers {
     }
 }
 
-/// A plugin's layer's badge (its lines and dots in white over a dark rounded box) in the bottom
-/// right corner of its thumbnail's `rect`.
+/// The +'s menu's rows: a plain layer, then each kind of layer, named as its plugin names it, beside
+/// its badge (or a plug, when it draws none).
+fn add_entries(kinds: &[procraft_core::PluginKind]) -> Vec<Entry<'_>> {
+    let mut entries = vec![Entry::Item(&icons::MENU_NEW_LAYER, "Layer", menu::INK)];
+    let badged = |k: &procraft_core::PluginKind| procraft_core::plugin_kind_badge(k.clone());
+    entries.extend(kinds.iter().map(|k| Entry::Badge(badged(k), k.label.as_str(), menu::INK)));
+    entries
+}
+
+/// A plugin's layer's badge (its drawing in white over a dark rounded box) in the bottom right
+/// corner of its thumbnail's `rect`.
 fn plugin_badge(painter: &egui::Painter, rect: Rect, badge: &procraft_core::PluginBadge) {
     let area = Rect::from_min_size(rect.right_bottom() - vec2(3.0 + 18.0, 3.0 + 14.0), vec2(18.0, 14.0));
     painter.rect_filled(area, 4u8, Color32::from_black_alpha(0x99));
+    badge_drawing(painter, area, badge, Color32::WHITE, 1.5);
+}
+
+/// A plugin's badge's lines and dots in `ink` over `area` (its box, 0 to 1 across and down): its
+/// lines `width` thick, its dots squares twice that across.
+pub fn badge_drawing(
+    painter: &egui::Painter,
+    area: Rect,
+    badge: &procraft_core::PluginBadge,
+    ink: Color32,
+    width: f32,
+) {
     let at = |x: f32, y: f32| pos2(area.left() + area.width() * x, area.top() + area.height() * y);
-    let ink = egui::Stroke::new(1.5, Color32::WHITE);
+    let stroke = egui::Stroke::new(width, ink);
     for line in &badge.lines {
         let points: Vec<Pos2> = line.points.as_chunks::<2>().0.iter().map(|&[x, y]| at(x, y)).collect();
         if points.len() < 2 {
@@ -1767,16 +1786,20 @@ fn plugin_badge(painter: &egui::Painter, rect: Rect, badge: &procraft_core::Plug
         if line.curved {
             for piece in points.windows(4).step_by(3) {
                 let &[a, b, c, d] = piece else { continue };
-                let curve =
-                    egui::epaint::CubicBezierShape::from_points_stroke([a, b, c, d], false, Color32::TRANSPARENT, ink);
+                let curve = egui::epaint::CubicBezierShape::from_points_stroke(
+                    [a, b, c, d],
+                    false,
+                    Color32::TRANSPARENT,
+                    stroke,
+                );
                 painter.add(curve);
             }
         } else {
-            painter.add(egui::Shape::line(points, ink));
+            painter.add(egui::Shape::line(points, stroke));
         }
     }
     for &[x, y] in badge.dots.as_chunks::<2>().0 {
-        painter.rect_filled(Rect::from_center_size(at(x, y), vec2(3.0, 3.0)), 0u8, Color32::WHITE);
+        painter.rect_filled(Rect::from_center_size(at(x, y), vec2(width * 2.0, width * 2.0)), 0u8, ink);
     }
 }
 
@@ -2138,6 +2161,60 @@ mod tests {
     fn a_finger_dragged_up_a_row_scrolls_the_list() {
         let moved = finger_drag_up_a_row();
         assert!(moved > 120.0, "the row moved {moved} points up");
+    }
+
+    #[test]
+    fn the_plus_menu_offers_a_new_layer_then_each_kind_of_layer_beside_its_badge() {
+        let curve = procraft_core::BadgeLine { points: vec![0.2, 0.7, 0.4, 0.1, 0.6, 0.9, 0.8, 0.3], curved: true };
+        let badge = procraft_core::PluginBadge { lines: vec![curve], dots: vec![0.2, 0.7, 0.8, 0.3] };
+        let kind = |key: &str, label: &str, badge| procraft_core::PluginKind {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            badge,
+            exports: Vec::new(),
+        };
+        let kinds = [
+            kind("org.example.curves.curve", "Curves", Some(badge.clone())),
+            kind("org.example.plain.plain", "Plain", None),
+        ];
+        let entries = add_entries(&kinds);
+        assert_eq!(entries.len(), 3);
+        let first = matches!(&entries[0], Entry::Item(icon, "Layer", _) if icon.name == "menunewlayer");
+        assert!(first, "a plain layer first, beside the new layer glyph");
+        assert!(matches!(&entries[1], Entry::Badge(b, "Curves", _) if *b == badge), "a kind beside its badge");
+        let plug = procraft_core::PluginBadge::plug();
+        assert!(matches!(&entries[2], Entry::Badge(b, "Plain", _) if *b == plug), "a plug when a kind draws none");
+        // drawn, a click on the last row picks it
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries)));
+        let at = pos2(rect.center().x, rect.top() + menu::entry_top(&entries, 2) + menu::ITEM_HEIGHT / 2.0);
+        let press = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let mut tapped = None;
+        for step in 0..6 {
+            let events = match step {
+                2 => vec![Event::PointerMoved(at)],
+                3 => vec![press(true)],
+                4 => vec![press(false)],
+                _ => Vec::new(),
+            };
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
+                time: Some(f64::from(step) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                tapped = tapped.or(menu::entries(ui, &mut look, rect, &entries));
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(tapped, Some(2), "the plain kind's row");
     }
 
     #[test]

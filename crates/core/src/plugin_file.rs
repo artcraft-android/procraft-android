@@ -1955,6 +1955,10 @@ pub(crate) mod tests {
         let plain = json!([{ "key": "a", "label": "A" }]);
         let unbadged = read_package(&a_coded_file(&with(manifest.clone(), "/layer_kinds", plain), &module)).unwrap();
         assert_eq!(unbadged.manifest.layer_kinds[0].badge, None);
+        // the Layers panel's + shows a kind's badge beside it, or a plug when it draws none
+        let listed = package.manifest.layer_kinds[0].clone();
+        assert_eq!(crate::plugin_kind_badge(listed.clone()), listed.badge.unwrap());
+        assert_eq!(crate::plugin_kind_badge(unbadged.manifest.layer_kinds[0].clone()), crate::PluginBadge::plug());
         // exports with a key, words, a short plain extension and a media type
         let exported = |e: Value| json!([{ "key": "a", "label": "A", "exports": [e] }]);
         let good = json!({ "key": "svg", "label": "SVG", "extension": "svg", "mime": "image/svg+xml" });

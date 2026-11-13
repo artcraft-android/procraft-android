@@ -813,10 +813,14 @@ internal fun LibraryMenu(
 /** A menu row: its icon (a 40 frame) centred 29.5 in, the label from 52, a chevron 27.5 from the right. */
 @Composable
 internal fun MenuItem(icon: ImageVector, label: String, ink: Color = Pc.MenuInk, trailing: ImageVector? = null, iconSize: Dp = 40.dp, onClick: () -> Unit) {
+    MenuItem(label, ink, trailing, onClick) { Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.requiredSize(iconSize)) }
+}
+
+/** A menu row whose glyph [content] draws, centred where an icon's 40 frame sits. */
+@Composable
+internal fun MenuItem(label: String, ink: Color, trailing: ImageVector?, onClick: () -> Unit, content: @Composable () -> Unit) {
     Row(Modifier.fillMaxWidth().height(40.dp).clickable(onClick = onClick), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.padding(start = 9.5.dp).size(40.dp), contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.requiredSize(iconSize))
-        }
+        Box(Modifier.padding(start = 9.5.dp).size(40.dp), contentAlignment = Alignment.Center) { content() }
         // the menus' 17 pt system text is as wide as 18 here
         Text(label, color = ink, fontSize = 18.sp, maxLines = 1, modifier = Modifier.padding(start = 2.5.dp).weight(1f))
         if (trailing != null) Icon(trailing, contentDescription = null, tint = ink, modifier = Modifier.padding(end = 7.5.dp).requiredSize(40.dp))

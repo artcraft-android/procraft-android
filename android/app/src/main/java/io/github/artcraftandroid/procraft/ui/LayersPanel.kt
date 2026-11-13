@@ -521,18 +521,28 @@ private fun NewLayerMenu(open: Boolean, kinds: List<io.github.artcraftandroid.pr
         onDismiss,
         overPanel = true,
     ) {
-        MenuItem(PcIcons.MenuNewSet, "Layer") {
+        MenuItem(PcIcons.MenuNewLayer, "Layer") {
             onDismiss()
             vm.addLayer()
         }
         for (kind in kinds) {
-            MenuItem(PcIcons.MenuNewBrush, kind.label) {
+            // beside its badge, as its layers' thumbnails show it (a plug when it draws none)
+            val badge = remember(kind) { io.github.artcraftandroid.procraft.core.pluginKindBadge(kind) }
+            val ink = Pc.MenuInk
+            MenuItem(kind.label, ink, null, onClick = {
                 onDismiss()
                 vm.addPluginLayer(kind.key)
+            }) {
+                androidx.compose.foundation.Canvas(Modifier.size(MenuBadgeWidth, MenuBadgeHeight)) { badgeDrawing(badge, ink, MenuBadgeLine.toPx()) }
             }
         }
     }
 }
+
+/** A kind's badge as a menu row's glyph: its box 1.6 times a thumbnail's (18 by 14), its lines as thick as the menu glyphs'. */
+private val MenuBadgeWidth = 28.8.dp
+private val MenuBadgeHeight = 22.4.dp
+private val MenuBadgeLine = 2.4.dp
 
 /** Drops [l] where its row's middle came to rest: just above or below the row it is over. */
 /**
@@ -888,31 +898,8 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
         // a plugin's layer: its kind's badge in its corner, as its manifest draws it
         l.pluginBadge?.let { badge ->
             androidx.compose.foundation.Canvas(Modifier.align(Alignment.BottomEnd).padding(3.dp).size(18.dp, 14.dp)) {
-                val (w, h) = size.width to size.height
                 drawRoundRect(PluginBadgeBehind, cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()))
-                for (line in badge.lines) {
-                    val p = line.points
-                    if (p.size < 4) continue
-                    val path = Path().apply {
-                        moveTo(w * p[0], h * p[1])
-                        var i = 2
-                        while (i + 1 < p.size) {
-                            if (line.curved && i + 5 < p.size) {
-                                cubicTo(w * p[i], h * p[i + 1], w * p[i + 2], h * p[i + 3], w * p[i + 4], h * p[i + 5])
-                                i += 6
-                            } else {
-                                lineTo(w * p[i], h * p[i + 1])
-                                i += 2
-                            }
-                        }
-                    }
-                    drawPath(path, Color.White, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx()))
-                }
-                val node = 3.dp.toPx()
-                for (i in 0 until badge.dots.size / 2) {
-                    val (x, y) = w * badge.dots[2 * i] to h * badge.dots[2 * i + 1]
-                    drawRect(Color.White, Offset(x - node / 2, y - node / 2), Size(node, node))
-                }
+                badgeDrawing(badge, Color.White, 1.5.dp.toPx())
             }
         }
     }
@@ -920,6 +907,37 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
 
 /** The badge behind a plugin's layer's glyph on its thumbnail. */
 private val PluginBadgeBehind = Color(0x99000000)
+
+/**
+ * A plugin's [badge]'s lines and dots in [ink] over the whole of this scope (its box, 0 to 1 across and down): its lines
+ * [width] thick, its dots squares twice that across.
+ */
+private fun DrawScope.badgeDrawing(badge: io.github.artcraftandroid.procraft.core.PluginBadge, ink: Color, width: Float) {
+    val (w, h) = size.width to size.height
+    for (line in badge.lines) {
+        val p = line.points
+        if (p.size < 4) continue
+        val path = Path().apply {
+            moveTo(w * p[0], h * p[1])
+            var i = 2
+            while (i + 1 < p.size) {
+                if (line.curved && i + 5 < p.size) {
+                    cubicTo(w * p[i], h * p[i + 1], w * p[i + 2], h * p[i + 3], w * p[i + 4], h * p[i + 5])
+                    i += 6
+                } else {
+                    lineTo(w * p[i], h * p[i + 1])
+                    i += 2
+                }
+            }
+        }
+        drawPath(path, ink, style = androidx.compose.ui.graphics.drawscope.Stroke(width))
+    }
+    val node = width * 2
+    for (i in 0 until badge.dots.size / 2) {
+        val (x, y) = w * badge.dots[2 * i] to h * badge.dots[2 * i + 1]
+        drawRect(ink, Offset(x - node / 2, y - node / 2), Size(node, node))
+    }
+}
 
 /** The transparency checkerboard behind thumbnails. */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.checker() {

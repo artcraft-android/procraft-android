@@ -280,7 +280,7 @@ pub struct BadgeLine {
 
 impl PluginBadge {
     /// The badge of a layer whose kind draws none, or whose plugin is gone: a plug.
-    pub(crate) fn plug() -> PluginBadge {
+    pub fn plug() -> PluginBadge {
         let line = |points: &[f32]| BadgeLine { points: points.to_vec(), curved: false };
         PluginBadge {
             lines: vec![
@@ -291,6 +291,13 @@ impl PluginBadge {
             dots: Vec::new(),
         }
     }
+}
+
+/// What a kind of layer is known by beside its name in the Layers panel's +, as on its layers'
+/// thumbnails: the badge its manifest draws, or a plug.
+#[uniffi::export]
+pub fn plugin_kind_badge(kind: PluginKind) -> PluginBadge {
+    kind.badge.unwrap_or_else(PluginBadge::plug)
 }
 
 /// A plugin's artwork open: the copy of its code that keeps it, and its size.
