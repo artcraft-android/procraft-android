@@ -306,6 +306,20 @@ enum ScreenCapture {
         model.toolPressed(.paint)
     }
 
+    /// Every brush library's card, what `shows` opens open.
+    private static func libraries(_ model: CanvasModel, shows: String) {
+        model.showingLibraries = true
+        library(model, shows: shows)
+    }
+
+    /// The vector layers plugin on, and a layer of its kind over the current one.
+    private static func vectorLayer(_ model: CanvasModel) {
+        _ = apply("Vector layers")
+        if let kind = model.layerKinds().first {
+            model.addPluginLayer(kind.key)
+        }
+    }
+
     /// Opens what capture `name` shows, if it is one of these.
     private static func open(_ name: String, in model: CanvasModel) {
         if let page = pages[name] {
@@ -646,6 +660,24 @@ enum ScreenCapture {
             library(model, shows: "swipe")
         case "library-recent":
             library(model, shows: "recent")
+        case "library-title":
+            library(model, shows: "title")
+        case "libraries":
+            libraries(model, shows: "")
+        case "libraries-title":
+            libraries(model, shows: "libraries-title")
+        case "libraries-add":
+            libraries(model, shows: "libraries-add")
+        case "libraries-card-menu":
+            libraries(model, shows: "libraries-card-menu")
+        case "layers-add":
+            vectorLayer(model)
+            layersShows = "add"
+            model.toggle(.layers)
+        case "share-plugin":
+            vectorLayer(model)
+            model.actionsTab = 2
+            model.toggle(.actions)
         default:
             break
         }

@@ -164,7 +164,7 @@ jobs:
           studio="studio studio-taper studio-grain studio-stylus studio-materials studio-preview studio-about studio-roundness studio-tilt studio-landscape"
           over="keypad keypad-pressure keypad-tilt blend-list node-menu pad-menu"
           source="source source-shape source-import repeat source-library source-landscape"
-          library="library-add library-set-menu library-icons library-search library-swipe library-recent"
+          library="library-add library-set-menu library-icons library-search library-swipe library-recent library-title libraries libraries-title libraries-add libraries-card-menu"
           layers="layers-many layers-swipe layers-options layers-blend layers-menu layers-rename layers-picked"
           colours="colors-classic colors-harmony colors-harmony-menu colors-value colors-hex colors-palettes colors-add colors-palette-menu colors-background colors-floating colors-floating-harmony colors-floating-value colors-floating-palettes colors-cmyk"
           settings="prefs prefs-cursor prefs-pressure gestures gestures-hover gestures-general"
@@ -174,7 +174,7 @@ jobs:
           shelf="gallery-select gallery-swipe gallery-new gallery-formats gallery-rename gallery-custom gallery-custom-colour gallery-preview gallery-preview-controls gallery-pinch gallery-drag gallery-more gallery-about gallery-recovery gallery-press gallery-lift gallery-stack"
           lapse="timelapse-tab timelapse-replay timelapse-purge timelapse-length timelapse-check companion key-layers settings-check animation animation-settings animation-frame animation-colors page-assist export-gif export-mp4 export-check import-card projection-check"
           # the plugins stay on from one launch to the next: what they scale goes last
-          plugged="prefs-plugins plugin-offer adjust-plugins effect-plugin prefs-plugin-on"
+          plugged="prefs-plugins plugin-offer adjust-plugins effect-plugin prefs-plugin-on layers-add share-plugin"
           fitted="reference reference-bars reference-image interface-large interface-small gallery-sized interface-again"
           for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting $quick $tools $shelf $lapse $plugged $fitted; do
             SIMCTL_CHILD_CAPTURE_PLUGINS="$PWD/packed" xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
