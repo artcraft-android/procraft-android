@@ -138,6 +138,11 @@ pub(crate) mod field {
     /// points and them, x and y as 32-bit floats (canvas pixels, before its transform), filled
     /// even-odd in its colour at its opacity.
     pub(crate) const OUTLINE: u16 = 25;
+    /// The shape it was snapped to (QuickShape): laid exactly along its samples (nothing smooths
+    /// them), a dual brush's first alone; u8 its kind (line, polyline, arc, curve, ellipse, circle,
+    /// triangle, equilateral triangle, quadrilateral, rectangle, square), then its nodes, x and y as
+    /// 32-bit floats (canvas pixels, before its transform).
+    pub(crate) const SHAPE: u16 = 26;
     /// The first id of a plugin's own fields.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const OWN: u16 = 0x8000;
@@ -318,6 +323,8 @@ pub(crate) struct Item {
     pub(crate) clip: Option<Arc<Clip>>,
     /// The region it fills, if it is a fill (it then has no samples, and needs no brush).
     pub(crate) region: Option<Arc<Region>>,
+    /// The shape it was snapped to, if it was: its kind and nodes.
+    pub(crate) shape: Option<Arc<(u8, Vec<Vec2>)>>,
 }
 
 /// A region an item fills: its outlines (canvas pixels, before the item's transform), filled
@@ -491,6 +498,14 @@ impl Item {
         if let Some(region) = &self.region {
             r.field(field::OUTLINE, &region.bytes());
         }
+        if let Some(shape) = &self.shape {
+            let mut bytes = vec![shape.0];
+            for p in &shape.1 {
+                bytes.extend_from_slice(&p.x.to_le_bytes());
+                bytes.extend_from_slice(&p.y.to_le_bytes());
+            }
+            r.field(field::SHAPE, &bytes);
+        }
         let batches: Vec<u8> = self.batches.iter().flat_map(|b| b.to_le_bytes()).collect();
         r.field(field::BATCHES, &batches);
         r.field(field::STARTED, &self.started.to_le_bytes());
@@ -526,6 +541,7 @@ impl Item {
             smoothing: None,
             clip: None,
             region: None,
+            shape: None,
         };
         let mut brush = None;
         for (id, bytes) in fields(record) {
@@ -560,6 +576,13 @@ impl Item {
                 field::SMOOTHING => item.smoothing = floats::<1>(bytes).map(|[v]| v.clamp(0.0, 1.0)),
                 field::CLIP => item.clip = Clip::read(bytes).map(Arc::new),
                 field::OUTLINE => item.region = Region::read(bytes).map(Arc::new),
+                field::SHAPE => {
+                    item.shape = bytes.first().map(|kind| {
+                        let nodes = floats_of(bytes.get(1..).unwrap_or_default()).collect::<Vec<_>>();
+                        let nodes = nodes.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y));
+                        Arc::new((*kind, nodes.filter(|p| p.is_finite()).take(MOST_SAMPLES).collect()))
+                    });
+                }
                 field::SIZES => item.sizes = floats_of(bytes).take(4).filter(|v| v.is_finite() && *v >= 0.0).collect(),
                 field::BRUSH_NAME => item.brush_name = String::from_utf8_lossy(bytes).chars().take(256).collect(),
                 field::SEED => item.seed = u32_of(bytes).unwrap_or(0),
@@ -926,6 +949,20 @@ impl Recording {
         self.item.batches.push(u32::try_from(self.item.samples.len() - before).unwrap_or(0));
     }
 
+    /// It made a shape (QuickShape) of kind `kind` (as a plugin is told it) with `nodes`, drawn
+    /// along `samples`: kept as that, laid along them again exactly as the shape's stroke was drawn
+    /// (all at once, its seed, nothing smoothing them, a dual brush's first alone).
+    pub(crate) fn made_shape(&mut self, samples: &[Sample], kind: u8, nodes: &[Vec2]) {
+        let item = &mut self.item;
+        item.samples = samples.iter().filter(|s| s.is_finite()).copied().collect();
+        item.batches = vec![u32::try_from(item.samples.len()).unwrap_or(0) | LIFTED];
+        item.started = 0.0;
+        item.seed = crate::quickshape::SHAPE_SEED;
+        item.input = InputSettings::default();
+        (item.rotation, item.seen_at) = (0.0, 1.0);
+        item.shape = Some(Arc::new((kind, nodes.to_vec())));
+    }
+
     /// The last of its samples, `samples`, as the pen lifts.
     pub(crate) fn lift(&mut self, samples: &[Sample]) {
         self.add(samples);
@@ -1009,6 +1046,7 @@ impl State {
             // drawn within the selection: laid within it again
             clip: self.selection.as_ref().and_then(Clip::of).map(Arc::new),
             region: None,
+            shape: None,
         };
         let laid = self.laid_current(layer);
         let mut recording = Recording { layer, kind, item, started: None, laid };
@@ -1341,13 +1379,16 @@ impl State {
         let sliders = Sliders { size: item.size, opacity: item.opacity };
         let paint = crate::StrokePaint { colour: item.colour, secondary: item.secondary, alpha_lock: item.alpha_lock };
         let (brush, style, diameter) = self.stroke_brush_from(raw, sliders, item.tool, paint, false);
-        let second = self.second_brush_from(item.tool, &brush, &style, sliders, paint);
+        // a shape: along its samples exactly, its first alone
+        let exact = item.shape.is_some();
+        let second = self.second_brush_from(item.tool, &brush, &style, sliders, paint).filter(|_| !exact);
         let make = |brush: Brush, diameter: f32, seed: u32| {
-            StrokeBuilder::with_seed(brush, diameter, item.pointer.into(), seed)
+            let builder = StrokeBuilder::with_seed(brush, diameter, item.pointer.into(), seed)
                 .scaled(scale)
                 .with_input(item.input.clone())
                 .on_view_turned(item.rotation)
-                .seen_at(item.seen_at)
+                .seen_at(item.seen_at);
+            if exact { builder.exact_path() } else { builder }
         };
         let mut builder = make(brush, diameter * scale, item.seed);
         let mut second_builder = second.as_ref().map(|(b, _, d)| make(b.clone(), d * scale, item.seed ^ SECOND_SEED));
@@ -2030,6 +2071,7 @@ mod tests {
             smoothing: Some(0.25),
             clip: Some(Arc::new(Clip { x: 3, y: 4, width: 3, height: 2, coverage: vec![0, 0, 255, 255, 255, 9] })),
             region: None,
+            shape: Some(Arc::new((4, vec![Vec2::new(1.0, 2.0), Vec2::new(3.0, 4.0)]))),
         }
     }
 

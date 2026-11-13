@@ -12893,3 +12893,44 @@ fn a_colour_dropped_on_a_vector_layer_fills_inside_its_strokes_as_an_item_closin
     assert_eq!(colour_at(&layer_rgba(&s, vector), 90, 80), [0, 255, 0, 255]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_held_stroke_on_a_vector_layer_snaps_to_a_shape_kept_as_its_geometry_and_laid_again_exactly() {
+    let Some((s, _plugins, dir)) = vector_session(160, "shape") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.2);
+    // a wobbly line, held at its end: it snaps to a straight line
+    s.stroke_begin(PointerKind::Stylus, vec![sample(20.0, 80.0, 0.0)]);
+    s.stroke_add(
+        (1..30).map(|i| sample(20.0 + i as f32 * 4.0, 80.0 + (i % 4) as f32 * 1.5, f64::from(i) * 8.0)).collect(),
+    );
+    let info = s.quickshape_hold().expect("snapped");
+    assert_eq!(info.kind, crate::quickshape::QuickShapeKind::Line);
+    s.stroke_end(vec![sample(140.0, 80.0, 300.0)]);
+    s.quickshape_done();
+    let items = vector_items(&s, vector);
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    let (kind, nodes) = item.shape.as_deref().cloned().expect("its shape kept");
+    assert_eq!((kind, nodes.len()), (0, 2), "a line, from end to end");
+    // its samples along the line itself, not the wobble
+    let ys: Vec<f32> = item.samples.iter().map(|s| s.pos.y).collect();
+    let (lo, hi) = ys.iter().fold((f32::MAX, f32::MIN), |(lo, hi), y| (lo.min(*y), hi.max(*y)));
+    assert!(hi - lo < 1.5, "straight: {lo}..{hi}");
+    // laid again, exactly as it was drawn
+    let drawn = layer_rgba(&s, vector);
+    assert!(s.draw_plugin_layer_again(vector));
+    assert_eq!(most_apart(&layer_rgba(&s, vector), &drawn), 0, "laid again as drawn");
+    // one step, as a stroke
+    s.undo();
+    assert_eq!(s.undo().as_deref(), Some("Paint stroke"));
+    assert!(vector_items(&s, vector).is_empty());
+    s.redo();
+    assert_eq!(vector_items(&s, vector).len(), 1);
+    // moved as a stroke, still the line
+    assert!(s.transform_plugin_items(vec![1.0, 0.0, 0.0, 1.0, 0.0, 20.0]));
+    let moved = &vector_items(&s, vector)[0];
+    assert_eq!(moved.shape.as_deref().map(|s| s.0), Some(0));
+    assert_eq!(alpha_in(&layer_rgba(&s, vector), 160, 80, 100), 255);
+    let _ = std::fs::remove_dir_all(&dir);
+}

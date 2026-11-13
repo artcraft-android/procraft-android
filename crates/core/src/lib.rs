@@ -736,12 +736,18 @@ impl State {
             self.scene_stroke_add(&[], true);
             return;
         }
-        // one on a plugin's layer goes to the plugin as it ends
-        if let Some(recording) = self.recording.take()
+        // one on a plugin's layer goes to the plugin as it ends (made a shape, as that: its geometry
+        // kept, laid along its outline); undo takes it back whole, not to the stroke it was
+        if let Some(mut recording) = self.recording.take()
             && let Some(open) = self.stroke.take()
         {
+            if let Some(edit) = &shape {
+                let (kind, nodes) = edit.geometry();
+                recording.made_shape(&edit.samples(), kind, &nodes);
+            }
             let second = self.second.take();
             self.end_recorded(recording, open, second);
+            return;
         }
         if let (Some(open), Some(canvas)) = (self.stroke.take(), self.canvas.as_mut()) {
             close_stroke(canvas, open, self.second.take(), &self.doc.stroke_guide());

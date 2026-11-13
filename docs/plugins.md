@@ -826,7 +826,9 @@ Without a badge, or while the plugin is off or gone, the layer shows a plug.
   a plain layer, and so does merging another layer into it. Flipping or cropping the canvas does too
   when its plugin can't move its items.
 - A stroke drawn inside a selection is kept with that selection and is always laid again inside it.
-- QuickShape doesn't snap a stroke on it.
+- A stroke held still on it snaps with QuickShape as on any layer. It is kept as the shape: its
+  samples along the shape's outline, its kind and nodes in field 26, laid along them exactly again.
+  QuickShape on the last stroke, after it was kept, doesn't snap one on it.
 
 Its module exports:
 
@@ -908,6 +910,7 @@ all little-endian. A reader passes over ids it doesn't know, so a later app can 
 | 23 | The smoothing it is laid with in place of its brush's own, 32-bit float, 0 to 1 |
 | 24 | The selection it was drawn inside, if any: its box (x, y, width, height, u32), then its coverage in runs, each a u32 count and the byte |
 | 25 | A region it fills, in place of samples: u32 how many outlines, then each a u32 count of points and them, x and y as 32-bit floats (canvas pixels). The app fills them even-odd in the item's colour (field 3) at its opacity (field 6), smoothed, over what is under it, moved by its transform (field 22). Such an item needs no brush |
+| 26 | The shape it snapped to with QuickShape: u8 its kind (0 line, 1 polyline, 2 arc, 3 curve, 4 ellipse, 5 circle, 6 triangle, 7 equilateral triangle, 8 quadrilateral, 9 rectangle, 10 square), then its nodes, x and y as 32-bit floats (canvas pixels). Its samples are laid exactly as they are, nothing smoothing them, and a dual brush's first alone |
 
 The brush is kept as the brush library keeps one: the brush it came from among those the app comes
 with, and every setting changed from there. An item draws the same however the brush is changed
