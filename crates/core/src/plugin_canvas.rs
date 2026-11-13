@@ -246,6 +246,19 @@ pub struct PluginKind {
     /// What a kind of layer's layers are known by on their thumbnails, if its manifest draws it.
     #[uniffi(default = None)]
     pub badge: Option<PluginBadge>,
+    /// What a kind of layer's layers can be exported as, by its plugin.
+    pub exports: Vec<PluginExport>,
+}
+
+/// A file a plugin makes of an artwork's layers of a kind it adds (an SVG picture of vector
+/// layers, say), offered under Share beside the app's own: `key` is `<id>.<kind>.<key>`, `label`
+/// what Share calls it, and the file's extension and media type.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginExport {
+    pub key: String,
+    pub label: String,
+    pub extension: String,
+    pub mime: String,
 }
 
 /// A small drawing a kind of layer is known by on its layers' thumbnails: lines and dots in a box

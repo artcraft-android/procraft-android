@@ -780,6 +780,32 @@ pub fn export(
     });
 }
 
+/// Writes the file plugin export `key` makes of the artwork's layers where the user picks, as
+/// [`export`] writes the app's own.
+pub fn export_plugin(session: &Arc<CanvasSession>, key: &str, card: &mut crate::export_card::ExportCard) {
+    if card.busy() {
+        return;
+    }
+    let Some(export) = session.plugin_exports().into_iter().find(|e| e.key == key) else { return };
+    let extension = export.extension.clone();
+    let Some(path) = FileDialog::new()
+        .set_title(format!("Export {}", export.label))
+        .add_filter(export.label.as_str(), &[extension.as_str()])
+        .set_file_name(format!("{}.{extension}", export_file_name(session.name(), false)))
+        .save_file()
+    else {
+        return;
+    };
+    let path = with_extension(path, &extension);
+    let key = key.to_owned();
+    writing(session, card, "Can't export", move |session| {
+        // written beside it first, so a cancelled export leaves what was there as it was
+        let part = PathBuf::from(format!("{}.part", path.to_string_lossy()));
+        session.export_plugin(key, part.to_string_lossy().into_owned())?;
+        Ok(vec![part])
+    });
+}
+
 /// Writes an export on a thread of its own (a large one takes seconds, the window drawing on
 /// meanwhile, as the tablet's does), `card` showing how far it has come; telling `failed` with the
 /// reason if it can't. `write` returns what it wrote: a file ending ".part" is put in place of the

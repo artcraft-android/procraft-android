@@ -103,7 +103,9 @@
 //!   If it has them, `procraft_layer_select(len: i32) -> i32` gives the ids of the items a selection
 //!   (`len` bytes) takes, and `procraft_layer_edit(len: i32) -> i32` makes the changes `len` bytes
 //!   ask of its items (not 0: something changed); `procraft_layer_fill(len: i32) -> i32` takes a
-//!   colour dropped on the layer (not 0: its items changed).
+//!   colour dropped on the layer (not 0: its items changed); `procraft_layer_export(len: i32) -> i32`
+//!   makes a file of an artwork's layers of a kind (its length at `procraft_layer_out()`, below 0
+//!   none).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
@@ -227,6 +229,7 @@ const LAYER_DRAW: &str = "procraft_layer_draw";
 const LAYER_SELECT: &str = "procraft_layer_select";
 const LAYER_EDIT: &str = "procraft_layer_edit";
 const LAYER_FILL: &str = "procraft_layer_fill";
+const LAYER_EXPORT: &str = "procraft_layer_export";
 /// What a call on a plugin's own artwork may spend (its drawing, its saving), and how long; a touch,
 /// which comes with each sample while the canvas waits, far less.
 const CANVAS_FUEL: u64 = 800_000_000;
@@ -595,6 +598,8 @@ struct LayerCalls {
     edit: Option<TypedFunc<i32, i32>>,
     /// A colour dropped on the layer, if it takes one.
     fill: Option<TypedFunc<i32, i32>>,
+    /// A file of an artwork's layers, if it makes any.
+    export: Option<TypedFunc<i32, i32>>,
 }
 
 /// What a plugin says of an item recorded on its layer.
@@ -871,6 +876,7 @@ impl Running {
                     select: instance.get_typed_func(&store, LAYER_SELECT).ok(),
                     edit: instance.get_typed_func(&store, LAYER_EDIT).ok(),
                     fill: instance.get_typed_func(&store, LAYER_FILL).ok(),
+                    export: instance.get_typed_func(&store, LAYER_EXPORT).ok(),
                 })
             })();
             let key_buffer = instance.get_typed_func(&store, KEY_BUFFER).ok();
@@ -1300,6 +1306,28 @@ impl Running {
         let Running { store, layers, .. } = self;
         let Some(fill) = layers.as_ref().and_then(|calls| calls.fill.as_ref()) else { return Ok(false) };
         Ok(guarded(|| long_call(store, fill, len, &mut left, until))? != 0)
+    }
+
+    /// The file it makes of the layers `request` hands it (a record), at most `most` bytes: none if
+    /// it makes none.
+    pub(crate) fn layer_export(&mut self, request: &[u8], most: usize) -> Result<Option<Vec<u8>>, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(request, &mut left, until)?;
+        let Running { store, layers, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (layers.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let Some(export) = calls.export.as_ref() else { return Ok(None) };
+        guarded(|| {
+            let made = long_call(store, export, len, &mut left, until)?;
+            let Ok(bytes) = usize::try_from(made) else { return Ok(None) };
+            if bytes > most {
+                return Err(Stop::Nonsense);
+            }
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut out = vec![0_u8; bytes];
+            memory.read(&*store, at, &mut out).map_err(|_| Stop::Nonsense)?;
+            Ok(Some(out))
+        })
     }
 
     /// The panel it asked to show since last asked (none if it didn't), and whether it asked to

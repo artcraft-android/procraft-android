@@ -63,6 +63,8 @@ const MOST_SAMPLES: usize = 1 << 20;
 const MOST_CLIP: usize = 1 << 28;
 /// The most items a selection may take.
 const MOST_TAKEN: usize = 1 << 20;
+/// The most a file a plugin makes of an artwork's layers may be, in bytes.
+const MOST_EXPORT: usize = 256 << 20;
 /// The most of a layer's pixels handed to its plugin for a colour dropped on it, a side: a larger
 /// canvas goes shrunk by whole steps.
 const MOST_DROP_SIDE: u32 = 2048;
@@ -1873,6 +1875,35 @@ impl CanvasSession {
         id
     }
 
+    /// The files plugins on make of the artwork's layers of the kinds they add, as Share offers them:
+    /// those of each kind the artwork has a layer of.
+    pub fn plugin_exports(&self) -> Vec<crate::PluginExport> {
+        let st = self.shared.lock();
+        let Some(hooks) = st.hooks.as_ref() else { return Vec::new() };
+        let mut kinds: Vec<&str> =
+            st.doc.layers().iter().filter_map(|l| l.plugin.as_ref().map(|p| p.kind.as_str())).collect();
+        kinds.dedup();
+        let mut out: Vec<crate::PluginExport> = Vec::new();
+        for kind in kinds {
+            for export in hooks.layer_kind_exports(kind) {
+                if !out.iter().any(|e| e.key == export.key) {
+                    out.push(export);
+                }
+            }
+        }
+        out
+    }
+
+    /// The file plugin export `key` makes (see [`CanvasSession::plugin_exports`]) written to `path`,
+    /// whole.
+    pub fn export_plugin(&self, key: String, path: String) -> Result<(), crate::MobileError> {
+        let reason = |why: &str| crate::MobileError::File { reason: why.to_owned() };
+        let bytes = self.plugin_export_bytes(&key).ok_or_else(|| reason("the plugin couldn't make it"))?;
+        crate::project::write_atomically(std::path::Path::new(&path), |p| {
+            std::fs::write(p, &bytes).map_err(|e| reason(&format!("writing the file: {e}")))
+        })
+    }
+
     /// Layer `id`'s kind (`<id>.<key>`), if a plugin adds layers of it.
     pub fn plugin_layer_kind(&self, id: u64) -> Option<String> {
         self.shared.lock().plugin_layer_kind(LayerId(id)).map(str::to_owned)
@@ -2008,6 +2039,38 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// The file plugin export `key` (`<id>.<kind>.<key>`) makes of the artwork's layers of that kind,
+    /// if a plugin on makes it: handed each of them bottom up (its name, whether it shows, its
+    /// opacity and its data) and the canvas's size.
+    fn plugin_export_bytes(&self, key: &str) -> Option<Vec<u8>> {
+        let mut st = self.shared.lock();
+        st.finish_stroke();
+        let hooks = st.hooks.clone()?;
+        let (kind, _) = key.rsplit_once('.')?;
+        let index = hooks.layer_kind_exports(kind).iter().position(|e| e.key == key)?;
+        let mut r = Record::default();
+        r.field(1, &u32::try_from(index).ok()?.to_le_bytes());
+        r.field(3, &st.doc.width().to_le_bytes()).field(4, &st.doc.height().to_le_bytes());
+        for layer in st.doc.layers().iter().filter(|l| l.plugin.as_ref().is_some_and(|p| p.kind == kind)) {
+            let mut one = Record::default();
+            one.field(1, layer.name.as_bytes()).field(2, &[u8::from(st.doc.unseen(layer.id).is_none())]);
+            one.floats(3, &[layer.opacity]);
+            if let Some(data) = layer.plugin.as_ref().and_then(|p| p.data.as_deref()) {
+                one.field(4, data);
+            }
+            r.field(5, &one.bytes());
+        }
+        let request = r.bytes();
+        drop(st);
+        hooks.on_layer(kind, |running, kind_index| {
+            let mut request = request;
+            let mut head = Record::default();
+            head.field(2, &u32::try_from(kind_index).unwrap_or(0).to_le_bytes());
+            request.extend(head.bytes());
+            running.layer_export(&request, MOST_EXPORT)
+        })?
+    }
+
     /// The changes `changes` makes of the items the selection takes on the current layer (every one
     /// with nothing selected), made as one step called `name`: false if none changed.
     fn on_taken_items(&self, name: &str, changes: impl FnOnce(&State, &[Item]) -> Vec<Change>) -> bool {

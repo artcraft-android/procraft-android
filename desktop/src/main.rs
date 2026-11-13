@@ -1394,6 +1394,12 @@ impl App {
                 files::export(session, format, self.ui.artwork_dir.as_deref(), pdf_quality, &mut self.ui.export_card);
                 None
             }
+            Action::PluginExport(i) => {
+                if let Some(export) = session.plugin_exports().into_iter().nth(usize::from(i)) {
+                    files::export_plugin(session, &export.key, &mut self.ui.export_card);
+                }
+                None
+            }
         };
         if let Some(session) = opened {
             self.show(session);

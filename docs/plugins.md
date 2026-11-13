@@ -791,7 +791,8 @@ kinds:
       "badge": {
         "lines": [{ "points": [0.22, 0.72, 0.38, 0.05, 0.62, 0.95, 0.78, 0.28], "curved": true }],
         "dots": [0.22, 0.72, 0.78, 0.28]
-      }
+      },
+      "exports": [{ "key": "svg", "label": "SVG (vector layers)", "extension": "svg", "mime": "image/svg+xml" }]
     }
   ]
 ```
@@ -807,6 +808,11 @@ white over a small dark box. Its numbers are places in that box, 0 to 1 across a
 - `dots`: up to eight small squares, x then y.
 
 Without a badge, or while the plugin is off or gone, the layer shows a plug.
+
+`exports` is optional too: up to four files the plugin makes of an artwork's layers of the kind. While
+the plugin is on and the artwork has a layer of the kind, Share Image lists each under its `label`,
+beside the app's own formats. `extension` is the file's, a few lower-case letters or digits, and
+`mime` its media type. The plugin makes the file with `procraft_layer_export` (below).
 
 - The app keeps each such layer's data in the artwork beside the layer's pixels
   (`layers/<id>.layerdata` next to `layers/<id>.png`), written whole, and puts it back with the pixels
@@ -842,6 +848,7 @@ procraft_layer_draw() -> i32                     // the layer's items to draw: i
 procraft_layer_select(len: i32) -> i32           // if it exports it: the ids a selection takes
 procraft_layer_edit(len: i32) -> i32             // if it exports it: changes to items, not 0 if made
 procraft_layer_fill(len: i32) -> i32             // if it exports it: a colour dropped, not 0 if items changed
+procraft_layer_export(len: i32) -> i32           // if it exports it: a file of an artwork's layers: its length
 ```
 
 For each change, the app first hands over the layer's data with `procraft_layer_load`. `kind` is the
@@ -892,6 +899,19 @@ layer's own pixels, which saving and exporting read, stay as they are.
 The plugin answers not 0 if it changed its items. The app then asks for the data and the items to
 draw, and lays the layer again as one step called ColorDrop.
 
+`procraft_layer_export` is handed what a file is to be made of, as a record, and needs no layer
+loaded first:
+
+- field 1, which of the kind's `exports` (u32, its place in the manifest);
+- field 2, which kind (u32, its place in `layer_kinds`);
+- fields 3 and 4, the canvas's width and height (u32);
+- field 5 for each of the artwork's layers of the kind, bottom up: a record of its name (field 1,
+  UTF-8), whether it shows (field 2, u8), its opacity (field 3, 32-bit float) and its data (field 4,
+  none for a layer with nothing on it yet).
+
+It answers with the file's length, the file at `procraft_layer_out()`, or below 0 for none. The app
+writes the file whole.
+
 An item is a record: fields one after another, each a 16-bit id, a 32-bit length and that many bytes,
 all little-endian. A reader passes over ids it doesn't know, so a later app can add fields. Ids from
 `0x8000` up are the plugin's own: the app ignores them in what it is handed back. The app writes:
@@ -922,7 +942,7 @@ The kit's `layer` module writes all of this. Implement `kit::layer::Layer` and a
 `kit::layers!(MyLayer)`:
 
 - The trait's calls are new, load, save, add an `Item`, draw into a `Drawn`, and, if you want them,
-  select (an `Area`) and edit (`Change`s).
+  select (an `Area`), edit (`Change`s), fill (a `Dropped` colour) and export (an `Export`).
 - `Item` reads the tool, the width, the samples and where they are drawn (its transform applied, and
   its symmetry's copies, `paths`). It cuts samples into a new item (`with_samples`), and keeps the
   record as it came.
@@ -942,6 +962,9 @@ the eraser does, and what a selection takes:
   kept out of gaps in the lines up to "Fills close gaps" wide. The fill is an item of its own, behind
   the strokes: it moves, recolours and deletes as a stroke does, and a selection takes it by its
   outline. Dropped on a stroke or a fill, the colour recolours that.
+- Share Image offers "SVG (vector layers)": each vector layer a group, each stroke its outline (as
+  wide as its brush where the pen pressed), each fill its region, and each mask hiding what is under
+  it in its layer.
 
 ## Filters
 

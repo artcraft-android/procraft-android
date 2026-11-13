@@ -524,6 +524,19 @@ impl Hooks {
         working.on.iter().find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).map(|k| k.label.clone()))
     }
 
+    /// What layers of `kind` can be exported as by the plugin on that adds them.
+    pub(crate) fn layer_kind_exports(&self, kind: &str) -> Vec<crate::PluginExport> {
+        if !self.has(Hook::Layers) {
+            return Vec::new();
+        }
+        let working = self.working();
+        working
+            .on
+            .iter()
+            .find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).map(|k| k.exports.clone()))
+            .unwrap_or_default()
+    }
+
     /// What layers of `kind` are known by on their thumbnails, if a plugin on adds them and draws it.
     pub(crate) fn layer_kind_badge(&self, kind: &str) -> Option<crate::PluginBadge> {
         if !self.has(Hook::Layers) {

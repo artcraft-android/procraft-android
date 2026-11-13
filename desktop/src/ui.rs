@@ -65,6 +65,8 @@ pub enum Action {
     SaveAs,
     /// The artwork written as this format; a PDF keeps its pictures at this JPEG quality.
     Export(Format, u8),
+    /// The file a plugin makes of the artwork's layers (by its place among those offered).
+    PluginExport(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2405,6 +2407,7 @@ impl Interface {
                     model_flat: self.model && session.model_flat(),
                     paint_through: self.model && session.paint_through(),
                     svg: session.exports_svg(),
+                    plugin_exports: session.plugin_exports().into_iter().map(|e| e.label).collect(),
                 };
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
@@ -2484,6 +2487,10 @@ impl Interface {
                     }
                     Some(Act::Share(format)) => {
                         self.actions.push(Action::Export(format, 100));
+                        self.open = None;
+                    }
+                    Some(Act::PluginExport(i)) => {
+                        self.actions.push(Action::PluginExport(i));
                         self.open = None;
                     }
                     Some(Act::About) => crate::files::about(),

@@ -206,6 +206,36 @@ struct RawKind {
     label: String,
     #[serde(default)]
     badge: Option<RawBadge>,
+    #[serde(default)]
+    exports: Vec<RawExport>,
+}
+
+/// A file a kind of layer's plugin makes of its layers: its key, what Share calls it, its
+/// extension and media type.
+#[derive(Deserialize)]
+struct RawExport {
+    key: String,
+    label: String,
+    extension: String,
+    mime: String,
+}
+
+/// The most files a kind of layer can be exported as.
+const MOST_EXPORTS: usize = 4;
+
+/// Whether `raw` holds up: a key, words to show, a short extension of lower-case letters and digits,
+/// and a media type as they are written.
+fn export_fits(raw: &RawExport) -> bool {
+    let ext = &raw.extension;
+    let mime = &raw.mime;
+    valid_key(&raw.key)
+        && !raw.label.trim().is_empty()
+        && shows_plainly(&raw.label, 40)
+        && (1..=8).contains(&ext.len())
+        && ext.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && mime.len() <= 64
+        && mime.split_once('/').is_some_and(|(a, b)| !a.is_empty() && !b.is_empty())
+        && mime.bytes().all(|b| b.is_ascii_alphanumeric() || b"/+.-".contains(&b))
 }
 
 /// A kind of layer's badge, as its manifest draws it (see [`crate::PluginBadge`]).
@@ -644,7 +674,12 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     let kinds: Vec<crate::plugin_canvas::PluginKind> = raw
         .kinds
         .into_iter()
-        .map(|k| crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label, badge: None })
+        .map(|k| crate::plugin_canvas::PluginKind {
+            key: format!("{id}.{}", k.key),
+            label: k.label,
+            badge: None,
+            exports: Vec::new(),
+        })
         .collect();
     // kinds of layer, for code written to interface 3 or later: on the layers hook while it has any
     let layered = has(PluginPart::Hooks) && compat.interface.is_some_and(|interface| interface >= 3);
@@ -661,7 +696,25 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
             Some(raw) => Some(badge_of(raw).ok_or(Refusal::Described)?),
             None => None,
         };
-        layer_kinds.push(crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label, badge });
+        // and the files its plugin makes of its layers
+        let mut export_keys = HashSet::new();
+        if k.exports.len() > MOST_EXPORTS
+            || !k.exports.iter().all(|e| export_fits(e) && export_keys.insert(e.key.clone()))
+        {
+            return Err(Refusal::Described);
+        }
+        let key = format!("{id}.{}", k.key);
+        let exports = k
+            .exports
+            .into_iter()
+            .map(|e| crate::PluginExport {
+                key: format!("{key}.{}", e.key),
+                label: e.label,
+                extension: e.extension,
+                mime: e.mime,
+            })
+            .collect();
+        layer_kinds.push(crate::plugin_canvas::PluginKind { key, label: k.label, badge, exports });
     }
     if !layer_kinds.is_empty() {
         hooks.push(Hook::Layers);
@@ -1832,6 +1885,7 @@ pub(crate) mod tests {
             key: "org.example.dots.dots".to_owned(),
             label: "Dots".to_owned(),
             badge: None,
+            exports: Vec::new(),
         };
         assert_eq!(package.manifest.kinds, [kind]);
         // each key once, words to show, not too many
@@ -1856,10 +1910,18 @@ pub(crate) mod tests {
         // its badge a curve between two nodes
         let curve = crate::BadgeLine { points: vec![0.22, 0.72, 0.38, 0.05, 0.62, 0.95, 0.78, 0.28], curved: true };
         let badge = crate::PluginBadge { lines: vec![curve], dots: vec![0.22, 0.72, 0.78, 0.28] };
+        // and an SVG picture of its layers, made by it
+        let svg = crate::PluginExport {
+            key: format!("{id}.vector.svg"),
+            label: "SVG (vector layers)".to_owned(),
+            extension: "svg".to_owned(),
+            mime: "image/svg+xml".to_owned(),
+        };
         let kind = crate::plugin_canvas::PluginKind {
             key: format!("{id}.vector"),
             label: "Vector layer".to_owned(),
             badge: Some(badge),
+            exports: vec![svg],
         };
         assert_eq!(package.manifest.layer_kinds, [kind]);
         assert_eq!(package.manifest.hooks, [Hook::Layers], "on the layers hook, not named");
@@ -1883,6 +1945,14 @@ pub(crate) mod tests {
         let plain = json!([{ "key": "a", "label": "A" }]);
         let unbadged = read_package(&a_coded_file(&with(manifest.clone(), "/layer_kinds", plain), &module)).unwrap();
         assert_eq!(unbadged.manifest.layer_kinds[0].badge, None);
+        // exports with a key, words, a short plain extension and a media type
+        let exported = |e: Value| json!([{ "key": "a", "label": "A", "exports": [e] }]);
+        let good = json!({ "key": "svg", "label": "SVG", "extension": "svg", "mime": "image/svg+xml" });
+        assert!(read_package(&a_coded_file(&with(manifest.clone(), "/layer_kinds", exported(good)), &module)).is_ok());
+        let dotted = json!({ "key": "svg", "label": "SVG", "extension": ".svg", "mime": "image/svg+xml" });
+        assert_eq!(of("/layer_kinds", exported(dotted)), Refusal::Described);
+        let bare = json!({ "key": "svg", "label": "SVG", "extension": "svg", "mime": "svg" });
+        assert_eq!(of("/layer_kinds", exported(bare)), Refusal::Described);
         // the layers hook can't be named, and code without its calls can't say it adds any
         assert_eq!(of("/hooks", json!(["layers"])), Refusal::Newer);
         let other = a_module();

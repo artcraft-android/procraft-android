@@ -5,7 +5,8 @@
 //! layer's pixels, and undoes and redoes it with them. When the plugin changes items already drawn
 //! (taking some away, say), it asks the app to draw the layer again from its items. The app can also
 //! ask which items a selection takes ([`Layer::select`]) and change or delete them ([`Layer::edit`]),
-//! and hand it a colour dropped on the layer ([`Layer::fill`]).
+//! hand it a colour dropped on the layer ([`Layer::fill`]), and ask it for a file of an artwork's
+//! layers ([`Layer::export`]).
 //! See `docs/plugins.md`. [`layers!`](crate::layers!) exports the calls.
 //!
 //! ```ignore
@@ -81,6 +82,11 @@ pub mod field {
     /// points and them, x and y as 32-bit floats (canvas pixels, before its transform), filled
     /// even-odd in its colour at its opacity. Such an item needs no brush.
     pub const OUTLINE: u16 = 25;
+    /// The shape it was snapped to (QuickShape): u8 its kind (0 line, 1 polyline, 2 arc, 3 curve,
+    /// 4 ellipse, 5 circle, 6 triangle, 7 equilateral triangle, 8 quadrilateral, 9 rectangle,
+    /// 10 square), then its nodes, x and y as 32-bit floats (canvas pixels, before its transform).
+    /// Its samples are laid exactly along the shape.
+    pub const SHAPE: u16 = 26;
     /// The first id of a plugin's own fields.
     pub const OWN: u16 = 0x8000;
 }
@@ -367,6 +373,28 @@ impl Item {
             .with_field(field::STARTED, Some(&started.to_le_bytes()))
     }
 
+    /// The shape it was snapped to, if it was: its kind (see [`field::SHAPE`]) and its nodes where
+    /// they are drawn (its transform applied).
+    pub fn shape(&self) -> Option<(u8, Vec<(f32, f32)>)> {
+        let bytes = self.field(field::SHAPE)?;
+        let t = self.transform();
+        let nodes = (0..(bytes.len().saturating_sub(1)) / 8)
+            .filter_map(|i| Some(apply(&t, (f32_at(bytes, 1 + i * 8)?, f32_at(bytes, 5 + i * 8)?))))
+            .collect();
+        Some((*bytes.first()?, nodes))
+    }
+
+    /// Its colour (sRGB 0..1), black if it says none.
+    pub fn colour(&self) -> [f32; 3] {
+        let c = self.field(field::COLOUR);
+        [0, 1, 2].map(|i| c.and_then(|c| f32_at(c, i * 4)).filter(|v| v.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0))
+    }
+
+    /// Its opacity (0..1), full if it says none.
+    pub fn opacity(&self) -> f32 {
+        self.field(field::OPACITY).and_then(|o| f32_at(o, 0)).filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 1.0)
+    }
+
     /// The brush it was drawn with, as the app wrote it.
     pub fn brush(&self) -> Option<&[u8]> {
         self.field(field::BRUSH)
@@ -510,6 +538,59 @@ impl Dropped {
     }
 }
 
+/// An artwork's layers of a kind the plugin adds, handed to it for a file ([`Layer::export`]):
+/// which of the kind's exports (by its place in the manifest), which kind, the canvas's size, and
+/// the layers bottom up.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Export {
+    pub export: usize,
+    pub kind: usize,
+    pub width: u32,
+    pub height: u32,
+    pub layers: Vec<ExportedLayer>,
+}
+
+/// One layer handed for a file: its name, whether it shows, its opacity and its data (none for one
+/// with nothing on it yet).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExportedLayer {
+    pub name: String,
+    pub shown: bool,
+    pub opacity: f32,
+    pub data: Vec<u8>,
+}
+
+impl Export {
+    /// What `bytes` (the app's record of it) holds.
+    pub fn read(bytes: &[u8]) -> Export {
+        let n = |v: &[u8]| v.get(..4).map_or(0, |v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        let mut out = Export::default();
+        for (id, value) in fields(bytes) {
+            match id {
+                1 => out.export = n(value) as usize,
+                2 => out.kind = n(value) as usize,
+                3 => out.width = n(value),
+                4 => out.height = n(value),
+                5 => {
+                    let mut layer = ExportedLayer { opacity: 1.0, ..ExportedLayer::default() };
+                    for (field, v) in fields(value) {
+                        match field {
+                            1 => layer.name = String::from_utf8_lossy(v).into_owned(),
+                            2 => layer.shown = v.first().is_some_and(|b| *b != 0),
+                            3 => layer.opacity = f32_at(v, 0).filter(|o| o.is_finite()).unwrap_or(1.0).clamp(0.0, 1.0),
+                            4 => layer.data = v.to_vec(),
+                            _ => {}
+                        }
+                    }
+                    out.layers.push(layer);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
 /// A change the app asks of one item ([`Layer::edit`]): which, by its id, and whether it goes, or
 /// the fields it takes in place of its own.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -607,6 +688,10 @@ pub trait Layer: Sized + Send {
     fn fill(&mut self, _dropped: &Dropped) -> bool {
         false
     }
+    /// The file `export` asks for of an artwork's layers of its kinds (none, unless it says).
+    fn export(_export: &Export) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// The layer being worked on (the app hands one over for each change), and what the app reads from
@@ -696,6 +781,14 @@ impl<L: Layer> Held<L> {
         let dropped = Dropped::read(&std::mem::take(&mut *lock(&self.input)));
         i32::from(lock(&self.layer).as_mut().is_some_and(|layer| layer.fill(&dropped)))
     }
+
+    pub fn export(&self, _len: i32) -> i32 {
+        let export = Export::read(&std::mem::take(&mut *lock(&self.input)));
+        match L::export(&export) {
+            Some(bytes) => self.put(bytes),
+            None => -1,
+        }
+    }
 }
 
 /// Exports the calls a plugin's own kinds of layer are reached through, for `$layer` (a type that
@@ -748,6 +841,11 @@ macro_rules! layers {
         #[unsafe(no_mangle)]
         pub extern "C" fn procraft_layer_fill(len: i32) -> i32 {
             LAYER.fill(len)
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn procraft_layer_export(len: i32) -> i32 {
+            LAYER.export(len)
         }
     };
 }
@@ -918,8 +1016,19 @@ mod tests {
         *held.input.lock().unwrap() = saved;
         assert_eq!(held.load(0, len), 0);
         assert_eq!(held.layer.lock().unwrap().as_ref().unwrap().0, [item]);
-        // one that selects, edits and fills nothing says so
-        assert_eq!((held.select(0), held.edit(0), held.fill(0)), (0, 0, 0));
+        // one that selects, edits, fills and exports nothing says so
+        assert_eq!((held.select(0), held.edit(0), held.fill(0), held.export(0)), (0, 0, 0, -1));
+        // an export asked for, as the app hands it over
+        let mut one = Record::default();
+        one.field(1, b"Ink").field(2, &[1]).field(3, &0.5f32.to_le_bytes()).field(4, b"data");
+        let mut r = Record::default();
+        r.field(1, &1u32.to_le_bytes()).field(2, &0u32.to_le_bytes()).field(3, &640u32.to_le_bytes());
+        r.field(4, &480u32.to_le_bytes()).field(5, &one.bytes()).field(5, &Record::default().bytes());
+        let export = Export::read(&r.bytes());
+        assert_eq!((export.export, export.width, export.height, export.layers.len()), (1, 640, 480, 2));
+        let ink = &export.layers[0];
+        assert_eq!((ink.name.as_str(), ink.shown, ink.opacity, &ink.data[..]), ("Ink", true, 0.5, &b"data"[..]));
+        assert!(!export.layers[1].shown && export.layers[1].data.is_empty());
     }
 
     #[test]

@@ -12934,3 +12934,32 @@ fn a_held_stroke_on_a_vector_layer_snaps_to_a_shape_kept_as_its_geometry_and_lai
     assert_eq!(alpha_in(&layer_rgba(&s, vector), 160, 80, 100), 255);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn share_offers_the_svg_the_vector_layers_plugin_makes_of_an_artwork_s_vector_layers() {
+    let Some((s, plugins, dir)) = vector_session(120, "svg") else { return };
+    assert!(s.plugin_exports().is_empty(), "no vector layer yet");
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_color(1.0, 0.0, 0.0);
+    stroke_across(&s, 60.0, 10.0, 110.0);
+    let exports = s.plugin_exports();
+    assert_eq!(exports.len(), 1);
+    let svg = &exports[0];
+    assert_eq!(
+        (svg.label.as_str(), svg.extension.as_str(), svg.mime.as_str()),
+        ("SVG (vector layers)", "svg", "image/svg+xml")
+    );
+    assert_eq!(svg.key, format!("{VECTOR_KIND}.svg"));
+    let path = std::path::Path::new(&dir).join("picture.svg");
+    s.export_plugin(svg.key.clone(), path.to_string_lossy().into_owned()).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains(r#"width="120" height="120""#));
+    assert!(text.contains(r##"fill="#ff0000"/>"##), "the stroke, red: {text}");
+    let name = s.layers().into_iter().find(|l| l.id == vector).unwrap().name;
+    assert!(text.contains(&format!(r#"data-name="{name}""#)));
+    // an export no plugin makes, or with the plugin off: none, and nothing written
+    assert!(s.export_plugin("org.example.none.vector.svg".to_owned(), path.to_string_lossy().into_owned()).is_err());
+    assert!(plugins.set_on(VECTOR_ID.to_owned(), false));
+    assert!(s.plugin_exports().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

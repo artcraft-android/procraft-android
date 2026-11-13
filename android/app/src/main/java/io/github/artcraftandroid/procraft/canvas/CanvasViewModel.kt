@@ -5718,6 +5718,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun export(kind: Export, pdfQuality: Int = 100): List<File> =
         withExportCard("The artwork couldn't be exported.") { s -> exportFiles(s, kind, pdfQuality).takeIf { it.isNotEmpty() } }.orEmpty()
 
+    /** The file a plugin makes of the artwork's layers of a kind it adds ([e]), written into the cache to share. */
+    suspend fun exportPlugin(e: io.github.artcraftandroid.procraft.core.PluginExport): File? =
+        withExportCard("The artwork couldn't be exported.") { s ->
+            withContext(Dispatchers.IO) {
+                val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+                val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
+                val file = File(dir, "$base.${e.extension}")
+                try {
+                    s.exportPlugin(e.key, file.path)
+                    file
+                } catch (x: MobileException) {
+                    Log.e(TAG, "exporting", x)
+                    null
+                }
+            }
+        }
+
     /**
      * Runs [work], an export by the core, with the export card showing how far it has come (as the
      * core tells it) and a check once made: what it made, or null if it was cancelled (its result

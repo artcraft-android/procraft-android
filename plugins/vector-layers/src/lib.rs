@@ -19,14 +19,17 @@
 //! strokes, its outline kept, so it moves, recolours and deletes as a stroke does. Dropped on a
 //! stroke or a fill, it recolours that.
 //!
+//! Share offers an SVG picture of the artwork's vector layers ([`svg`]).
+//!
 //! Its data: `PCVL`, then a record (see [`kit::layer`]): the version, each brush once (an item names
 //! its brush by its place among them), the next id to give, and each item: its brush, the box it
 //! reaches, its id, and its record as the app wrote it, its brush left out. Fields it doesn't know are
 //! kept as they came.
 
 mod fill;
+mod svg;
 
-use kit::layer::{Added, Area, Change, Drawn, Dropped, Item, Layer, Record, Sample, Tool, field, fields};
+use kit::layer::{Added, Area, Change, Drawn, Dropped, Export, Item, Layer, Record, Sample, Tool, field, fields};
 
 /// What its data starts with, and the version of what follows (1 had no ids).
 const MAGIC: &[u8; 4] = b"PCVL";
@@ -465,6 +468,11 @@ impl Layer for Vectors {
             .collect()
     }
 
+    fn export(export: &Export) -> Option<Vec<u8>> {
+        // its one export: an SVG picture
+        (export.export == 0).then(|| svg::picture(export))
+    }
+
     fn fill(&mut self, dropped: &Dropped) -> bool {
         let area = &dropped.drawn;
         let scale = dropped.scale.max(1.0);
@@ -737,6 +745,39 @@ mod tests {
         assert!(layer.edit(&[Change { id, delete: false, fields: vec![(field::TRANSFORM, moved)] }]));
         assert!(layer.items[0].item().points().iter().all(|p| p.0 >= 5.0));
         CONTROLS.told(3, 6.0);
+    }
+
+    #[test]
+    fn its_layers_export_as_an_svg_picture_of_strokes_fills_and_masks() {
+        let mut layer = Vectors::new(0);
+        square_of_strokes(&mut layer, 20.0, 80.0, 0.0);
+        let mask = layer.kept(&stroke(1, 6.0, b"eraser", &[(10.0, 50.0), (90.0, 50.0)]), None).unwrap();
+        layer.items.push(mask);
+        let fill = Item::fill(&[vec![(30.0, 30.0), (70.0, 30.0), (70.0, 70.0)]], [0.0, 0.5, 1.0], 0.5);
+        let fill = layer.kept(&fill, None).unwrap();
+        layer.items.insert(0, fill);
+        let data = layer.save();
+        let export = kit::layer::Export {
+            export: 0,
+            kind: 0,
+            width: 100,
+            height: 100,
+            layers: vec![kit::layer::ExportedLayer { name: "Ink".into(), shown: true, opacity: 1.0, data }],
+        };
+        let text = String::from_utf8(Vectors::export(&export).unwrap()).unwrap();
+        assert!(text.starts_with("<?xml") && text.contains("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+        // the fill, its colour and opacity, its region even-odd
+        assert!(
+            text.contains(
+                r##"<path d="M30 30 L70 30 L70 70 Z " fill-rule="evenodd" fill="#0080ff" fill-opacity="0.5"/>"##
+            ),
+            "{text}"
+        );
+        // five strokes' outlines in black, hidden along the eraser by a mask of its own
+        assert_eq!(text.matches(r##"fill="#000000"/>"##).count(), 5);
+        assert!(text.contains(r#"<mask id="m1""#) && text.contains(r#"<g mask="url(#m1)">"#));
+        // an export it doesn't make: none
+        assert!(Vectors::export(&kit::layer::Export { export: 1, ..export }).is_none());
     }
 
     #[test]
