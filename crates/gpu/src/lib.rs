@@ -151,14 +151,19 @@ impl Gpu {
     /// (to try another when a driver fails); on Android Vulkan, then OpenGL ES (for a device
     /// whose Vulkan is missing or fails); on Windows Vulkan and Direct3D 12, Direct3D 12 first on
     /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens), then OpenGL (a GPU or
-    /// driver too old for either); on Linux Vulkan, then OpenGL (the same); elsewhere the native
-    /// API. A backend's index here is the one the other calls take.
+    /// driver too old for either); on Linux Vulkan, then OpenGL (the same); on OpenHarmony OpenGL
+    /// ES for now; elsewhere the native API. A backend's index here is the one the other calls take.
     pub fn backends() -> Vec<wgpu::Backends> {
         if let Some(chosen) = wgpu::Backends::from_env().filter(|b| !b.is_empty()) {
             return vec![chosen];
         }
         if cfg!(target_os = "android") {
             vec![wgpu::Backends::VULKAN, wgpu::Backends::GL]
+        } else if cfg!(target_env = "ohos") {
+            // OpenHarmony (which says it is Linux): wgpu 30 makes Vulkan surfaces on X11 and
+            // Wayland only, and an OHNativeWindow only on OpenGL ES. Vulkan first once wgpu has
+            // VK_OHOS_surface (merged upstream for its next major release).
+            vec![wgpu::Backends::GL]
         } else if cfg!(all(windows, target_arch = "aarch64")) {
             vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN, wgpu::Backends::GL]
         } else if cfg!(windows) {

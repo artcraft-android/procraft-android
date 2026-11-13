@@ -1,0 +1,14 @@
+# DevEco Studio and Hvigor
+/.idea/
+/.hvigor/
+/oh_modules/
+/local.properties
+**/build/
+**/oh_modules/
+**/.preview/
+oh-package-lock.json5
+
+# written by ../build-rust.sh: the native library and the icons
+/entry/libs/
+/AppScope/resources/base/media/
+/entry/src/main/resources/base/media/

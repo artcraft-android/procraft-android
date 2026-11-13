@@ -1,0 +1,12 @@
+{
+  "name": "entry",
+  "version": "0.0.1",
+  "description": "ProCraft's tablet module",
+  "main": "",
+  "author": "",
+  "license": "MIT OR Apache-2.0",
+  "dependencies": {
+    // the Rust bridge's ArkTS declarations; the library itself is libs/<abi>/libprocraft_harmony.so
+    "libprocraft_harmony.so": "file:./types/libprocraft_harmony"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "apiType": "stageMode",
+  // no CMake: the native library is Rust's, built by ../build-rust.sh into libs/<abi>/
+  "buildOption": {
+  },
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "arkOptions": {
+        "obfuscation": {
+          "ruleOptions": {
+            "enable": false
+          }
+        }
+      }
+    }
+  ],
+  "targets": [
+    {
+      "name": "default"
+    }
+  ]
+}

@@ -213,7 +213,7 @@ version = "0.38.0+1.3.281"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -649,6 +649,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "convert_case"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "affbf0190ed2caf063e3def54ff444b449371d55c58e513a95ab98eca50adb49"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -777,6 +786,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "ctor"
+version = "1.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -823,7 +838,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1209,12 +1224,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -1252,6 +1283,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-sink"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
+
+[[package]]
 name = "futures-task"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1263,9 +1300,13 @@ version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
+ "futures-channel",
  "futures-core",
+ "futures-io",
  "futures-macro",
+ "futures-sink",
  "futures-task",
+ "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -1994,7 +2035,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6aae1df220ece3c0ada96b8153459b67eebe9ae9212258bb0134ae60416fdf76"
 dependencies = [
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "pkg-config",
 ]
 
@@ -2033,6 +2074,16 @@ name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",
@@ -2197,6 +2248,63 @@ dependencies = [
  "indexmap",
  "rustc-hash 1.1.0",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "napi-build-ohos"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617bcd176a3dc3d96c0acad112a482f592242d6fba6773a9eb8d90e042a35260"
+
+[[package]]
+name = "napi-derive-backend-ohos"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b06bf282ab442eed04c89f8a833bd06d4cf22f18654f50d848449db9e94438a"
+dependencies = [
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "semver",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "napi-derive-ohos"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419b1721d9f21d76c1a5cb38e2628211cb786b5efb9e1dd2fc049ba1cb938e47"
+dependencies = [
+ "convert_case",
+ "ctor",
+ "napi-derive-backend-ohos",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "napi-ohos"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe1a014105134b7889e85f5ab6f8ec5240db43ed37e6c4a38bd7b4a164b345e0"
+dependencies = [
+ "bitflags 2.13.2",
+ "ctor",
+ "futures",
+ "napi-build-ohos",
+ "napi-sys-ohos",
+ "nohash-hasher",
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
+name = "napi-sys-ohos"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "266964b97e57f3ca023ed13e7c78d4c8f3900aa00466bbeb8cb7746653cabc5f"
+dependencies = [
+ "libloading 0.9.0",
 ]
 
 [[package]]
@@ -3114,6 +3222,16 @@ dependencies = [
  "procraft-engine",
  "thiserror 2.0.21",
  "wgpu",
+]
+
+[[package]]
+name = "procraft-harmony"
+version = "0.0.1"
+dependencies = [
+ "napi-build-ohos",
+ "napi-derive-ohos",
+ "napi-ohos",
+ "procraft-core",
 ]
 
 [[package]]
@@ -4862,7 +4980,7 @@ dependencies = [
  "js-sys",
  "khronos-egl",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "log",
  "naga",
  "naga-types",
@@ -5391,7 +5509,7 @@ dependencies = [
  "as-raw-xcb-connection",
  "gethostname",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "once_cell",
  "rustix 1.1.5",
  "x11rb-protocol",

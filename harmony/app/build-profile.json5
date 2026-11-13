@@ -1,0 +1,39 @@
+{
+  "app": {
+    // DevEco Studio's signing (File > Project Structure > Signing Configs) writes the keys' paths
+    // and passwords here: keep them out of commits (see ../README.md)
+    "signingConfigs": [],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        // HarmonyOS 5.0.0 (API 12): the first release without Android, and the first with the
+        // surface id call the canvas is made from
+        "compatibleSdkVersion": "5.0.0(12)",
+        "runtimeOS": "HarmonyOS"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

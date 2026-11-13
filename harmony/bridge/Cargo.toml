@@ -1,0 +1,27 @@
+[package]
+name = "procraft-harmony"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The HarmonyOS app's bridge to procraft-core: the calls its ArkTS interface makes, through Node-API (napi-ohos)"
+
+[lib]
+name = "procraft_harmony"
+# cdylib: libprocraft_harmony.so, the native library the HarmonyOS app imports; lib: the tests
+crate-type = ["cdylib", "lib"]
+
+[lints]
+workspace = true
+
+# Everything but the pen maths is OpenHarmony's only: built anywhere else, the crate is empty, so
+# the workspace's checks on the other systems are unchanged.
+[target.'cfg(target_env = "ohos")'.dependencies]
+procraft-core = { path = "../../crates/core" }
+napi-ohos = { version = "1.2", default-features = false, features = ["napi8"] }
+napi-derive-ohos = "1.2"
+
+[build-dependencies]
+# Node-API's link setup (build.rs runs it for OpenHarmony only)
+napi-build-ohos = "1.2"

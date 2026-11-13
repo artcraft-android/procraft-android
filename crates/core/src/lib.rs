@@ -5,10 +5,12 @@
 //! (`host.rs`).
 //!
 //! On Android the window crosses over through two small JNI functions (`window.rs`, the crate's
-//! only unsafe code with `layer.rs`): Kotlin hands its `Surface` to `NativeWindows.acquire` and
-//! passes the id it returns to [`CanvasSession::attach_window`]. The iPad app (UniFFI's Swift
-//! bindings) hands its canvas view's `CAMetalLayer` to `acquire_layer` (`layer.rs`) the same way,
-//! and the same render thread draws into it.
+//! only unsafe code with `layer.rs` and `ohos_window.rs`): Kotlin hands its `Surface` to
+//! `NativeWindows.acquire` and passes the id it returns to [`CanvasSession::attach_window`]. The
+//! iPad app (UniFFI's Swift bindings) hands its canvas view's `CAMetalLayer` to `acquire_layer`
+//! (`layer.rs`) the same way, and the HarmonyOS app (through its own bridge, `harmony/bridge`) its
+//! canvas component's surface id to `acquire_surface` (`ohos_window.rs`); the same render thread
+//! draws into each.
 
 uniffi::setup_scaffolding!();
 
@@ -68,7 +70,7 @@ mod quickshape;
 mod recolor;
 mod reference_view;
 mod reference_window;
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))]
 mod render;
 mod reveal;
 mod scene3d;
@@ -89,6 +91,11 @@ mod window;
 // the iPad app's window is its layer: taken and drawn into as Android's is
 #[cfg(target_os = "ios")]
 use layer as window;
+// the HarmonyOS app's window: the native window of its canvas component's surface
+#[cfg(target_env = "ohos")]
+mod ohos_window;
+#[cfg(target_env = "ohos")]
+use ohos_window as window;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -150,6 +157,8 @@ pub use layers::{
 };
 pub use liquify::liquify_reach;
 pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch};
+#[cfg(target_env = "ohos")]
+pub use ohos_window::{acquire_surface, release_surface};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
 pub use pickers::{
@@ -1575,12 +1584,12 @@ impl CanvasSession {
 
 #[uniffi::export]
 impl CanvasSession {
-    /// Starts drawing into the window `window` (an id from `NativeWindows.acquire`, or on iPadOS
-    /// from `acquire_layer`), `width` × `height` pixels. The session owns the window from
-    /// here on.
+    /// Starts drawing into the window `window` (an id from `NativeWindows.acquire`, on iPadOS
+    /// from `acquire_layer`, on HarmonyOS from `acquire_surface`), `width` × `height` pixels. The
+    /// session owns the window from here on.
     pub fn attach_window(&self, window: u64, width: u32, height: u32) -> Result<(), MobileError> {
         self.detach_window();
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))]
         {
             let native =
                 window::take(window).ok_or_else(|| MobileError::Window { reason: format!("no window {window}") })?;
@@ -1611,7 +1620,7 @@ impl CanvasSession {
             *self.shared.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
             Ok(())
         }
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_env = "ohos")))]
         {
             let _ = (width, height);
             Err(MobileError::Window { reason: format!("windows are the tablet apps' only (asked for {window})") })

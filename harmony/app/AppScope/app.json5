@@ -1,0 +1,11 @@
+{
+  "app": {
+    "bundleName": "io.github.artcraftandroid.procraft",
+    "vendor": "artcraft-android",
+    "versionCode": 1,
+    "versionName": "0.0.1",
+    // written by ../build-rust.sh from assets/app-icon/procraft-1024.png
+    "icon": "$media:app_icon",
+    "label": "$string:app_name"
+  }
+}

@@ -49,6 +49,10 @@ ndk = { version = "0.9", default-features = false }
 jni-sys = "0.3"
 raw-window-handle = "0.6"
 
+# The HarmonyOS app's native window, made from its canvas component's surface (ohos_window.rs)
+[target.'cfg(target_env = "ohos")'.dependencies]
+raw-window-handle = "0.6"
+
 # The iPad app's CAMetalLayer, handed over from Swift (layer.rs)
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"

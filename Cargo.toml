@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine", "crates/gpu", "crates/core", "android/bindgen", "desktop"]
+members = ["crates/engine", "crates/gpu", "crates/core", "android/bindgen", "desktop", "harmony/bridge"]
 
 [workspace.package]
 version = "0.0.1"

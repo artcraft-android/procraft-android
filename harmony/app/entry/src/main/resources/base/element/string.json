@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "ProCraft for tablets"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Paint and draw"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "ProCraft"
+    }
+  ]
+}

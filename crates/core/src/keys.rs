@@ -535,7 +535,7 @@ pub(crate) fn shortcut_list_now(
 
 /// Whether the app's shortcuts are the desktop's (its files, zooming and turning the view, which a
 /// plugin is told of too), as the platform this is built for has them.
-pub(crate) const DESKTOP: bool = !cfg!(any(target_os = "android", target_os = "ios"));
+pub(crate) const DESKTOP: bool = !cfg!(any(target_os = "android", target_os = "ios", target_env = "ohos"));
 /// Whether presses the core writes out itself (a plugin's panel's) are a Mac's (⌘, ⇧, ⌥), as the
 /// platform this is built for writes them.
 pub(crate) const MAC: bool = cfg!(any(target_os = "macos", target_os = "ios"));

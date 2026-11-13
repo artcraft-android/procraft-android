@@ -9,11 +9,14 @@ use procraft_gpu::{Gpu, wgpu};
 use crate::Shared;
 use crate::frame::{configure, screen_profile};
 
-/// The window drawn into: Android's native window, or the iPad app's `CAMetalLayer`.
+/// The window drawn into: Android's native window, the iPad app's `CAMetalLayer`, or the
+/// HarmonyOS app's native window.
 #[cfg(target_os = "android")]
 type Window = ndk::native_window::NativeWindow;
 #[cfg(target_os = "ios")]
 type Window = crate::layer::Layer;
+#[cfg(target_env = "ohos")]
+type Window = crate::ohos_window::NativeWindow;
 
 pub(crate) fn run(shared: Arc<Shared>, window: Window) {
     let own = shared.lock().gpu.as_ref().map(|g| g.instance.clone());
