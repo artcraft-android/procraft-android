@@ -578,6 +578,76 @@ fn a_window_in_the_glass_shows_a_slanted_edge_without_steps() {
     assert!(most <= 2, "the edge jumps {most} px between rows: {jumps:?}");
 }
 
+/// The white 100 square canvas shown on black in a 400 x 200 target through `view`, read back.
+fn shown_on_black(gpu: &Gpu, view: &View) -> Vec<u8> {
+    let mut doc = Document::new(100, 100);
+    doc.background = [1.0, 1.0, 1.0];
+    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("canvas edge"),
+        size: wgpu::Extent3d { width: 400, height: 200, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&Default::default());
+    canvas.render(
+        gpu,
+        &mut doc,
+        Some(Target {
+            view: &target_view,
+            format,
+            size: (400, 200),
+            to_screen: view.to_screen(),
+            surround: [0.0, 0.0, 0.0],
+            grid: None,
+            selection: None,
+            backdrop: None,
+            convert: None,
+            lut: None,
+            crisp_from: f32::INFINITY,
+            grey: false,
+        }),
+    );
+    read(gpu, &target, 400, 200)
+}
+
+#[test]
+fn a_turned_canvas_s_sides_are_smooth_and_an_upright_one_s_stay_sharp() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // turned 30 degrees: along each row its left side crosses, a pixel there is partly covered
+    // (drawn all or nothing before: steps along the side)
+    let turned =
+        View::centred(procraft_engine::geom::Vec2::new(50.0, 50.0), 1.6, 30f32.to_radians(), (400, 200)).unwrap();
+    let px = shown_on_black(&gpu, &turned);
+    let red = |x: u32, y: u32| pixel(&px, 400, x, y)[0];
+    let mut rows = 0;
+    for y in 60..120 {
+        let Some(x) = (0..400u32).find(|&x| red(x, y) > 0) else { continue };
+        rows += 1;
+        assert!(red(x, y) < 250, "row {y}: the first lit pixel ({x}) is all canvas: {}", red(x, y));
+        // and past it, the canvas whole
+        assert_eq!(red(x + 3, y), 255, "row {y}");
+    }
+    assert_eq!(rows, 60, "the side crosses every row looked at");
+    // a pixel well outside is untouched, one well inside all canvas
+    assert_eq!(red(200, 100), 255);
+    assert_eq!(red(5, 5), 0);
+    // upright, a whole pixel to a canvas pixel, on whole pixels: as sharp as ever
+    let upright = View::centred(procraft_engine::geom::Vec2::new(50.0, 50.0), 1.0, 0.0, (400, 200)).unwrap();
+    let px = shown_on_black(&gpu, &upright);
+    assert!(px.chunks(4).all(|p| p[0] == 0 || p[0] == 255), "an upright canvas's edge stays hard");
+    assert_eq!(pixel(&px, 400, 150, 50)[0], 255);
+    assert_eq!(pixel(&px, 400, 249, 149)[0], 255);
+    assert_eq!(pixel(&px, 400, 250, 150)[0], 0);
+    assert_eq!(pixel(&px, 400, 149, 49)[0], 0);
+}
+
 /// What the glass over the bars costs a frame: the canvas shown with and without it, at the
 /// tablet's size, waiting for the GPU each time. Run with `--ignored --nocapture`.
 #[test]

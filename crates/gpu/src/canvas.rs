@@ -845,6 +845,9 @@ struct DisplayUniform {
     c0: [f32; 4],
     c1: [f32; 4],
     c2: [f32; 4],
+    /// How far the quad reaches past the canvas's sides (its 0..1 across and down), then 1 to
+    /// smooth the edge over that; all 0 for a quad drawn exactly.
+    edge: [f32; 4],
 }
 
 impl DisplayUniform {
@@ -854,9 +857,24 @@ impl DisplayUniform {
         let row = |r: [f32; 3], on: f32| [r[0], r[1], r[2], on];
         let table = if lut { 1.0 } else { 0.0 };
         match convert.filter(|_| !lut) {
-            Some([r0, r1, r2]) => DisplayUniform { m0, m1, c0: row(r0, 1.0), c1: row(r1, 0.0), c2: row(r2, 0.0) },
-            None => DisplayUniform { m0, m1, c0: [0.0; 4], c1: [0.0, 0.0, 0.0, table], c2: [0.0; 4] },
+            Some([r0, r1, r2]) => {
+                DisplayUniform { m0, m1, c0: row(r0, 1.0), c1: row(r1, 0.0), c2: row(r2, 0.0), edge: [0.0; 4] }
+            }
+            None => DisplayUniform { m0, m1, c0: [0.0; 4], c1: [0.0, 0.0, 0.0, table], c2: [0.0; 4], edge: [0.0; 4] },
         }
+    }
+
+    /// With the canvas's edge smoothed, for the map `m` (the unit square to clip space) onto a
+    /// target `size` pixels: the quad reaches a target pixel past each side, and each pixel along
+    /// the edge shows as much of the canvas as covers it, not all or none (steps along a turned
+    /// canvas's sides).
+    fn smoothed(mut self, m: &Affine, size: (f32, f32)) -> DisplayUniform {
+        let across = (m.a * size.0 / 2.0).hypot(m.b * size.1 / 2.0);
+        let down = (m.c * size.0 / 2.0).hypot(m.d * size.1 / 2.0);
+        if across.is_finite() && down.is_finite() && across > 0.0 && down > 0.0 {
+            self.edge = [1.0 / across, 1.0 / down, 1.0, 0.0];
+        }
+        self
     }
 }
 
@@ -7059,12 +7077,15 @@ impl Canvas {
         let to_clip = Affine { a: 2.0 / w, b: 0.0, c: 0.0, d: -2.0 / h, e: -1.0, f: 1.0 };
         let unit_to_canvas = Affine { a: self.width as f32, b: 0.0, c: 0.0, d: self.height as f32, e: 0.0, f: 0.0 };
         let m = unit_to_canvas.then(target.to_screen).then(to_clip);
-        let offset = uniforms.push(&DisplayUniform::new(
-            [m.a, m.b, m.c, m.d],
-            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
-            target.convert,
-            target.lut.is_some(),
-        ));
+        let offset = uniforms.push(
+            &DisplayUniform::new(
+                [m.a, m.b, m.c, m.d],
+                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
+                target.convert,
+                target.lut.is_some(),
+            )
+            .smoothed(&m, (w, h)),
+        );
         let surround = target.surround.map(|c| if srgb { srgb_to_linear(c) } else { c });
         let clear =
             wgpu::Color { r: f64::from(surround[0]), g: f64::from(surround[1]), b: f64::from(surround[2]), a: 1.0 };
@@ -7381,12 +7402,15 @@ impl Canvas {
         let unit_to_canvas = Affine { a: self.width as f32, b: 0.0, c: 0.0, d: self.height as f32, e: 0.0, f: 0.0 };
         let shrink = Affine { a: 1.0 / k, b: 0.0, c: 0.0, d: 1.0 / k, e: 0.0, f: 0.0 };
         let m = unit_to_canvas.then(target.to_screen).then(shrink).then(to_clip);
-        let offset = uniforms.push(&DisplayUniform::new(
-            [m.a, m.b, m.c, m.d],
-            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
-            target.convert,
-            target.lut.is_some(),
-        ));
+        let offset = uniforms.push(
+            &DisplayUniform::new(
+                [m.a, m.b, m.c, m.d],
+                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
+                target.convert,
+                target.lut.is_some(),
+            )
+            .smoothed(&m, (w, h)),
+        );
         let surround = target.surround.map(|c| if srgb { srgb_to_linear(c) } else { c });
         let clear =
             wgpu::Color { r: f64::from(surround[0]), g: f64::from(surround[1]), b: f64::from(surround[2]), a: 1.0 };
