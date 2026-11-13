@@ -25,6 +25,7 @@ mod clipboard;
 mod colour;
 mod colour_blob;
 mod colour_drag;
+mod colour_models;
 mod crop;
 mod crop_edit;
 mod device;
@@ -122,6 +123,14 @@ pub use colour::{
 };
 pub use colour_blob::{BlobOutline, BlobShape, ColourBlob};
 pub use colour_drag::{ColourDrag, DragStep};
+pub use colour_models::{
+    ColourModel, ColourPlace, ColourTrack, MODEL_SQUARE, OKLAB_AB, colour_model_along, colour_model_disc_key,
+    colour_model_disc_pick, colour_model_disc_picture, colour_model_disc_point, colour_model_hsv, colour_model_key,
+    colour_model_label, colour_model_letters, colour_model_of_key, colour_model_pure, colour_model_rgb,
+    colour_model_ring, colour_model_ring_hue, colour_model_ring_turn, colour_model_slid, colour_model_square_picture,
+    colour_model_square_side, colour_model_tracks, colour_models, oklab_of, oklab_of_hsv, oklab_slid, oklab_to_rgb,
+    oklab_tracks, oklab_value_slid, oklab_value_tracks,
+};
 pub use crop_edit::CropShown;
 pub use device::keep_device;
 pub use frame::{configure, screen_profile};

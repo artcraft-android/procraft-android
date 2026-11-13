@@ -4,7 +4,7 @@
 //! curve.
 
 /// Hue, saturation and brightness (0..1) as RGB values (0..1).
-fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
+pub(crate) fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
     let h = h.rem_euclid(1.0) * 6.0;
     let c = v * s;
     let x = c * (1.0 - (h % 2.0 - 1.0).abs());
@@ -21,7 +21,7 @@ fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
 }
 
 /// RGB values (0..1) as hue, saturation and brightness (0..1).
-fn rgb_to_hsv([r, g, b]: [f32; 3]) -> [f32; 3] {
+pub(crate) fn rgb_to_hsv([r, g, b]: [f32; 3]) -> [f32; 3] {
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
     let d = max - min;
@@ -45,7 +45,7 @@ fn to_encoded(c: f32) -> f32 {
     if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
-fn byte(c: f32) -> u32 {
+pub(crate) fn byte(c: f32) -> u32 {
     (c.clamp(0.0, 1.0) * 255.0).round() as u32
 }
 
@@ -136,7 +136,7 @@ fn geometry(
 
 /// A `side` pixels square picture (RGBA) made a row at a time (`row` given its number and its
 /// pixels, clear), the rows side by side: the pickers remake theirs as a slider is dragged.
-fn picture_rows(side: usize, row: impl Fn(usize, &mut [[u8; 4]]) + Sync) -> Vec<u8> {
+pub(crate) fn picture_rows(side: usize, row: impl Fn(usize, &mut [[u8; 4]]) + Sync) -> Vec<u8> {
     let rows: Vec<usize> = (0..side).collect();
     let made = procraft_engine::par::side_by_side(&rows, |&y| {
         let mut line = vec![[0u8; 4]; side];
