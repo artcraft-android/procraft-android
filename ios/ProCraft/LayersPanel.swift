@@ -18,6 +18,13 @@ private let twoLetterBlends: Set<String> = ["Darken", "Shade", "Lighten", "Subtr
 /// Swiping a row left shows these buttons, each this wide, this far apart.
 private let swipeButton: CGFloat = 82
 private let swipeGap: CGFloat = 2
+/// The badge behind a plugin's layer's glyph on its thumbnail.
+private let pluginBadgeBehind = Color(argb: 0x9900_0000)
+/// A kind's badge as a menu row's glyph: its box 1.6 times a thumbnail's (18 by 14), its lines as
+/// thick as the menu glyphs'.
+private let menuBadgeWidth: CGFloat = 28.8
+private let menuBadgeHeight: CGFloat = 22.4
+private let menuBadgeLine: CGFloat = 2.4
 private let swipeFill = Color(argb: 0xFF3F_3F3F)
 private let swipeInk = Color(argb: 0xFFC1_C1C1)
 private let swipeDelete = Color(argb: 0xFFFF_473D)
@@ -64,6 +71,8 @@ private final class LayersUi {
     var renaming: UInt64?
     var swiped: UInt64?
     var titleMenu = false
+    /// The plus's menu, with the kinds of layer the plugins on add.
+    var addKinds: [PluginKind]?
     /// A row held and dragged, and how far.
     var dragId: UInt64?
     var dragOffset: CGFloat = 0
@@ -153,7 +162,15 @@ struct LayersPanel: View {
                 PcIconView(PcIcons.plusMedium, size: 41, color: Pc.panelGlyph)
                     .frame(width: 40, height: 41)
                     .contentShape(Rectangle())
-                    .onTapGesture { model.addLayer() }
+                    .onTapGesture {
+                        // with plugins' kinds of layer on, a menu of them under a plain layer
+                        let kinds = model.layerKinds()
+                        if kinds.isEmpty {
+                            model.addLayer()
+                        } else {
+                            withAnimation(Motion.menuOpen) { ui.addKinds = kinds }
+                        }
+                    }
                     .padding(.top, 12)
             }
             ScrollViewReader { reader in
@@ -205,6 +222,8 @@ struct LayersPanel: View {
                 ui.changeBlend(current.id, shown: shown)
             case "menu":
                 ui.titleMenu = true
+            case "add":
+                ui.addKinds = model.layerKinds()
             case "rename":
                 ui.renaming = current.id
             default:
@@ -579,8 +598,35 @@ private struct LayersMenus: View {
     private func closeAll() {
         withAnimation(Motion.menuClose) {
             ui.titleMenu = false
+            ui.addKinds = nil
             ui.options = nil
         }
+    }
+
+    /// The plus with plugins' kinds of layer on: a plain layer, or one of each kind, named as the
+    /// plugin names it beside its badge, as its layers' thumbnails show it (a plug when it draws
+    /// none). It hangs from the plus, their right edges in line.
+    private func addMenu(_ kinds: [PluginKind]) -> some View {
+        // the plus's lower right corner: the header's end in from the right, its 41 under the
+        // header's first 12 (the header starting under the arrow)
+        let plus = CGPoint(x: layersWidth - 18, y: Pc.arrowHeight + 12 + 41)
+        return GlassMenu(overPanel: true) {
+            MenuRow(icon: PcIcons.menuNewLayer, label: "Layer") {
+                closeAll()
+                model.addLayer()
+            }
+            ForEach(kinds, id: \.key) { kind in
+                GlyphMenuRow(label: kind.label, action: {
+                    closeAll()
+                    model.addPluginLayer(kind.key)
+                }) {
+                    PluginBadgeView(badge: pluginKindBadge(kind: kind), ink: Pc.menuInk, width: menuBadgeLine)
+                        .frame(width: menuBadgeWidth, height: menuBadgeHeight)
+                }
+            }
+        }
+        .offset(x: plus.x - glassMenuWidth, y: plus.y)
+        .menuTransition(.topTrailing)
     }
 
     var body: some View {
@@ -588,6 +634,10 @@ private struct LayersMenus: View {
             if ui.titleMenu {
                 MenuDismissal { closeAll() }
                 titleMenu
+            }
+            if let kinds = ui.addKinds {
+                MenuDismissal { closeAll() }
+                addMenu(kinds)
             }
             if let id = ui.options, let l = model.layers.first(where: { $0.id == id }), let row = ui.rows[id] {
                 MenuDismissal { closeAll() }
@@ -687,6 +737,10 @@ private struct LayerOptionsMenu: View {
             model.text.edit(l)
         case .rasterize:
             model.rasterize(l)
+        case .recolour:
+            model.restyleStrokes(l, colour: true)
+        case .applyBrush:
+            model.restyleStrokes(l, colour: false)
         case .mergeDown:
             model.mergeDown(l)
         case .combineDown:
@@ -1064,6 +1118,17 @@ private struct Thumb: View {
             }
         }
         .frame(width: 93, height: 61)
+        .overlay(alignment: .bottomTrailing) {
+            // a plugin's layer: its kind's badge in its corner, as its manifest draws it
+            if let badge = layer.pluginBadge {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4, style: .circular).fill(pluginBadgeBehind)
+                    PluginBadgeView(badge: badge, ink: .white, width: 1.5)
+                }
+                .frame(width: 18, height: 14)
+                .padding(3)
+            }
+        }
         .clipShape(shape)
     }
 }

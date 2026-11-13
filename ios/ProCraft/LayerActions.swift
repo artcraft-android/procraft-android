@@ -141,7 +141,28 @@ extension CanvasModel {
     func rasterize(_ l: LayerInfo) {
         _ = session.rasterizeLayer(id: l.id)
         refresh()
-        showNotice("Text rasterized", warning: true)
+        showNotice(l.text ? "Text rasterized" : "Layer rasterized", warning: true)
+    }
+
+    /// A plugin's layer `l`: the strokes the selection takes (every one with nothing selected)
+    /// given the paint colour (`colour`), or the paint brush with its size and opacity, as strokes.
+    func restyleStrokes(_ l: LayerInfo, colour: Bool) {
+        _ = session.selectLayer(id: l.id)
+        _ = session.restylePluginItems(colour: colour, brush: !colour, size: !colour, opacity: !colour)
+        refresh()
+    }
+
+    /// The kinds of layer the plugins on add, for the Layers panel's plus.
+    func layerKinds() -> [PluginKind] {
+        PluginsModel.shared.store.layerKinds()
+    }
+
+    /// A new layer of a kind a plugin adds (`kind`, as the plugin names it), over the current one.
+    func addPluginLayer(_ kind: String) {
+        if session.addPluginLayer(kind: kind) == 0 {
+            noRoomForLayers()
+        }
+        refresh()
     }
 
     // MARK: the picked layers

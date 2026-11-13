@@ -67,6 +67,78 @@ struct MenuRow: View {
     }
 }
 
+/// A menu row whose glyph `glyph` draws, centred where a row's icon (a 40 frame) sits.
+struct GlyphMenuRow<Glyph: View>: View {
+    let label: String
+    var ink: Color?
+    let action: () -> Void
+    @ViewBuilder let glyph: () -> Glyph
+
+    var body: some View {
+        let ink = ink ?? Pc.menuInk
+        HStack(spacing: 0) {
+            glyph()
+                .frame(width: 40, height: 40)
+                .padding(.leading, 9.5)
+            Text(verbatim: label)
+                .font(.system(size: 17))
+                .foregroundStyle(ink)
+                .lineLimit(1)
+                .padding(.leading, 2.5)
+            Spacer(minLength: 0)
+        }
+        .frame(height: 40)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
+    }
+}
+
+/// A plugin's badge: its lines and dots in `ink` over the whole of its frame (0 to 1 across and
+/// down), its lines `width` thick, its dots squares twice that across. A line's points after its
+/// first go on as curves (two control points and an end) while it is curved and three are left,
+/// else as straight lines.
+struct PluginBadgeView: View {
+    let badge: PluginBadge
+    let ink: Color
+    let width: CGFloat
+
+    var body: some View {
+        Canvas { context, size in
+            let w = size.width
+            let h = size.height
+            for line in badge.lines {
+                let p = line.points.map { CGFloat($0) }
+                guard p.count >= 4 else { continue }
+                var path = Path()
+                path.move(to: CGPoint(x: w * p[0], y: h * p[1]))
+                var i = 2
+                while i + 1 < p.count {
+                    if line.curved, i + 5 < p.count {
+                        path.addCurve(
+                            to: CGPoint(x: w * p[i + 4], y: h * p[i + 5]),
+                            control1: CGPoint(x: w * p[i], y: h * p[i + 1]),
+                            control2: CGPoint(x: w * p[i + 2], y: h * p[i + 3])
+                        )
+                        i += 6
+                    } else {
+                        path.addLine(to: CGPoint(x: w * p[i], y: h * p[i + 1]))
+                        i += 2
+                    }
+                }
+                context.stroke(path, with: .color(ink), lineWidth: width)
+            }
+            let node = width * 2
+            var i = 0
+            while i + 1 < badge.dots.count {
+                let x = w * CGFloat(badge.dots[i])
+                let y = h * CGFloat(badge.dots[i + 1])
+                context.fill(Path(CGRect(x: x - node / 2, y: y - node / 2, width: node, height: node)), with: .color(ink))
+                i += 2
+            }
+        }
+    }
+}
+
 /// The line between a menu's groups of rows.
 struct MenuLine: View {
     var gap: CGFloat = 10
