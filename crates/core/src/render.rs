@@ -29,14 +29,29 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
     let from = if own.is_none() && kept.is_none() { crate::device::first_backend() } else { 0 };
     // until the canvas first shows, a crash counts against the device's backend
     let mut showing = crate::device::Showing::begin();
-    let instance = own
+    let mut instance = own
         .clone()
         .or_else(|| kept.as_ref().map(|g| g.instance.clone()))
         .or_else(|| Gpu::instance_after(from))
         .unwrap_or_else(Gpu::instance);
-    let mut surface = match crate::window::create_surface(&instance, &window) {
-        Ok(s) => s,
-        Err(e) => return fail(&shared, e),
+    // while a device is still to be made, a backend that can't make the window's surface gives way
+    // to the next (one whose driver can draw offscreen but not on a window would otherwise leave
+    // the canvas blank)
+    let count = Gpu::backend_count().max(1);
+    let choosing = own.is_none() && kept.is_none();
+    let mut tries = 0;
+    let mut surface = loop {
+        match crate::window::create_surface(&instance, &window) {
+            Ok(s) => break s,
+            Err(e) => {
+                let next =
+                    (choosing && tries + 1 < count).then(|| Gpu::instance_after((from + tries + 1) % count)).flatten();
+                let Some(next) = next else { return fail(&shared, e) };
+                log::warn!("the window's surface: {e}; trying the next backend");
+                tries += 1;
+                instance = next;
+            }
+        }
     };
     let device = if own.is_some() {
         None
@@ -45,9 +60,6 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
     } else {
         // the first instance, from the backend the app starts on, that makes a device for the
         // window (see `Gpu::instance_after`, `device::first_backend`)
-        let count = Gpu::backend_count().max(1);
-        let mut instance = instance;
-        let mut tries = 0;
         loop {
             let backend = (from + tries) % count;
             crate::device::trying(backend);
@@ -59,14 +71,20 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
                     break Some(gpu);
                 }
                 Err(e) => {
-                    tries += 1;
-                    let next = if tries < count { Gpu::instance_after((from + tries) % count) } else { None };
-                    let Some(next) = next else { return fail(&shared, e.to_string()) };
-                    log::warn!("{e}; trying the next backend");
-                    surface = match crate::window::create_surface(&next, &window) {
-                        Ok(s) => s,
-                        Err(e) => return fail(&shared, e),
+                    // the next backend that makes the window's surface, if any is left
+                    let mut why = e.to_string();
+                    let made = loop {
+                        tries += 1;
+                        let next = if tries < count { Gpu::instance_after((from + tries) % count) } else { None };
+                        let Some(next) = next else { break None };
+                        log::warn!("{why}; trying the next backend");
+                        match crate::window::create_surface(&next, &window) {
+                            Ok(s) => break Some((next, s)),
+                            Err(e) => why = format!("the window's surface: {e}"),
+                        }
                     };
+                    let Some((next, s)) = made else { return fail(&shared, why) };
+                    surface = s;
                     instance = next;
                 }
             }
