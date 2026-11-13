@@ -602,6 +602,33 @@ impl State {
         }
     }
 
+    /// The brush `tool` uses, whole, as an item on a plugin's layer keeps it (see
+    /// `plugin_layers.rs`): as the library keeps it, the brush it came from among those the app comes
+    /// with and every setting changed from there, its own pictures in it, with only what drawing
+    /// takes (no preview, maker, notches, slider places or reset point).
+    pub(crate) fn brush_snapshot(&self, tool: crate::ToolKind) -> Vec<u8> {
+        let (set, index) = self.brush_ref(tool);
+        let origin = self.library.get(set).and_then(|s| s.origins.get(index)).copied().flatten();
+        let brush = self.brush(tool);
+        let bare = |b: &Brush| Brush {
+            thumbnail: None,
+            author: None,
+            reset_point: None,
+            notches: Notches::default(),
+            sliders: [None; 3],
+            secondary: None,
+            ..b.clone()
+        };
+        let mut drawn = bare(brush);
+        drawn.secondary = brush.secondary.as_deref().map(|s| Box::new(bare(s)));
+        serde_json::to_vec(&self.saved_brush(&drawn, origin, Images::Whole)).unwrap_or_default()
+    }
+
+    /// The brush a [`State::brush_snapshot`] holds, if it holds one.
+    pub(crate) fn brush_from_snapshot(&self, bytes: &[u8]) -> Option<Brush> {
+        serde_json::from_slice(bytes).ok().map(|saved| self.restored(saved))
+    }
+
     /// A kept brush made again.
     fn restored(&self, b: SavedBrush) -> Brush {
         self.restored_with(b, &std::collections::HashMap::new())

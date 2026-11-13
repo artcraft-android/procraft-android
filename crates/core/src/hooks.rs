@@ -30,6 +30,8 @@ struct OnHook {
     /// On an event's hook: a copy of its code of its own for them, so that what an event calls in
     /// the app never waits on this one (its other hooks' copy).
     events: Option<Shared>,
+    /// The kinds of layer it adds (keys `<id>.<key>`), in its manifest's order.
+    layer_kinds: Vec<crate::PluginKind>,
 }
 
 #[derive(Default)]
@@ -455,7 +457,10 @@ impl Hooks {
         let at = working.on.partition_point(|p| p.id < id);
         let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
         let running = Arc::new(Mutex::new(running));
-        working.on.insert(at, OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None });
+        working.on.insert(
+            at,
+            OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None, layer_kinds: Vec::new() },
+        );
         self.rehook(&working);
     }
 
@@ -501,6 +506,43 @@ impl Hooks {
             None,
             |running, got| if got.is_some() { Ok(got) } else { running.picker_point(s, v) },
         )
+    }
+
+    /// The kinds of layer `id` adds, in its manifest's order.
+    pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.layer_kinds = kinds;
+        }
+    }
+
+    /// What a plugin on calls layers of `kind` (`<id>.<key>`), if one adds them.
+    pub(crate) fn layer_kind_label(&self, kind: &str) -> Option<String> {
+        if !self.has(Hook::Layers) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).map(|k| k.label.clone()))
+    }
+
+    /// `work` done by the plugin on that adds layers of `kind`, handed its code and the kind's place
+    /// among its kinds: none if no plugin on adds them, or it stopped (it goes off, and says why).
+    pub(crate) fn on_layer<T>(
+        &self,
+        kind: &str,
+        work: impl FnOnce(&mut Running, usize) -> Result<T, Stop>,
+    ) -> Option<T> {
+        if !self.has(Hook::Layers) {
+            return None;
+        }
+        let (id, running, index) = {
+            let working = self.working();
+            working.on.iter().find_map(|p| {
+                let index = p.layer_kinds.iter().position(|k| k.key == kind)?;
+                Some((p.id.clone(), Arc::clone(&p.running), index))
+            })?
+        };
+        let done = work(&mut at_work(&running), index);
+        done.inspect_err(|stop| self.stopped(&id, *stop)).ok()
     }
 
     /// The keys of `id`'s rows in the brush studio, in their order.

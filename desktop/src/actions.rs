@@ -1980,6 +1980,7 @@ mod tests {
             brush_controls: Vec::new(),
             actions: Vec::new(),
             kinds: Vec::new(),
+            layer_kinds: Vec::new(),
             permissions: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),

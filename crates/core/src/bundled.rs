@@ -30,6 +30,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("touch-offset", include_bytes!("../bundled-plugins/touch-offset.procraft-plugin")),
     ("tweening", include_bytes!("../bundled-plugins/tweening.procraft-plugin")),
     ("vector-canvas", include_bytes!("../bundled-plugins/vector-canvas.procraft-plugin")),
+    ("vector-layers", include_bytes!("../bundled-plugins/vector-layers.procraft-plugin")),
 ];
 
 #[cfg(test)]

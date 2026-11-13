@@ -69,7 +69,13 @@ impl CanvasSession {
         let (Some(old), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return false };
         let (sw, sh) = (st.doc.width(), st.doc.height());
         let c = crop([x, y, width, height], angle, resample_to.then_some((new_width, new_height)));
-        let doc = st.doc.resized(c.width, c.height);
+        let mut doc = st.doc.resized(c.width, c.height);
+        // plugins' layers' items stay where they were drawn: cropped, their layers become ordinary
+        // ones (undoing the crop brings them back)
+        let plugin_layers: Vec<_> = doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
+        for id in plugin_layers {
+            doc.rasterize(id);
+        }
         let ids: Vec<_> = st.doc.pixel_layer_ids().collect();
         // the old canvas stays for undo, so this is all more: refused while there is still room,
         // not left to the system to find out

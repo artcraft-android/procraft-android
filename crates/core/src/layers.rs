@@ -32,6 +32,9 @@ pub struct LayerInfo {
     pub collapsed: bool,
     /// A text layer, its text still editable.
     pub text: bool,
+    /// The kind of layer a plugin adds (`<id>.<key>`), if it is one: its strokes are kept as items
+    /// too. Shown locked while its plugin is off.
+    pub plugin_kind: Option<String>,
     /// How many groups it is inside.
     pub depth: u32,
     /// Left out of the picture while another layer is shown alone (solo visibility): its box
@@ -157,8 +160,10 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
         LayerType::Paint => {
             row(O::Select, "Select", None);
             row(O::Copy, "Copy", None);
-            // a text layer's pixels come from its text: nothing to fill, clear, lock or invert
-            if !l.text && unlocked {
+            // a text layer's pixels come from its text, a plugin's layer's from its items: nothing to
+            // fill, clear, lock or invert
+            let drawn_from_data = l.text || l.plugin_kind.is_some();
+            if !drawn_from_data && unlocked {
                 row(O::Fill, "Fill Layer", None);
                 row(O::Clear, "Clear", None);
                 row(O::AlphaLock, "Alpha Lock", Some(l.alpha_lock));
@@ -173,6 +178,13 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
             if l.text {
                 if unlocked {
                     row(O::EditText, "Edit Text", None);
+                    row(O::Rasterize, "Rasterize", None);
+                }
+            } else if l.plugin_kind.is_some() {
+                if guided || l.assisted {
+                    row(O::DrawingAssist, "Drawing Assist", Some(l.assisted));
+                }
+                if unlocked {
                     row(O::Rasterize, "Rasterize", None);
                 }
             } else {
@@ -359,7 +371,8 @@ impl CanvasSession {
                 blend: l.blend.id(),
                 alpha_lock: l.alpha_lock,
                 clipped: l.clipped,
-                locked: st.doc.is_locked(l.id),
+                // a plugin's layer its plugin can't take strokes on (off, say) shows locked
+                locked: st.doc.is_locked(l.id) || st.plugin_layer_off(l.id),
                 current: l.id == current,
                 picked: st.doc.is_picked(l.id),
                 reference: l.reference,
@@ -376,6 +389,7 @@ impl CanvasSession {
                 },
                 collapsed: l.collapsed,
                 text: l.text.is_some(),
+                plugin_kind: l.plugin.as_ref().map(|p| p.kind.clone()),
                 depth: u32::try_from(st.doc.depth(l.id)).unwrap_or(u32::MAX),
                 soloed_out: st.doc.soloed_out(l.id),
                 // as measured, not onto a locked layer: both left out of its menu then

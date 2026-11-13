@@ -347,7 +347,7 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let current = st.doc.current();
-        if st.doc.layer(current).is_none() || st.doc.is_locked(current) {
+        if st.doc.layer(current).is_none_or(|l| l.plugin.is_some()) || st.doc.is_locked(current) {
             return;
         }
         let Some(mask) = st.selection.clone() else { return };

@@ -754,7 +754,7 @@ const ROW_CHOSEN: &str = "deselect material layer";
 
 /// The step undone (true) or redone by work on `canvas`, from its next undo and redo steps
 /// `before` it.
-fn stepped(before: (Option<u64>, Option<u64>), canvas: &Canvas) -> Option<(u64, bool)> {
+pub(crate) fn stepped(before: (Option<u64>, Option<u64>), canvas: &Canvas) -> Option<(u64, bool)> {
     match (before, (canvas.undo_step(), canvas.redo_step())) {
         ((Some(s), _), (u, Some(r))) if r == s && u != Some(s) => Some((s, true)),
         ((_, Some(s)), (Some(u), r)) if u == s && r != Some(s) => Some((s, false)),

@@ -343,7 +343,7 @@ impl CanvasSession {
         st.finish_stroke();
         st.settle();
         let current = st.doc.current();
-        let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && l.text.is_none();
+        let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && !l.drawn_from_data();
         // with layers picked, every paint layer chosen (those in a chosen group too) moves
         let chosen = st.doc.chosen();
         let targets: Vec<LayerId> = if chosen.len() > 1 {
@@ -423,9 +423,11 @@ impl CanvasSession {
     /// the layer is empty.
     pub fn transform_refusal(&self) -> String {
         let st = self.shared.lock();
-        let text = st.doc.layer(st.doc.current()).is_some_and(|l| l.text.is_some());
-        if text {
+        let current = st.doc.layer(st.doc.current());
+        if current.is_some_and(|l| l.text.is_some()) {
             "Rasterize the text to transform it"
+        } else if current.is_some_and(|l| l.plugin.is_some()) {
+            "Rasterize the layer to transform it"
         } else if st.selection.is_some() {
             "Nothing is selected on this layer"
         } else {

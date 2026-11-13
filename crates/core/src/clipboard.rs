@@ -273,10 +273,24 @@ impl CanvasSession {
         st.settle();
         st.flush();
         let ids: Vec<LayerId> = st.doc.layer_ids().collect();
+        if st.canvas.is_none() {
+            return;
+        }
+        // plugins' layers' items stay where they were drawn: flipped, their layers become ordinary
+        // ones, in the same step
+        let before = st.doc.clone();
+        let plugin_layers: Vec<LayerId> = st.doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
+        for id in &plugin_layers {
+            st.doc.rasterize(*id);
+        }
         let Some(canvas) = st.canvas.as_mut() else { return };
         canvas.name_next_step(if horizontal { "flip canvas horizontally" } else { "flip canvas vertically" });
         // mirrored on the GPU, nothing read back
-        canvas.flip_layers(ids, horizontal);
+        if plugin_layers.is_empty() {
+            canvas.flip_layers(ids, horizontal);
+        } else {
+            canvas.flip_layers_and_document(ids, horizontal, before);
+        }
         st.revision += 1;
         self.shared.frame(st);
     }

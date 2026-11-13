@@ -23,7 +23,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 2;
+const INTERFACE: u32 = 3;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -127,6 +127,8 @@ pub(crate) struct Manifest {
     pub actions: Vec<crate::plugins::PluginAction>,
     /// The kinds of artwork it makes.
     pub kinds: Vec<crate::plugin_canvas::PluginKind>,
+    /// The kinds of layer it adds (interface 3).
+    pub layer_kinds: Vec<crate::plugin_canvas::PluginKind>,
     pub permissions: Vec<crate::plugin_commands::PluginPermission>,
     files: Vec<Listed>,
 }
@@ -192,6 +194,8 @@ struct RawManifest {
     actions: Vec<RawAction>,
     #[serde(default)]
     kinds: Vec<RawKind>,
+    #[serde(default)]
+    layer_kinds: Vec<RawKind>,
 }
 
 /// A kind of artwork a plugin makes: its key and its name in the gallery's menu.
@@ -554,8 +558,9 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
             }
             hooks.push(hook);
         }
-        // code steps in somewhere, does something when tapped, or makes artworks of its own
-        if hooks.is_empty() && raw.actions.is_empty() && raw.kinds.is_empty() {
+        // code steps in somewhere, does something when tapped, or makes artworks or layers of its
+        // own
+        if hooks.is_empty() && raw.actions.is_empty() && raw.kinds.is_empty() && raw.layer_kinds.is_empty() {
             return Err(Refusal::Described);
         }
     } else if !raw.hooks.is_empty() {
@@ -598,6 +603,22 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         .into_iter()
         .map(|k| crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label })
         .collect();
+    // kinds of layer, for code written to interface 3 or later: on the layers hook while it has any
+    let layered = has(PluginPart::Hooks) && compat.interface.is_some_and(|interface| interface >= 3);
+    let mut layer_keys = HashSet::new();
+    let layer_kinds_fit = raw.layer_kinds.len() <= MOST_KINDS
+        && raw.layer_kinds.iter().all(|k| valid_key(&k.key) && plain(&k.label) && layer_keys.insert(k.key.clone()));
+    if !layer_kinds_fit || (!layered && !raw.layer_kinds.is_empty()) {
+        return Err(Refusal::Described);
+    }
+    let layer_kinds: Vec<crate::plugin_canvas::PluginKind> = raw
+        .layer_kinds
+        .into_iter()
+        .map(|k| crate::plugin_canvas::PluginKind { key: format!("{id}.{}", k.key), label: k.label })
+        .collect();
+    if !layer_kinds.is_empty() {
+        hooks.push(Hook::Layers);
+    }
     // a place this app doesn't have is for a newer one
     let mut actions = Vec::new();
     for a in raw.actions {
@@ -620,6 +641,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         brush_controls,
         actions,
         kinds,
+        layer_kinds,
         permissions,
         files,
     })
@@ -1774,6 +1796,35 @@ pub(crate) mod tests {
         manifest["compat"]["procraft"]["interface"] = json!(2);
         manifest["kinds"] = json!([{ "key": "dots", "label": "Dots" }]);
         assert_eq!(refusal(&a_coded_file(&manifest, &module)), Refusal::Code);
+    }
+
+    #[test]
+    fn a_plugin_written_to_interface_3_lists_the_kinds_of_layer_it_adds() {
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-layers").unwrap();
+        let package = read_package(file).unwrap();
+        let id = "io.github.artcraftandroid.vector-layers";
+        let kind = crate::plugin_canvas::PluginKind { key: format!("{id}.vector"), label: "Vector layer".to_owned() };
+        assert_eq!(package.manifest.layer_kinds, [kind]);
+        assert_eq!(package.manifest.hooks, [Hook::Layers], "on the layers hook, not named");
+        let module = package.file(MODULE).unwrap().to_vec();
+        let manifest: Value = serde_json::from_slice(package.manifest_text()).unwrap();
+        let of = |path: &str, value: Value| refusal(&a_coded_file(&with(manifest.clone(), path, value), &module));
+        // an older interface has no kinds of layer; each key once, words to show, not too many
+        assert_eq!(of("/compat/procraft/interface", json!(2)), Refusal::Described);
+        let twice = json!([{ "key": "a", "label": "A" }, { "key": "a", "label": "B" }]);
+        assert_eq!(of("/layer_kinds", twice), Refusal::Described);
+        assert_eq!(of("/layer_kinds", json!([{ "key": "a", "label": " " }])), Refusal::Described);
+        let many: Vec<Value> = (0..5).map(|i| json!({ "key": format!("k{i}"), "label": "K" })).collect();
+        assert_eq!(of("/layer_kinds", json!(many)), Refusal::Described);
+        // the layers hook can't be named, and code without its calls can't say it adds any
+        assert_eq!(of("/hooks", json!(["layers"])), Refusal::Newer);
+        let other = a_module();
+        let mut lacking = coded("org.example.plugin", &other);
+        lacking["compat"]["procraft"]["interface"] = json!(3);
+        lacking["layer_kinds"] = json!([{ "key": "vector", "label": "Vector layer" }]);
+        assert_eq!(refusal(&a_coded_file(&lacking, &other)), Refusal::Code);
+        // and the import screen says what it lets the plugin do
+        assert!(crate::Plugins::new().inspect(file.to_vec()).message.contains("kinds of layer"));
     }
 
     #[test]

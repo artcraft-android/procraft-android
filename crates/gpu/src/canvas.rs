@@ -1459,6 +1459,8 @@ enum Op {
     Flip {
         layers: Vec<LayerId>,
         horizontal: bool,
+        /// The document as it was, when that changed too.
+        before: Option<Box<Document>>,
     },
     /// Layers' pixels are replaced inside a rectangle each (premultiplied RGBA8, the rectangle's
     /// rows), together as one undo step keeping those rectangles, with the document as it was
@@ -3068,7 +3070,15 @@ impl Canvas {
     /// GPU, nothing read back.
     pub fn flip_layers(&mut self, layers: Vec<LayerId>, horizontal: bool) {
         self.end_stroke();
-        self.ops.push(Op::Flip { layers, horizontal });
+        self.ops.push(Op::Flip { layers, horizontal, before: None });
+    }
+
+    /// [`Canvas::flip_layers`], changing the document together: one undo step back to the layers
+    /// as they were and to `before` (the document as it was).
+    pub fn flip_layers_and_document(&mut self, layers: Vec<LayerId>, horizontal: bool, before: Document) {
+        self.end_stroke();
+        self.ops.push(Op::Flip { layers, horizontal, before: Some(Box::new(before)) });
+        self.invalidate();
     }
 
     /// Replaces several layers' pixels at once, as one undo step; pictures of the wrong size are
@@ -4357,12 +4367,13 @@ impl Canvas {
                     }
                     self.dirty = self.full();
                 }
-                Op::Flip { layers, horizontal } => {
-                    // undone by flipping again: nothing kept
+                Op::Flip { layers, horizontal, before } => {
+                    // undone by flipping again: nothing kept (but the document as it was, if it
+                    // changed too)
                     let step = Step {
                         made: 0,
                         name: None,
-                        doc: None,
+                        doc: before,
                         pixels: Vec::new(),
                         selection: None,
                         flip: Some((layers.clone(), horizontal)),

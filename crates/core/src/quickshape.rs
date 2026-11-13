@@ -628,7 +628,8 @@ impl CanvasSession {
     pub fn quickshape_hold(&self) -> Option<QuickShapeInfo> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if st.stroke.is_none() || st.shape.is_some() {
+        // (a plugin's layer keeps strokes as drawn: a shape made of one is for later)
+        if st.stroke.is_none() || st.shape.is_some() || st.recording.is_some() {
             return None;
         }
         // fitted to the stroke's line as stabilisation and motion filtering smoothed it
@@ -657,6 +658,9 @@ impl CanvasSession {
         }
         st.flush();
         let last = st.last_stroke.take()?;
+        if st.plugin_layer_kind(last.layer).is_some() {
+            return None;
+        }
         let line = st.without_end_hook(last.shape_line(&last.samples, &last.drawn));
         let canvas = st.canvas.as_mut()?;
         if canvas.steps_made() != last.steps || canvas.can_redo() {

@@ -213,6 +213,8 @@ pub struct PluginInfo {
     pub actions: Vec<PluginAction>,
     /// The kinds of artwork it makes, while it is on (the gallery's + lists them).
     pub kinds: Vec<crate::PluginKind>,
+    /// The kinds of layer it adds, while it is on (the Layers panel's + lists them).
+    pub layer_kinds: Vec<crate::PluginKind>,
     pub permissions: Vec<crate::plugin_commands::PluginPermission>,
 }
 
@@ -390,6 +392,7 @@ fn from_file(manifest: Manifest) -> PluginInfo {
         brush_controls: manifest.brush_controls,
         actions: manifest.actions,
         kinds: manifest.kinds,
+        layer_kinds: manifest.layer_kinds,
         permissions: manifest.permissions,
     }
 }
@@ -606,6 +609,8 @@ impl Plugins {
                     self.hooks.give_events(&plugin.id, events);
                 }
                 self.hooks.brush_keys(&plugin.id, plugin.brush_controls.iter().map(|c| c.key.clone()).collect());
+                // the kinds of layer it adds, for the sessions' layers of them to go through it
+                self.hooks.layer_kinds(&plugin.id, plugin.layer_kinds.clone());
                 // a picker's picture, for the sessions to draw
                 if hooks.contains(&Hook::Picker)
                     && let Some(text) =
@@ -1060,6 +1065,13 @@ impl Plugins {
         on.flat_map(|p| p.kinds.iter().cloned()).collect()
     }
 
+    /// The kinds of layer the plugins on add, for the Layers panel's +.
+    pub fn layer_kinds(&self) -> Vec<crate::PluginKind> {
+        let list = self.listed();
+        let on = list.files.iter().filter(|p| p.on && p.problem.is_none());
+        on.flat_map(|p| p.layer_kinds.iter().cloned()).collect()
+    }
+
     /// An artwork of kind `kind` (`<id>.<key>`) opened, in a copy of its plugin's code of its own:
     /// a new one `width` × `height`, or the one its saved `data` holds. None if no plugin on makes
     /// that kind, or it couldn't (one that stops goes off, and says why).
@@ -1392,6 +1404,7 @@ mod tests {
             brush_controls: Vec::new(),
             actions: Vec::new(),
             kinds: Vec::new(),
+            layer_kinds: Vec::new(),
             permissions: Vec::new(),
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),
