@@ -1523,6 +1523,19 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
             }
         },
         Texture::Stock { name, inverted } => {
+            // a tip printed in dots: ours dotted on the same lattice, each dot as big as the stock
+            // tip's ink there
+            if let Some(lattice) = halftone_lattice(name)
+                && let (Some(rows), Some(cols), Some(tones)) = (
+                    textures::stock_shape_rows(name, *inverted),
+                    textures::stock_shape_cols(name, *inverted),
+                    textures::stock_shape_tones(name, *inverted),
+                )
+            {
+                let cover = tones.iter().map(|&t| f32::from(t)).sum::<f32>() / (tones.len().max(1) as f32 * 255.0);
+                let dots = Source::new(textures::halftone_shape(lattice, &rows, &cols, cover));
+                return (Some(shape::STOCK_DOTS), dots, None);
+            }
             let (image, source, hardness) = stock_stand_in(name, *inverted);
             // our shape with the stock one's own lights and darks and its rows' share of the ink,
             // where they were measured: all of the stock one as its brush shows it (inverted, for
@@ -1559,6 +1572,14 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
             (image, retoned.or(source), hardness)
         }
     }
+}
+
+/// The lattice a stock tip printed in dots has its dots on, as [`textures::halftone_shape`] takes it
+/// (each set of rows as its cycles across and down the image), as measured; none for any other.
+fn halftone_lattice(name: &str) -> Option<[(f32, f32); 2]> {
+    let n = name.to_lowercase();
+    // its dots about 47 to the side, on rows turned 17 degrees and their crossing ones 109
+    n.contains("phoenix_secondary_shape").then_some([(-45.30, -13.85), (14.75, -42.60)])
 }
 
 /// Our stand-in for the stock shape `name`: our nearest shape, or the round tip at a hardness, or
@@ -2018,6 +2039,41 @@ mod tests {
         // and a dual brush's second's own tip and grain are measured as its first's are
         assert!(textures::stock_shape_tones("nightjar_secondary_shape.png", false).is_some());
         assert!(textures::stock_grain_tones("lumita_secondary_grain.png").is_some());
+    }
+
+    #[test]
+    fn a_stock_tip_printed_in_dots_stands_in_as_dots_on_its_lattice() {
+        let tip = Texture::Stock { name: "Phoenix_Secondary_Shape.png".to_owned(), inverted: true };
+        let (image, source, _) = shape_for(&tip);
+        assert_eq!(image, Some(shape::STOCK_DOTS));
+        let pixels = source.expect("dots drawn").pixels;
+        let n = TEXTURE_SIZE;
+        let a: Vec<f32> = pixels.iter().map(|&v| f32::from(v) / 255.0).collect();
+        // as much ink as the stock tip inverted holds (about a sixth), most of it on its right
+        let mean = a.iter().sum::<f32>() / a.len() as f32;
+        assert!((0.1..0.25).contains(&mean), "{mean}");
+        let half = |right: bool| {
+            (0..n * n).filter(|k| (k % n >= n / 2) == right).map(|k| a[k]).sum::<f32>() / (n * n / 2) as f32
+        };
+        assert!(half(true) > 2.0 * half(false), "{} {}", half(true), half(false));
+        // the dots repeat along the lattice's rows: shifted by one step of it, the inky middle of the
+        // tip matches itself far better than shifted half a step
+        let [(ax, ay), (bx, by)] = halftone_lattice("phoenix_secondary_shape.png").unwrap();
+        let det = ax * by - ay * bx;
+        // one step of the lattice, a row of the first set across, along a row of the second
+        let step = (by / det * n as f32, -bx / det * n as f32);
+        let differ = |k: f32| {
+            let (dx, dy) = ((step.0 * k).round() as i32, (step.1 * k).round() as i32);
+            let mut sum = 0.0;
+            for y in 96..160i32 {
+                for x in 150..214i32 {
+                    let at = |x: i32, y: i32| a[(y as usize) * n + x as usize];
+                    sum += (at(x, y) - at(x + dx, y + dy)).abs();
+                }
+            }
+            sum
+        };
+        assert!(differ(1.0) < 0.5 * differ(0.5), "{} {}", differ(1.0), differ(0.5));
     }
 
     #[test]

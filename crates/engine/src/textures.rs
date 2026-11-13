@@ -420,6 +420,56 @@ fn band_shares(means: &[u8; 64], inverted: bool) -> [u8; 64] {
     ink.map(|v| ((u32::from(v) * 255 + top / 2) / top).min(255) as u8)
 }
 
+/// A halftone tip: round dots on a lattice, the lattice's two sets of rows as the cycles of each
+/// across and down the tile (`lattice`), each dot as big as the ink there says: the ink a stock tip
+/// holds row by row and column by column (`rows`, `cols`, as [`stock_shape_rows`] gives them),
+/// all of it `cover` of the tile on average. A stand-in for a stock tip printed in dots, whose
+/// stroke shows their rows where the stamps overlap.
+pub fn halftone_shape(lattice: [(f32, f32); 2], rows: &[u8; 64], cols: &[u8; 64], cover: f32) -> Vec<u8> {
+    let [(ax, ay), (bx, by)] = lattice;
+    let det = ax * by - ay * bx;
+    if det.abs() < 1e-6 {
+        return vec![0; TEXTURE_SIZE * TEXTURE_SIZE];
+    }
+    // the area of the tile each dot has (a share of the tile)
+    let cell = 1.0 / det.abs();
+    let band = |bands: &[u8; 64], t: f32| {
+        let place = (t * bands.len() as f32 - 0.5).clamp(0.0, (bands.len() - 1) as f32);
+        let (low, f) = (place.floor() as usize, place.fract());
+        let at = |i: usize| f32::from(bands.get(i.min(bands.len() - 1)).copied().unwrap_or(0)) / 255.0;
+        at(low) * (1.0 - f) + at(low + 1) * f
+    };
+    // how much of its cell each dot fills, from the ink across and down, scaled until the whole
+    // averages `cover` (held to the cell: past it the dots run together)
+    let n = TEXTURE_SIZE;
+    let ink: Vec<f32> = (0..n * n)
+        .map(|k| {
+            let (x, y) = (((k % n) as f32 + 0.5) / n as f32, ((k / n) as f32 + 0.5) / n as f32);
+            (band(rows, y) * band(cols, x)).sqrt()
+        })
+        .collect();
+    let target = cover.clamp(0.0, 1.0) * ink.len() as f32;
+    let filled = |k: f32| ink.iter().map(|&v| (v * k).min(1.0)).sum::<f32>();
+    let (mut low, mut high) = (0.0f32, 64.0f32);
+    for _ in 0..40 {
+        let mid = (low + high) / 2.0;
+        if filled(mid) < target { low = mid } else { high = mid }
+    }
+    let scale = (low + high) / 2.0;
+    field(|x, y| {
+        // the nearest dot: the point's place in each set of rows, to the nearest whole row, back
+        // across the tile
+        let (p, q) = (ax * x + ay * y, bx * x + by * y);
+        let (dp, dq) = (p - p.round(), q - q.round());
+        let (dx, dy) = ((by * dp - ay * dq) / det, (ax * dq - bx * dp) / det);
+        let distance = dx.hypot(dy);
+        let (i, j) = (((x * n as f32) as usize).min(n - 1), ((y * n as f32) as usize).min(n - 1));
+        let share = (ink.get(j * n + i).copied().unwrap_or(0.0) * scale).min(1.0);
+        let radius = (share * cell / std::f32::consts::PI).sqrt();
+        ((radius - distance) * n as f32 + 0.5).clamp(0.0, 1.0)
+    })
+}
+
 /// `pixels`, a shape, its rows weighted as [`striped`] weights them, then its columns as `cols`
 /// says the same way: a stand-in takes a stock shape's outline across as well as down.
 pub fn shaped(pixels: &[u8], rows: &[u8; 64], cols: &[u8; 64]) -> Vec<u8> {
