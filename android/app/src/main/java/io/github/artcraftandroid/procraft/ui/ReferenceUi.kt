@@ -46,12 +46,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import java.io.File
 import kotlin.math.roundToInt
 
 // the dark bars are glass, like the panels: what the picture has under them shows through, blurred
@@ -112,6 +115,15 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
     val density = LocalDensity.current
     val config = LocalConfiguration.current
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let(vm::importReference) }
+    // a photo taken here goes in as the window's picture, as one imported from Photos does
+    val context = LocalContext.current
+    val cameraFile = remember { File(context.cacheDir, "exports/reference-camera.jpg").apply { parentFile?.mkdirs() } }
+    val cameraUri = remember {
+        runCatching { FileProvider.getUriForFile(context, context.packageName + ".files", cameraFile) }.getOrNull()
+    }
+    val takePhoto = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
+        if (taken && cameraUri != null) vm.importReference(cameraUri)
+    }
     val picture = vm.referenceShown
     val tall = TopBarHeight + picture.height + BottomBarHeight
     // the first time in the middle near the bottom of the screen; then kept on it, and no bigger
@@ -190,9 +202,19 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
             Box(Modifier.offset { IntOffset(0, topSlide.roundToInt()) }.fillMaxWidth().height(TopBarHeight).clipToBounds().overPicture(topSlide).ownTouches()) {
                 Text("Reference", color = TitleInk, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.align(Alignment.TopStart).padding(start = 20.dp, top = 10.dp))
                 Row(Modifier.align(Alignment.CenterEnd).padding(end = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE && vm.referenceImage != null) {
-                        Text("Clear", color = Pc.Accent, fontSize = 15.sp, modifier = Modifier.clickable { vm.clearReference() }.padding(6.dp))
-                        Text("Import", color = Pc.Accent, fontSize = 15.sp, modifier = Modifier.clickable { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }.padding(6.dp))
+                    if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE) {
+                        // Procreate's Reference can take a picture with the camera too; here it
+                        // becomes the window's picture, kept with the artwork like an imported one
+                        if (cameraUri != null) {
+                            Text(
+                                "Camera", color = Pc.Accent, fontSize = 15.sp,
+                                modifier = Modifier.clickable { cameraUri?.let { runCatching { takePhoto.launch(it) } } }.padding(6.dp),
+                            )
+                        }
+                        if (vm.referenceImage != null) {
+                            Text("Clear", color = Pc.Accent, fontSize = 15.sp, modifier = Modifier.clickable { vm.clearReference() }.padding(6.dp))
+                            Text("Import", color = Pc.Accent, fontSize = 15.sp, modifier = Modifier.clickable { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }.padding(6.dp))
+                        }
                     }
                     Box(
                         Modifier.size(43.dp).clip(CircleShape).background(CloseFill).border(1.dp, CloseEdge, CircleShape).clickable { vm.changeReferenceOn(false) },
