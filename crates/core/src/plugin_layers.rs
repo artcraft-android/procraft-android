@@ -20,6 +20,13 @@
 //! of one) and its items ([`drawn::ITEM`]), in order, each naming its brush by its place among them
 //! ([`field::BRUSH_REF`]) or holding it ([`field::BRUSH`]).
 //!
+//! A plugin that says which items a selection takes and changes them (`procraft_layer_select` and
+//! `procraft_layer_edit`) has them moved, restyled and deleted as items: the app hands it the
+//! selection, it answers with the items' ids, the app asks for changes by id (fields in place of an
+//! item's own, or the item gone), and the layer is laid again as one step. An item's transform
+//! ([`field::TRANSFORM`]) moves its samples where it is laid, its brush scaled with it; a stroke drawn
+//! inside a selection keeps the selection ([`field::CLIP`]) and is laid within it again.
+//!
 //! The brush an item names is kept in it as the brush library keeps a brush: the brush it came from
 //! among those the app comes with, and every setting changed from there as it was when the stroke
 //! was drawn, its own pictures in it (without its preview, maker, notches and reset point). So the
@@ -31,9 +38,10 @@ use std::sync::Arc;
 use procraft_engine::brush::Brush;
 use procraft_engine::curve::Curve;
 use procraft_engine::document::LayerId;
-use procraft_engine::geom::Vec2;
+use procraft_engine::geom::{Affine, Vec2};
 use procraft_engine::guide::{Guide, GuideKind, SymmetryKind};
 use procraft_engine::input::Sample;
+use procraft_engine::selection::Mask;
 use procraft_engine::stroke::{InputSettings, StrokeBuilder};
 
 use crate::plugin_run::LayerAdded;
@@ -45,8 +53,11 @@ const MOST_DRAWN: usize = 96 << 20;
 /// How many of the layers' changes are kept, by the step that made each: more than the canvas
 /// keeps steps.
 const STEPS_KEPT: usize = 256;
-/// The most samples an item read back may hold.
+/// The most samples an item read back may hold, and the most pixels its selection may cover.
 const MOST_SAMPLES: usize = 1 << 20;
+const MOST_CLIP: usize = 1 << 28;
+/// The most items a selection may take.
+const MOST_TAKEN: usize = 1 << 20;
 /// What an item's dual brush's randomness is seeded with, beside its own (as a stroke's is).
 const SECOND_SEED: u32 = 0x5eed_0002;
 /// The bit of a batch's count saying the pen lifted after it.
@@ -102,6 +113,17 @@ pub(crate) mod field {
     /// 32-bit floats: the brush's sizes at the size slider's least and most, canvas pixels, then its
     /// dual brush's if it has one (the brush's own words keep them as slider places, a hair off).
     pub(crate) const SIZES: u16 = 20;
+    /// u32: in a layer's items to draw, the plugin's id for the item, which a selection and an edit
+    /// name it by.
+    pub(crate) const ID: u16 = 21;
+    /// Six 32-bit floats `a b c d e f`: where the item is laid, its samples' (x, y) taken to
+    /// (a·x + c·y + e, b·x + d·y + f), its brush scaled and its pen's lean turned with them.
+    pub(crate) const TRANSFORM: u16 = 22;
+    /// 32-bit float: the smoothing it is laid with in place of its brush's own (its streamline).
+    pub(crate) const SMOOTHING: u16 = 23;
+    /// The selection it was drawn within, if any: its box (x, y, width, height as u32), then its
+    /// coverage in runs (a u32 count, then the byte), row by row.
+    pub(crate) const CLIP: u16 = 24;
     /// The first id of a plugin's own fields.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const OWN: u16 = 0x8000;
@@ -194,6 +216,12 @@ impl Symmetry {
         })
     }
 
+    /// It where `t` takes the stroke it copies: its centre moved and its axes turned with it.
+    fn moved(self, t: Affine) -> Symmetry {
+        let centre = t.apply(Vec2::new(self.centre[0], self.centre[1]));
+        Symmetry { centre: [centre.x, centre.y], angle: self.angle + t.rotation(), ..self }
+    }
+
     /// A guide making the same copies.
     fn guide(self) -> Guide {
         Guide {
@@ -266,6 +294,14 @@ pub(crate) struct Item {
     pub(crate) alpha_lock: bool,
     pub(crate) input: InputSettings,
     pub(crate) symmetry: Option<Symmetry>,
+    /// The plugin's id for it, as its items to draw say it.
+    pub(crate) id: Option<u32>,
+    /// Where it is laid, if moved since it was drawn.
+    pub(crate) transform: Option<Affine>,
+    /// The smoothing it is laid with in place of its brush's own.
+    pub(crate) smoothing: Option<f32>,
+    /// The selection it was drawn within.
+    pub(crate) clip: Option<Arc<Clip>>,
 }
 
 fn tool_number(tool: ToolKind) -> u8 {
@@ -325,6 +361,15 @@ impl Item {
         if let Some(symmetry) = self.symmetry {
             r.field(field::SYMMETRY, &symmetry.bytes());
         }
+        if let Some(t) = self.transform {
+            r.floats(field::TRANSFORM, &affine_floats(t));
+        }
+        if let Some(smoothing) = self.smoothing {
+            r.floats(field::SMOOTHING, &[smoothing]);
+        }
+        if let Some(clip) = &self.clip {
+            r.field(field::CLIP, &clip.bytes());
+        }
         let batches: Vec<u8> = self.batches.iter().flat_map(|b| b.to_le_bytes()).collect();
         r.field(field::BATCHES, &batches);
         r.field(field::STARTED, &self.started.to_le_bytes());
@@ -355,6 +400,10 @@ impl Item {
             alpha_lock: false,
             input: InputSettings::default(),
             symmetry: None,
+            id: None,
+            transform: None,
+            smoothing: None,
+            clip: None,
         };
         let mut brush = None;
         for (id, bytes) in fields(record) {
@@ -380,6 +429,14 @@ impl Item {
                         brush = Some(Arc::clone(found));
                     }
                 }
+                field::ID => item.id = u32_of(bytes),
+                field::TRANSFORM => {
+                    item.transform = floats::<6>(bytes)
+                        .map(|[a, b, c, d, e, f]| Affine { a, b, c, d, e, f })
+                        .filter(|t| t.inverse().is_some());
+                }
+                field::SMOOTHING => item.smoothing = floats::<1>(bytes).map(|[v]| v.clamp(0.0, 1.0)),
+                field::CLIP => item.clip = Clip::read(bytes).map(Arc::new),
                 field::SIZES => item.sizes = floats_of(bytes).take(4).filter(|v| v.is_finite() && *v >= 0.0).collect(),
                 field::BRUSH_NAME => item.brush_name = String::from_utf8_lossy(bytes).chars().take(256).collect(),
                 field::SEED => item.seed = u32_of(bytes).unwrap_or(0),
@@ -430,6 +487,122 @@ impl Item {
             ToolKind::Paint => "Paint stroke",
         }
     }
+}
+
+/// An affine's six numbers, as an item's transform keeps them.
+fn affine_floats(t: Affine) -> [f32; 6] {
+    [t.a, t.b, t.c, t.d, t.e, t.f]
+}
+
+/// A selection a stroke was drawn within: the box it reaches, and how much it takes of each pixel
+/// there (0 none, 255 all), rows top to bottom.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Clip {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    coverage: Vec<u8>,
+}
+
+impl Clip {
+    /// The part of `mask` that takes anything; none if it takes nothing.
+    pub(crate) fn of(mask: &Mask) -> Option<Clip> {
+        let [x, y, width, height] = mask.bounds()?;
+        let mut coverage = Vec::with_capacity(width as usize * height as usize);
+        for row in y..y + height {
+            let at = (row * mask.width + x) as usize;
+            coverage.extend_from_slice(mask.data.get(at..at + width as usize)?);
+        }
+        Some(Clip { x, y, width, height, coverage })
+    }
+
+    /// It as its field holds it: the box, then the coverage in runs.
+    fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for v in [self.x, self.y, self.width, self.height] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut runs = self.coverage.chunk_by(|a, b| a == b);
+        for run in runs.by_ref() {
+            out.extend_from_slice(&u32::try_from(run.len()).unwrap_or(u32::MAX).to_le_bytes());
+            out.push(run.first().copied().unwrap_or(0));
+        }
+        out
+    }
+
+    /// The selection its field holds, if it holds up: its runs filling its box exactly.
+    fn read(bytes: &[u8]) -> Option<Clip> {
+        let n = |at: usize| u32_of(bytes.get(at..)?);
+        let (x, y, width, height) = (n(0)?, n(4)?, n(8)?, n(12)?);
+        let area = (width as usize).checked_mul(height as usize).filter(|a| *a <= MOST_CLIP && *a > 0)?;
+        let mut coverage = Vec::with_capacity(area);
+        for run in bytes.get(16..)?.chunks(5) {
+            let [a, b, c, d, value] = *run else { return None };
+            let count = u32::from_le_bytes([a, b, c, d]) as usize;
+            if coverage.len() + count > area {
+                return None;
+            }
+            coverage.resize(coverage.len() + count, value);
+        }
+        (coverage.len() == area).then_some(Clip { x, y, width, height, coverage })
+    }
+
+    /// It as a selection of a `width` × `height` canvas, moved by `transform` (where its stroke is
+    /// laid now).
+    fn mask(&self, width: u32, height: u32, transform: Option<Affine>) -> Mask {
+        let mut mask = Mask::empty(width, height);
+        for row in 0..self.height.min(height.saturating_sub(self.y)) {
+            let from = (row * self.width) as usize;
+            let to = ((self.y + row) * width + self.x) as usize;
+            let across = (self.width.min(width.saturating_sub(self.x))) as usize;
+            if let (Some(src), Some(dst)) = (self.coverage.get(from..from + across), mask.data.get_mut(to..to + across))
+            {
+                dst.copy_from_slice(src);
+            }
+        }
+        match transform.and_then(Affine::inverse) {
+            Some(back) => mask.moved(|p| Some(back.apply(p))),
+            None => mask,
+        }
+    }
+}
+
+/// A change asked of one of a layer's items: which, by its id, and whether it goes, or the fields
+/// it takes in place of its own (a record).
+pub(crate) struct Change {
+    pub(crate) id: u32,
+    pub(crate) delete: bool,
+    pub(crate) fields: Vec<u8>,
+}
+
+/// `changes` as a plugin takes them: a record of changes, each a record of the id, whether it goes,
+/// and the fields it takes.
+fn changes_record(changes: &[Change]) -> Vec<u8> {
+    let mut r = Record::default();
+    for change in changes {
+        let mut one = Record::default();
+        one.field(1, &change.id.to_le_bytes()).field(2, &[u8::from(change.delete)]).field(3, &change.fields);
+        r.field(1, &one.bytes());
+    }
+    r.bytes()
+}
+
+/// `mask` as a plugin takes a selection: its box (x, y, width, height) and its coverage there; none
+/// if it takes nothing.
+fn area_record(mask: &Mask) -> Option<Vec<u8>> {
+    let clip = Clip::of(mask)?;
+    let mut r = Record::default();
+    r.field(1, &clip.x.to_le_bytes()).field(2, &clip.y.to_le_bytes());
+    r.field(3, &clip.width.to_le_bytes()).field(4, &clip.height.to_le_bytes()).field(5, &clip.coverage);
+    Some(r.bytes())
+}
+
+/// Which way the pen leant (`azimuth`, radians clockwise from up) once `t` has moved it.
+fn turned_azimuth(t: Affine, azimuth: f32) -> f32 {
+    let (x, y) = (azimuth.sin(), -azimuth.cos());
+    let (tx, ty) = (t.a * x + t.c * y, t.b * x + t.d * y);
+    if tx == 0.0 && ty == 0.0 { azimuth } else { tx.atan2(-ty) }
 }
 
 /// The samples an item's field holds; none past one that isn't a place on the canvas.
@@ -584,6 +757,11 @@ impl State {
             symmetry: Symmetry::of(&self.doc.stroke_guide()),
             batches: Vec::new(),
             started: 0.0,
+            id: None,
+            transform: None,
+            smoothing: None,
+            // drawn within the selection: laid within it again
+            clip: self.selection.as_ref().and_then(Clip::of).map(Arc::new),
         };
         let mut recording = Recording { layer, kind, item, started: None };
         recording.add(samples);
@@ -647,9 +825,7 @@ impl State {
         let after = Some(Arc::new(after));
         self.doc.set_plugin_data(layer, after.clone());
         if let Some(made) = made {
-            self.layer_steps.push(LayerStep { made, layer, before, after });
-            let over = self.layer_steps.len().saturating_sub(STEPS_KEPT);
-            self.layer_steps.drain(..over);
+            self.note_layer_step(made, layer, before, after);
         }
         self.revision += 1;
     }
@@ -665,16 +841,33 @@ impl State {
         if selection.is_some() {
             canvas.set_selection(gpu, None);
         }
-        canvas.mark_steps();
+        // one step, holding one copy of the layer as it was (none for each item)
         canvas.name_next_step(name);
+        canvas.hold_layer_quietly(layer);
         canvas.clear_layer(layer);
         // each brush made again once
         let mut brushes: Vec<(Arc<Vec<u8>>, Brush)> = Vec::new();
+        let (width, height) = (self.doc.width(), self.doc.height());
         for item in items {
+            // one drawn within a selection laid within it (as the selection is read when the
+            // stroke is drawn, it is laid then)
+            let clip = item.clip.as_ref().map(|c| c.mask(width, height, item.transform));
+            if let Some(clip) = &clip {
+                self.flush();
+                if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+                    canvas.set_selection(gpu, Some(&clip.data));
+                }
+            }
             self.lay_item(layer, item, &mut brushes);
+            if clip.is_some() {
+                self.flush();
+                if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+                    canvas.set_selection(gpu, None);
+                }
+            }
         }
         if let Some(canvas) = self.canvas.as_mut() {
-            canvas.collapse_steps();
+            canvas.release_layer(true, None);
         }
         self.flush();
         if let (Some(canvas), Some(gpu), Some(selection)) = (self.canvas.as_mut(), self.gpu.as_ref(), selection) {
@@ -693,7 +886,7 @@ impl State {
                 brush
             }
         };
-        // its sizes exactly as they were
+        // its sizes exactly as they were, and the smoothing it is given
         let mut raw = raw;
         if let [least, most, rest @ ..] = item.sizes.as_slice() {
             (raw.min_size, raw.max_size) = (*least, *most);
@@ -701,21 +894,26 @@ impl State {
                 (second.min_size, second.max_size) = (*least, *most);
             }
         }
+        if let Some(smoothing) = item.smoothing {
+            raw.streamline = smoothing;
+        }
+        // where it is laid: its samples moved, its brush scaled and its symmetry moved with them
+        let t = item.transform.unwrap_or(Affine::IDENTITY);
+        let scale = item.scale * t.scale_factor();
         let sliders = Sliders { size: item.size, opacity: item.opacity };
         let paint = crate::StrokePaint { colour: item.colour, secondary: item.secondary, alpha_lock: item.alpha_lock };
         let (brush, style, diameter) = self.stroke_brush_from(raw, sliders, item.tool, paint, false);
         let second = self.second_brush_from(item.tool, &brush, &style, sliders, paint);
         let make = |brush: Brush, diameter: f32, seed: u32| {
             StrokeBuilder::with_seed(brush, diameter, item.pointer.into(), seed)
-                .scaled(item.scale)
+                .scaled(scale)
                 .with_input(item.input.clone())
                 .on_view_turned(item.rotation)
                 .seen_at(item.seen_at)
         };
-        let mut builder = make(brush, diameter * item.scale, item.seed);
-        let mut second_builder =
-            second.as_ref().map(|(b, _, d)| make(b.clone(), d * item.scale, item.seed ^ SECOND_SEED));
-        let guide = item.symmetry.map_or_else(Guide::default, Symmetry::guide);
+        let mut builder = make(brush, diameter * scale, item.seed);
+        let mut second_builder = second.as_ref().map(|(b, _, d)| make(b.clone(), d * scale, item.seed ^ SECOND_SEED));
+        let guide = item.symmetry.map_or_else(Guide::default, |s| s.moved(t).guide());
         let Some(canvas) = self.canvas.as_mut() else { return };
         match second {
             Some((_, second, _)) => canvas.begin_dual_stroke(layer, style, second),
@@ -724,9 +922,18 @@ impl State {
         // in the steps they came in: drawn as they came, the last as the pen lifted
         let whole = [item.samples.len() as u32];
         let batches = if item.batches.is_empty() { &whole[..] } else { &item.batches };
-        // on the input's clock again
-        let timed: Vec<Sample> =
-            item.samples.iter().map(|s| Sample { time_ms: item.started + s.time_ms, ..*s }).collect();
+        // on the input's clock again, where it is laid
+        let moved = item.transform.is_some();
+        let timed: Vec<Sample> = item
+            .samples
+            .iter()
+            .map(|s| Sample {
+                pos: if moved { t.apply(s.pos) } else { s.pos },
+                azimuth: if moved { turned_azimuth(t, s.azimuth) } else { s.azimuth },
+                time_ms: item.started + s.time_ms,
+                ..*s
+            })
+            .collect();
         let mut at = 0;
         for &batch in batches {
             let n = (batch & !LIFTED) as usize;
@@ -765,17 +972,251 @@ impl State {
         true
     }
 
+    /// The changes that give `items` the paint tool's colour (`colour`), brush (`brush`), size and
+    /// opacity as they are now; masks keep theirs.
+    fn restyled(&self, items: &[Item], colour: bool, brush: bool, size: bool, opacity: bool) -> Vec<Change> {
+        let tool = ToolKind::Paint;
+        let sliders = self.sliders(tool);
+        let current = self.brush(tool).clone();
+        let snapshot = brush.then(|| self.brush_snapshot(tool));
+        let sizes: Vec<f32> = [Some(&current), current.secondary.as_deref()]
+            .into_iter()
+            .flatten()
+            .flat_map(|b| [b.min_size, b.max_size])
+            .collect();
+        let mut out = Vec::new();
+        for item in items.iter().filter(|i| i.tool != ToolKind::Erase) {
+            let Some(id) = item.id else { continue };
+            let mut r = Record::default();
+            if colour {
+                r.floats(field::COLOUR, &self.color);
+            }
+            if opacity {
+                r.floats(field::OPACITY, &[sliders.opacity]);
+            }
+            if let Some(snapshot) = &snapshot {
+                r.field(field::BRUSH, snapshot).field(field::BRUSH_NAME, current.name.as_bytes());
+                r.floats(field::SIZES, &sizes);
+            }
+            let slider = if size { sliders.size } else { item.size };
+            if size {
+                r.floats(field::SIZE, &[slider]);
+            }
+            if brush || size {
+                // its width for hit tests, with its brush as it is now
+                let drawn = if brush { Some(current.clone()) } else { self.brush_from_snapshot(&item.brush) };
+                if let Some(mut drawn) = drawn {
+                    if let ([least, most, ..], false) = (item.sizes.as_slice(), brush) {
+                        (drawn.min_size, drawn.max_size) = (*least, *most);
+                    }
+                    r.floats(field::WIDTH, &[drawn.diameter(slider) * item.scale]);
+                }
+            }
+            out.push(Change { id, delete: false, fields: r.bytes() });
+        }
+        out
+    }
+
     /// Undo or redo moved the canvas from `before` (the steps undo and redo would take then): a
     /// plugin's layer whose data that step changed has it back as it was before the step, or after.
     pub(crate) fn follow_layer_step(&mut self, before: (Option<u64>, Option<u64>)) {
         let Some((step, undone)) = self.canvas.as_ref().and_then(|c| crate::scene3d::stepped(before, c)) else {
             return;
         };
-        let Some(change) = self.layer_steps.iter().rev().find(|s| s.made == step) else { return };
-        let data = if undone { change.before.clone() } else { change.after.clone() };
-        let layer = change.layer;
-        self.doc.set_plugin_data(layer, data);
+        // (one step may change several layers' data: flipping the canvas)
+        let changes: Vec<(LayerId, Option<Arc<Vec<u8>>>)> = self
+            .layer_steps
+            .iter()
+            .filter(|s| s.made == step)
+            .map(|s| (s.layer, if undone { s.before.clone() } else { s.after.clone() }))
+            .collect();
+        for (layer, data) in changes {
+            self.doc.set_plugin_data(layer, data);
+        }
     }
+
+    /// Keeps a change of `layer`'s data, from `before` to `after`, with canvas step `made`.
+    fn note_layer_step(
+        &mut self,
+        made: u64,
+        layer: LayerId,
+        before: Option<Arc<Vec<u8>>>,
+        after: Option<Arc<Vec<u8>>>,
+    ) {
+        self.layer_steps.push(LayerStep { made, layer, before, after });
+        let over = self.layer_steps.len().saturating_sub(STEPS_KEPT);
+        self.layer_steps.drain(..over);
+    }
+
+    /// `layer`'s kind and data, if it is a plugin's layer whose plugin can take changes to its items
+    /// now (on, its data read). Whether the layer is locked is for the caller.
+    fn editable_layer(&self, layer: LayerId) -> Option<(String, Option<Arc<Vec<u8>>>)> {
+        if self.plugin_layer_off(layer) {
+            return None;
+        }
+        let plugin = self.doc.layer(layer)?.plugin.as_ref()?;
+        Some((plugin.kind.clone(), plugin.data.clone()))
+    }
+
+    /// `work` done by `layer`'s plugin on its data, handed to it first, if the plugin changes items
+    /// (see [`State::editable_layer`]): none if it can't, stopped, or couldn't read the data.
+    fn on_layer_data<T>(
+        &self,
+        layer: LayerId,
+        work: impl FnOnce(&mut crate::plugin_run::Running) -> Result<T, crate::plugin_run::Stop>,
+    ) -> Option<T> {
+        let (kind, data) = self.editable_layer(layer)?;
+        let done = self.hooks.as_ref()?.on_layer(&kind, |running, index| {
+            if !running.layer_edits() || !running.layer_load(index, data.as_deref().map_or(&[][..], Vec::as_slice))? {
+                return Ok(None);
+            }
+            work(running).map(Some)
+        });
+        done.flatten()
+    }
+
+    /// The items `layer` draws now, in order, each with its id; none if its plugin can't say.
+    pub(crate) fn layer_items(&self, layer: LayerId) -> Option<Vec<Item>> {
+        let list = self.on_layer_data(layer, |running| running.layer_draw(MOST_DRAWN))?;
+        Some(read_drawn(&list))
+    }
+
+    /// The items of `layer` the selection takes (every one with nothing selected), in order.
+    pub(crate) fn taken_items(&self, layer: LayerId) -> Option<Vec<Item>> {
+        let items = self.layer_items(layer)?;
+        let Some(mask) = self.selection.as_ref() else { return Some(items) };
+        let Some(area) = area_record(mask) else { return Some(Vec::new()) };
+        let ids = self.on_layer_data(layer, |running| running.layer_select(&area, MOST_TAKEN))?;
+        Some(items.into_iter().filter(|item| item.id.is_some_and(|id| ids.contains(&id))).collect())
+    }
+
+    /// `changes` made to `layer`'s items by its plugin, and the layer laid again, as one step called
+    /// `name`: false if nothing changed or it couldn't.
+    pub(crate) fn change_items(&mut self, layer: LayerId, changes: &[Change], name: &str) -> bool {
+        if changes.is_empty() || self.doc.is_locked(layer) {
+            return false;
+        }
+        let before = self.doc.layer(layer).and_then(|l| l.plugin.as_ref()).and_then(|p| p.data.clone());
+        let record = changes_record(changes);
+        let answer = self.on_layer_data(layer, |running| {
+            if !running.layer_edit(&record)? {
+                return Ok(None);
+            }
+            Ok(Some((running.layer_save(MOST_DATA)?, running.layer_draw(MOST_DRAWN)?)))
+        });
+        let Some(Some((after, list))) = answer else { return false };
+        let steps = self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made);
+        self.lay_items_again(layer, &read_drawn(&list), name);
+        let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(procraft_gpu::Canvas::undo_step);
+        let after = Some(Arc::new(after));
+        self.doc.set_plugin_data(layer, after.clone());
+        if let Some(made) = made {
+            self.note_layer_step(made, layer, before, after);
+        }
+        self.revision += 1;
+        true
+    }
+
+    /// Deletes the items of `layer` the selection takes (every one with nothing selected), as one
+    /// step: false if none went.
+    pub(crate) fn delete_taken_items(&mut self, layer: LayerId) -> bool {
+        let Some(items) = self.taken_items(layer) else { return false };
+        let changes: Vec<Change> =
+            items.iter().filter_map(|i| Some(Change { id: i.id?, delete: true, fields: Vec::new() })).collect();
+        self.change_items(layer, &changes, "Delete strokes")
+    }
+
+    /// `layer`'s data with each of its items moved by `t` after where it is (its pixels left as they
+    /// are, moved by the caller): none if its plugin can't change its items, nothing within if it
+    /// has none to move.
+    pub(crate) fn moved_layer_data(&self, layer: LayerId, t: Affine) -> Option<Option<Arc<Vec<u8>>>> {
+        let changes: Vec<Change> = self.layer_items(layer)?.iter().filter_map(|item| moved_change(item, t)).collect();
+        if changes.is_empty() {
+            return Some(None);
+        }
+        let record = changes_record(&changes);
+        let after = self.on_layer_data(layer, |running| {
+            if !running.layer_edit(&record)? {
+                return Ok(None);
+            }
+            running.layer_save(MOST_DATA).map(Some)
+        })?;
+        Some(after.map(Arc::new))
+    }
+
+    /// Each plugin's layer's data with its items moved by `t` (the canvas cropped or flipped, its
+    /// pixels with it): those whose plugin can't change their items become ordinary layers in
+    /// `doc`, the others' data from then on given in it. The layers moved, and their data before and
+    /// after.
+    pub(crate) fn move_all_items(&self, t: Affine, doc: &mut procraft_engine::document::Document) -> Vec<MovedData> {
+        let plugin_layers: Vec<LayerId> =
+            self.doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
+        let mut moved = Vec::new();
+        for id in plugin_layers {
+            match self.moved_layer_data(id, t) {
+                Some(Some(after)) => {
+                    let before = self.doc.layer(id).and_then(|l| l.plugin.as_ref()).and_then(|p| p.data.clone());
+                    doc.set_plugin_data(id, Some(Arc::clone(&after)));
+                    moved.push((id, before, Some(after)));
+                }
+                Some(None) => {}
+                None => {
+                    doc.rasterize(id);
+                }
+            }
+        }
+        moved
+    }
+
+    /// The layers' data moved by a step (see [`State::move_all_items`]), kept with step `made`.
+    pub(crate) fn note_moved_data(&mut self, made: u64, moved: Vec<MovedData>) {
+        for (layer, before, after) in moved {
+            self.note_layer_step(made, layer, before, after);
+        }
+    }
+
+    /// Moves the items the selection takes on `layer` (every one with nothing selected) by `t`, and
+    /// lays the layer again, as one step called `name`: false if there were none, or it couldn't.
+    pub(crate) fn move_taken_items(&mut self, layer: LayerId, ids: Option<&[u32]>, t: Affine, name: &str) -> bool {
+        let Some(items) = (match ids {
+            Some(ids) => self
+                .layer_items(layer)
+                .map(|all| all.into_iter().filter(|i| i.id.is_some_and(|id| ids.contains(&id))).collect::<Vec<_>>()),
+            None => self.taken_items(layer),
+        }) else {
+            return false;
+        };
+        let changes: Vec<Change> = items.iter().filter_map(|item| moved_change(item, t)).collect();
+        self.change_items(layer, &changes, name)
+    }
+}
+
+/// A layer whose data a step changed: the layer, its data before and its data after.
+pub(crate) type MovedData = (LayerId, Option<Arc<Vec<u8>>>, Option<Arc<Vec<u8>>>);
+
+/// The change that moves `item` by `t` after where it is: its transform from then on.
+fn moved_change(item: &Item, t: Affine) -> Option<Change> {
+    let id = item.id?;
+    let now = item.transform.unwrap_or(Affine::IDENTITY).then(t);
+    let mut fields = Record::default();
+    fields.floats(field::TRANSFORM, &affine_floats(now));
+    Some(Change { id, delete: false, fields: fields.bytes() })
+}
+
+/// What a selection's items reach: left, top, right and bottom, canvas pixels, their brushes'
+/// widths round their samples; none for no items.
+pub(crate) fn items_reach(items: &[Item]) -> Option<[f32; 4]> {
+    let mut reach: Option<[f32; 4]> = None;
+    for item in items {
+        let t = item.transform.unwrap_or(Affine::IDENTITY);
+        let half = item.width * t.scale_factor() / 2.0;
+        for s in &item.samples {
+            let p = t.apply(s.pos);
+            let [l, top, r, b] = reach.unwrap_or([p.x, p.y, p.x, p.y]);
+            reach = Some([l.min(p.x - half), top.min(p.y - half), r.max(p.x + half), b.max(p.y + half)]);
+        }
+    }
+    reach
 }
 
 #[uniffi::export]
@@ -805,6 +1246,69 @@ impl CanvasSession {
         self.shared.lock().plugin_layer_kind(LayerId(id)).map(str::to_owned)
     }
 
+    /// The ids of the items the selection takes on the current layer (every one with nothing
+    /// selected), if it is a plugin's layer whose plugin changes its items; none otherwise.
+    pub fn taken_plugin_items(&self) -> Vec<u32> {
+        let mut st = self.shared.lock();
+        st.finish_stroke();
+        let current = st.doc.current();
+        st.taken_items(current).unwrap_or_default().iter().filter_map(|i| i.id).collect()
+    }
+
+    /// What those items reach: left, top, right and bottom, canvas pixels; empty for none.
+    pub fn taken_plugin_items_reach(&self) -> Vec<f32> {
+        let mut st = self.shared.lock();
+        st.finish_stroke();
+        let current = st.doc.current();
+        st.taken_items(current).and_then(|items| items_reach(&items)).map(Vec::from).unwrap_or_default()
+    }
+
+    /// Deletes those items, as one step: their masks gone, what they hid shows again. False if none
+    /// went.
+    pub fn delete_plugin_items(&self) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let current = st.doc.current();
+        let done = st.delete_taken_items(current);
+        if done {
+            self.shared.frame(st);
+        }
+        done
+    }
+
+    /// Moves those items by `transform` (six numbers as [`CanvasSession::view_matrix`] gives them, in
+    /// canvas pixels), as one step laid exactly. False if none moved.
+    pub fn transform_plugin_items(&self, transform: Vec<f32>) -> bool {
+        let &[a, b, c, d, e, f] = transform.as_slice() else { return false };
+        let t = Affine { a, b, c, d, e, f };
+        if !t.is_finite() || t.inverse().is_none() {
+            return false;
+        }
+        self.on_taken_items("Move strokes", |_, items| items.iter().filter_map(|i| moved_change(i, t)).collect())
+    }
+
+    /// Gives those items (masks aside) the paint tool's colour (`colour`), brush (`brush`), size
+    /// (`size`) and opacity (`opacity`) as they are now, as one step. False if none changed.
+    pub fn restyle_plugin_items(&self, colour: bool, brush: bool, size: bool, opacity: bool) -> bool {
+        self.on_taken_items("Restyle strokes", |st, items| st.restyled(items, colour, brush, size, opacity))
+    }
+
+    /// Lays those items with `amount` of smoothing (0..1) in place of their brushes' own, as one
+    /// step. False if none changed.
+    pub fn smooth_plugin_items(&self, amount: f32) -> bool {
+        if !amount.is_finite() {
+            return false;
+        }
+        self.on_taken_items("Smooth strokes", |_, items| {
+            let mut r = Record::default();
+            r.floats(field::SMOOTHING, &[amount.clamp(0.0, 1.0)]);
+            let fields = r.bytes();
+            items.iter().filter_map(|i| Some(Change { id: i.id?, delete: false, fields: fields.clone() })).collect()
+        })
+    }
+
     /// Clears plugin layer `id` and lays its items again, as its plugin has them, as one step: what
     /// a plugin's change to items already drawn takes. False if it isn't a plugin's layer taking
     /// strokes (its plugin off, say), or the plugin couldn't.
@@ -812,6 +1316,25 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let done = st.draw_plugin_layer_again(LayerId(id));
+        if done {
+            self.shared.frame(st);
+        }
+        done
+    }
+}
+
+impl CanvasSession {
+    /// The changes `changes` makes of the items the selection takes on the current layer (every one
+    /// with nothing selected), made as one step called `name`: false if none changed.
+    fn on_taken_items(&self, name: &str, changes: impl FnOnce(&State, &[Item]) -> Vec<Change>) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let current = st.doc.current();
+        let Some(items) = st.taken_items(current) else { return false };
+        let changes = changes(st, &items);
+        let done = st.change_items(current, &changes, name);
         if done {
             self.shared.frame(st);
         }
@@ -859,6 +1382,10 @@ mod tests {
                 angle: 0.1,
                 parts: 6,
             }),
+            id: None,
+            transform: Some(Affine { a: 0.0, b: 2.0, c: -2.0, d: 0.0, e: 5.0, f: 6.0 }),
+            smoothing: Some(0.25),
+            clip: Some(Arc::new(Clip { x: 3, y: 4, width: 3, height: 2, coverage: vec![0, 0, 255, 255, 255, 9] })),
         }
     }
 

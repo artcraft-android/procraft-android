@@ -1055,6 +1055,8 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         LayerOption.REFERENCE -> { { vm.toggleReference(l) } }
                         LayerOption.EDIT_TEXT -> { { vm.editText(l) } }
                         LayerOption.RASTERIZE -> { { vm.rasterize(l) } }
+                        LayerOption.RECOLOUR -> { { vm.restyleStrokes(l, colour = true) } }
+                        LayerOption.APPLY_BRUSH -> { { vm.restyleStrokes(l, colour = false) } }
                         LayerOption.MERGE_DOWN -> { { vm.mergeDown(l) } }
                         LayerOption.COMBINE_DOWN -> { { vm.combineDown(l) } }
                         LayerOption.MERGE_MASK -> { { vm.mergeMask(l) } }

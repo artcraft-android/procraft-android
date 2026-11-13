@@ -593,6 +593,9 @@ pub(crate) struct State {
     pub(crate) revision: u64,
     /// The open transform, how its handles act and how it resamples.
     transform: Option<procraft_engine::transform::Transform>,
+    /// A plugin's layer being transformed: the layer and the ids of the items moving, which are
+    /// moved as items as it ends.
+    transform_items: Option<(procraft_engine::document::LayerId, Vec<u32>)>,
     transform_mode: procraft_engine::transform::TransformMode,
     interpolation: transform::Interpolation,
     transform_guides: transform::GuideSettings,
@@ -1499,6 +1502,7 @@ impl CanvasSession {
             tracking_since: None,
             revision: 0,
             transform: None,
+            transform_items: None,
             transform_mode: procraft_engine::transform::TransformMode::Freeform,
             interpolation: transform::Interpolation::Bilinear,
             transform_guides: transform::GuideSettings::default(),
@@ -2271,6 +2275,13 @@ impl CanvasSession {
         let current = st.doc.current();
         st.finish_stroke();
         st.settle();
+        // a plugin's layer: the strokes the selection takes (every one, with nothing selected) go
+        if st.plugin_layer_kind(current).is_some() {
+            if st.delete_taken_items(current) {
+                self.shared.frame(st);
+            }
+            return;
+        }
         if st.doc.is_locked(current) || st.doc.layer(current).is_none_or(|l| l.drawn_from_data()) {
             return;
         }

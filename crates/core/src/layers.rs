@@ -101,6 +101,11 @@ pub enum LayerOption {
     Reference,
     EditText,
     Rasterize,
+    /// A plugin's layer: the strokes the selection takes (every one with nothing selected) given
+    /// the paint colour.
+    Recolour,
+    /// The same given the paint brush, with its size and opacity.
+    ApplyBrush,
     MergeDown,
     CombineDown,
     MergeMask,
@@ -184,7 +189,11 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
                 if guided || l.assisted {
                     row(O::DrawingAssist, "Drawing Assist", Some(l.assisted));
                 }
+                // its strokes cleared, recoloured or restyled as strokes
                 if unlocked {
+                    row(O::Clear, "Clear", None);
+                    row(O::Recolour, "Recolour", None);
+                    row(O::ApplyBrush, "Apply Brush", None);
                     row(O::Rasterize, "Rasterize", None);
                 }
             } else {

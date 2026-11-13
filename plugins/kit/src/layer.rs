@@ -3,8 +3,9 @@
 //! brush engine, as on any layer, then records the stroke as an [`Item`] and hands it to the plugin,
 //! which keeps the layer's items in data of its own: the app holds that data, saves it beside the
 //! layer's pixels, and undoes and redoes it with them. When the plugin changes items already drawn
-//! (taking some away, say), it asks the app to draw the layer again from its items. See
-//! `docs/plugins.md`. [`layers!`](crate::layers!) exports the calls.
+//! (taking some away, say), it asks the app to draw the layer again from its items. The app can also
+//! ask which items a selection takes ([`Layer::select`]) and change or delete them ([`Layer::edit`]).
+//! See `docs/plugins.md`. [`layers!`](crate::layers!) exports the calls.
 //!
 //! ```ignore
 //! kit::layers!(MyLayer);
@@ -33,7 +34,8 @@ pub mod field {
     pub const SIZE: u16 = 5;
     /// 32-bit float: the opacity slider, 0..1.
     pub const OPACITY: u16 = 6;
-    /// 32-bit float: the brush's width at full pressure, canvas pixels.
+    /// 32-bit float: the brush's width at full pressure, canvas pixels (before the item's
+    /// transform).
     pub const WIDTH: u16 = 7;
     /// The brush as it was, whole, in the app's own words: kept as it is.
     pub const BRUSH: u16 = 8;
@@ -51,13 +53,35 @@ pub mod field {
     pub const ALPHA_LOCK: u16 = 14;
     /// The app's own smoothing and pressure.
     pub const INPUT: u16 = 15;
-    /// The symmetry it was drawn with, if any.
+    /// The symmetry it was drawn with, if any: u8 kind (vertical, horizontal, quadrant, radial),
+    /// u8 turned only, the centre (two 32-bit floats), the turn (32-bit float), u32 parts.
     pub const SYMMETRY: u16 = 16;
     /// u32: in a layer's items to draw, which of its brushes the item has (in place of [`BRUSH`]).
     pub const BRUSH_REF: u16 = 17;
+    /// u32 each: how many samples came each time, the top bit set on the last if the pen lifted
+    /// after it.
+    pub const BATCHES: u16 = 18;
+    /// 64-bit float: when the first sample came, milliseconds on the input's clock.
+    pub const STARTED: u16 = 19;
+    /// 32-bit floats: the brush's exact sizes.
+    pub const SIZES: u16 = 20;
+    /// u32: in a layer's items to draw, the plugin's id for the item, which a selection and an edit
+    /// name it by.
+    pub const ID: u16 = 21;
+    /// Six 32-bit floats `a b c d e f`: where the item is drawn, its samples' (x, y) taken to
+    /// (a·x + c·y + e, b·x + d·y + f), canvas pixels; none for where it was drawn.
+    pub const TRANSFORM: u16 = 22;
+    /// 32-bit float: the smoothing it is laid with in place of its brush's own, 0..1.
+    pub const SMOOTHING: u16 = 23;
+    /// The selection it was drawn within, if any: its box (x, y, width, height as u32), then its
+    /// coverage in runs (a u32 count, then the byte), row by row.
+    pub const CLIP: u16 = 24;
     /// The first id of a plugin's own fields.
     pub const OWN: u16 = 0x8000;
 }
+
+/// The bit of a batch's count saying the pen lifted after it.
+pub const LIFTED: u32 = 1 << 31;
 
 /// The fields of the record `bytes`, in order (id and bytes); none from one cut short on.
 pub fn fields(bytes: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
@@ -101,15 +125,66 @@ pub enum Tool {
     Smudge,
 }
 
+/// One of an item's samples, as the app recorded it: where (canvas pixels, before the item's
+/// transform), how hard, how the pen leant and turned, and when (milliseconds since the first).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sample {
+    pub x: f32,
+    pub y: f32,
+    pub pressure: f32,
+    pub tilt: f32,
+    pub azimuth: f32,
+    pub roll: f32,
+    pub time: f64,
+}
+
+impl Sample {
+    /// The sample `t` of the way from this one to `to`, each of its channels between theirs.
+    pub fn toward(&self, to: &Sample, t: f32) -> Sample {
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        Sample {
+            x: mix(self.x, to.x),
+            y: mix(self.y, to.y),
+            pressure: mix(self.pressure, to.pressure),
+            tilt: mix(self.tilt, to.tilt),
+            azimuth: mix(self.azimuth, to.azimuth),
+            roll: mix(self.roll, to.roll),
+            time: self.time + (to.time - self.time) * f64::from(t),
+        }
+    }
+}
+
+/// A transform: (x, y) goes to (a·x + c·y + e, b·x + d·y + f).
+pub type Affine = [f32; 6];
+
+/// The transform that moves nothing.
+pub const IDENTITY: Affine = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// Where `t` takes (`x`, `y`).
+pub fn apply(t: &Affine, (x, y): (f32, f32)) -> (f32, f32) {
+    (t[0] * x + t[2] * y + t[4], t[1] * x + t[3] * y + t[5])
+}
+
+/// `outer` after `inner`: what doing `inner` and then `outer` does.
+pub fn then(inner: &Affine, outer: &Affine) -> Affine {
+    let [a, b, c, d, e, f] = *outer;
+    let [p, q, r, s, u, v] = *inner;
+    [a * p + c * q, b * p + d * q, a * r + c * s, b * r + d * s, a * u + c * v + e, b * u + d * v + f]
+}
+
+fn f32_at(bytes: &[u8], at: usize) -> Option<f32> {
+    Some(f32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn f64_at(bytes: &[u8], at: usize) -> Option<f64> {
+    Some(f64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+}
+
 /// A stroke recorded on a layer, as the app handed it over: its record, and what a plugin most
 /// often wants of it read out.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     record: Vec<u8>,
-}
-
-fn f32_at(bytes: &[u8], at: usize) -> Option<f32> {
-    Some(f32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
 impl Item {
@@ -123,8 +198,21 @@ impl Item {
         &self.record
     }
 
-    fn field(&self, id: u16) -> Option<&[u8]> {
+    /// Its field `id`, if it has one.
+    pub fn field(&self, id: u16) -> Option<&[u8]> {
         fields(&self.record).find(|(f, _)| *f == id).map(|(_, bytes)| bytes)
+    }
+
+    /// It with field `id` holding `bytes` (in place of what it held), or without it (none).
+    pub fn with_field(&self, id: u16, bytes: Option<&[u8]>) -> Item {
+        let mut out = Record::default();
+        for (f, value) in fields(&self.record).filter(|(f, _)| *f != id) {
+            out.field(f, value);
+        }
+        if let Some(bytes) = bytes {
+            out.field(id, bytes);
+        }
+        Item { record: out.bytes() }
     }
 
     pub fn tool(&self) -> Tool {
@@ -135,19 +223,88 @@ impl Item {
         }
     }
 
-    /// The brush's width at full pressure, canvas pixels.
-    pub fn width(&self) -> f32 {
-        self.field(field::WIDTH).and_then(|b| f32_at(b, 0)).filter(|w| w.is_finite()).unwrap_or(0.0).max(0.0)
+    /// Where it is drawn ([`field::TRANSFORM`]): where it was drawn if it holds none, or none that
+    /// holds up.
+    pub fn transform(&self) -> Affine {
+        let Some(bytes) = self.field(field::TRANSFORM) else { return IDENTITY };
+        let mut t = IDENTITY;
+        for (i, slot) in t.iter_mut().enumerate() {
+            match f32_at(bytes, i * 4).filter(|v| v.is_finite()) {
+                Some(v) => *slot = v,
+                None => return IDENTITY,
+            }
+        }
+        t
     }
 
-    /// Where its samples are, canvas pixels, in order.
-    pub fn points(&self) -> Vec<(f32, f32)> {
-        let Some(samples) = self.field(field::SAMPLES) else { return Vec::new() };
-        samples
+    /// How much its transform scales it.
+    pub fn scale(&self) -> f32 {
+        let t = self.transform();
+        (t[0] * t[3] - t[1] * t[2]).abs().sqrt()
+    }
+
+    /// The brush's width at full pressure where it is drawn, canvas pixels.
+    pub fn width(&self) -> f32 {
+        let width = self.field(field::WIDTH).and_then(|b| f32_at(b, 0)).filter(|w| w.is_finite()).unwrap_or(0.0);
+        width.max(0.0) * self.scale()
+    }
+
+    /// Its samples as recorded (before its transform).
+    pub fn samples(&self) -> Vec<Sample> {
+        let Some(bytes) = self.field(field::SAMPLES) else { return Vec::new() };
+        bytes
             .chunks_exact(32)
-            .filter_map(|s| Some((f32_at(s, 0)?, f32_at(s, 4)?)))
-            .filter(|(x, y)| x.is_finite() && y.is_finite())
+            .map_while(|s| {
+                let sample = Sample {
+                    x: f32_at(s, 0)?,
+                    y: f32_at(s, 4)?,
+                    pressure: f32_at(s, 8)?,
+                    tilt: f32_at(s, 12)?,
+                    azimuth: f32_at(s, 16)?,
+                    roll: f32_at(s, 20)?,
+                    time: f64_at(s, 24)?,
+                };
+                (sample.x.is_finite() && sample.y.is_finite()).then_some(sample)
+            })
             .collect()
+    }
+
+    /// Where its samples are drawn, canvas pixels, in order.
+    pub fn points(&self) -> Vec<(f32, f32)> {
+        let t = self.transform();
+        self.samples().iter().map(|s| apply(&t, (s.x, s.y))).collect()
+    }
+
+    /// Where its samples are drawn, and where the symmetry it was drawn with draws them again:
+    /// each path, its own first.
+    pub fn paths(&self) -> Vec<Vec<(f32, f32)>> {
+        let t = self.transform();
+        let own: Vec<(f32, f32)> = self.samples().iter().map(|s| (s.x, s.y)).collect();
+        let mut out = vec![own.clone()];
+        if let Some(symmetry) = self.field(field::SYMMETRY).and_then(Symmetry::read) {
+            for k in 0..symmetry.copies() {
+                out.push(own.iter().map(|&p| symmetry.copy(k, p)).collect());
+            }
+        }
+        out.into_iter().map(|path| path.into_iter().map(|p| apply(&t, p)).collect()).collect()
+    }
+
+    /// It with `samples` in place of its own, laid in one go as the pen lifts (its time from the
+    /// first of them).
+    pub fn with_samples(&self, samples: &[Sample]) -> Item {
+        let start = samples.first().map_or(0.0, |s| s.time);
+        let mut bytes = Vec::with_capacity(samples.len() * 32);
+        for s in samples {
+            for v in [s.x, s.y, s.pressure, s.tilt, s.azimuth, s.roll] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes.extend_from_slice(&(s.time - start).to_le_bytes());
+        }
+        let started = self.field(field::STARTED).and_then(|b| f64_at(b, 0)).unwrap_or(0.0) + start;
+        let batches = (samples.len() as u32 | LIFTED).to_le_bytes();
+        self.with_field(field::SAMPLES, Some(&bytes))
+            .with_field(field::BATCHES, Some(&batches))
+            .with_field(field::STARTED, Some(&started.to_le_bytes()))
     }
 
     /// The brush it was drawn with, as the app wrote it.
@@ -165,8 +322,137 @@ impl Item {
     }
 }
 
+/// The symmetry an item was drawn with ([`field::SYMMETRY`]): its copies made as the app makes them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Symmetry {
+    kind: u8,
+    rotational: bool,
+    centre: (f32, f32),
+    angle: f32,
+    parts: u32,
+}
+
+impl Symmetry {
+    fn read(bytes: &[u8]) -> Option<Symmetry> {
+        let kind = *bytes.first().filter(|k| **k <= 3)?;
+        let rotational = *bytes.get(1)? != 0;
+        let (x, y, angle) = (f32_at(bytes, 2)?, f32_at(bytes, 6)?, f32_at(bytes, 10)?);
+        let parts = u32::from_le_bytes(bytes.get(14..18)?.try_into().ok()?).clamp(2, 64);
+        Some(Symmetry { kind, rotational, centre: (x, y), angle, parts })
+    }
+
+    /// How many copies it makes, the original not counted.
+    fn copies(&self) -> usize {
+        self.count() - 1
+    }
+
+    fn count(&self) -> usize {
+        match self.kind {
+            0 | 1 => 2,
+            2 => 4,
+            _ => self.parts as usize,
+        }
+    }
+
+    /// Where copy `k` (from 0) of `p` is.
+    fn copy(&self, k: usize, (x, y): (f32, f32)) -> (f32, f32) {
+        let (cx, cy) = self.centre;
+        let (dx, dy) = (x - cx, y - cy);
+        let turn = |a: f32| (cx + dx * a.cos() - dy * a.sin(), cy + dx * a.sin() + dy * a.cos());
+        let mirror = |a: f32| {
+            let (s, c) = ((2.0 * a).sin(), (2.0 * a).cos());
+            (cx + dx * c + dy * s, cy + dx * s - dy * c)
+        };
+        let axis = if self.kind == 0 { self.angle + std::f32::consts::FRAC_PI_2 } else { self.angle };
+        let count = self.count();
+        if !self.rotational && count <= 2 {
+            return mirror(axis);
+        }
+        let k = k + 1;
+        let a = std::f32::consts::TAU / count as f32 * k as f32;
+        if self.rotational || k % 2 == 0 { turn(a) } else { mirror(axis + a / 2.0) }
+    }
+}
+
+/// The part of the canvas a selection takes, as the app hands it to [`Layer::select`]: its box, and
+/// how much of each pixel there it takes (0 none, 255 all).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Area {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub coverage: Vec<u8>,
+}
+
+impl Area {
+    /// What `bytes` (the app's selection record) holds.
+    pub fn read(bytes: &[u8]) -> Area {
+        let mut area = Area::default();
+        for (id, value) in fields(bytes) {
+            let n = || value.get(..4).map_or(0, |v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+            match id {
+                1 => area.x = n(),
+                2 => area.y = n(),
+                3 => area.width = n(),
+                4 => area.height = n(),
+                5 => area.coverage = value.to_vec(),
+                _ => {}
+            }
+        }
+        area
+    }
+
+    /// How much it takes of the pixel at (`x`, `y`), canvas pixels.
+    pub fn at(&self, (x, y): (f32, f32)) -> u8 {
+        if !x.is_finite() || !y.is_finite() || x < self.x as f32 || y < self.y as f32 {
+            return 0;
+        }
+        let (col, row) = ((x - self.x as f32) as usize, (y - self.y as f32) as usize);
+        if col >= self.width as usize || row >= self.height as usize {
+            return 0;
+        }
+        self.coverage.get(row * self.width as usize + col).copied().unwrap_or(0)
+    }
+}
+
+/// A change the app asks of one item ([`Layer::edit`]): which, by its id, and whether it goes, or
+/// the fields it takes in place of its own.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Change {
+    pub id: u32,
+    pub delete: bool,
+    pub fields: Vec<(u16, Vec<u8>)>,
+}
+
+impl Change {
+    /// The changes `bytes` (the app's edit record) asks for.
+    pub fn read_all(bytes: &[u8]) -> Vec<Change> {
+        fields(bytes)
+            .filter(|(id, _)| *id == 1)
+            .map(|(_, change)| {
+                let mut out = Change::default();
+                for (id, value) in fields(change) {
+                    match id {
+                        1 => out.id = value.get(..4).map_or(0, |v| u32::from_le_bytes([v[0], v[1], v[2], v[3]])),
+                        2 => out.delete = value.first().is_some_and(|b| *b != 0),
+                        3 => out.fields = fields(value).map(|(f, v)| (f, v.to_vec())).collect(),
+                        _ => {}
+                    }
+                }
+                out
+            })
+            .collect()
+    }
+
+    /// `item` as it changes (unless it goes).
+    pub fn applied(&self, item: &Item) -> Item {
+        self.fields.iter().fold(item.clone(), |item, (id, value)| item.with_field(*id, Some(value)))
+    }
+}
+
 /// A layer's items to draw, as the app takes them: its brushes, each once, and its items in order,
-/// each naming its brush.
+/// each naming its brush and saying its id.
 #[derive(Default)]
 pub struct Drawn(Record, u32);
 
@@ -178,14 +464,15 @@ impl Drawn {
         self.1 - 1
     }
 
-    /// An item, its record without its brush (see [`Item::without_brush`]), drawn with brush
+    /// Item `id`, its record without its brush (see [`Item::without_brush`]), drawn with brush
     /// `brush`.
-    pub fn item(&mut self, record: &[u8], brush: u32) {
+    pub fn item(&mut self, id: u32, record: &[u8], brush: u32) {
         let mut item = Record::default();
-        for (id, bytes) in fields(record).filter(|(id, _)| *id != field::BRUSH && *id != field::BRUSH_REF) {
-            item.field(id, bytes);
+        let own = |f: &u16| *f != field::BRUSH && *f != field::BRUSH_REF && *f != field::ID;
+        for (f, bytes) in fields(record).filter(|(f, _)| own(f)) {
+            item.field(f, bytes);
         }
-        item.field(field::BRUSH_REF, &brush.to_le_bytes());
+        item.field(field::BRUSH_REF, &brush.to_le_bytes()).field(field::ID, &id.to_le_bytes());
         self.0.field(2, &item.bytes());
     }
 
@@ -212,8 +499,16 @@ pub trait Layer: Sized + Send {
     fn save(&self) -> Vec<u8>;
     /// A stroke recorded on it.
     fn add(&mut self, item: Item) -> Added;
-    /// Its items to draw, in order.
+    /// Its items to draw, in order, each with its id.
     fn draw(&self, list: &mut Drawn);
+    /// The ids of the items `area` takes (none, unless it says).
+    fn select(&self, _area: &Area) -> Vec<u32> {
+        Vec::new()
+    }
+    /// Makes `changes`: whether anything changed (nothing, unless it says).
+    fn edit(&mut self, _changes: &[Change]) -> bool {
+        false
+    }
 }
 
 /// The layer being worked on (the app hands one over for each change), and what the app reads from
@@ -287,6 +582,17 @@ impl<L: Layer> Held<L> {
         }
         self.put(list.bytes())
     }
+
+    pub fn select(&self, _len: i32) -> i32 {
+        let area = Area::read(&std::mem::take(&mut *lock(&self.input)));
+        let ids = lock(&self.layer).as_ref().map(|layer| layer.select(&area)).unwrap_or_default();
+        self.put(ids.iter().flat_map(|id| id.to_le_bytes()).collect())
+    }
+
+    pub fn edit(&self, _len: i32) -> i32 {
+        let changes = Change::read_all(&std::mem::take(&mut *lock(&self.input)));
+        i32::from(lock(&self.layer).as_mut().is_some_and(|layer| layer.edit(&changes)))
+    }
 }
 
 /// Exports the calls a plugin's own kinds of layer are reached through, for `$layer` (a type that
@@ -325,6 +631,16 @@ macro_rules! layers {
         pub extern "C" fn procraft_layer_draw() -> i32 {
             LAYER.draw()
         }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn procraft_layer_select(len: i32) -> i32 {
+            LAYER.select(len)
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn procraft_layer_edit(len: i32) -> i32 {
+            LAYER.edit(len)
+        }
     };
 }
 
@@ -346,6 +662,10 @@ mod tests {
         Item::from_record(r.bytes())
     }
 
+    fn floats(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
     #[test]
     fn an_item_is_read_and_kept_as_it_came() {
         let item = a_stroke(1, &[(1.0, 2.0), (3.0, 4.0)]);
@@ -361,17 +681,90 @@ mod tests {
     }
 
     #[test]
-    fn a_layer_s_items_to_draw_name_their_brushes() {
+    fn an_item_s_transform_moves_its_points_and_scales_its_width() {
+        let item = a_stroke(0, &[(1.0, 2.0), (3.0, 4.0)]);
+        // turned a quarter, doubled, moved
+        let t = [0.0, 2.0, -2.0, 0.0, 10.0, 20.0];
+        let moved = item.with_field(field::TRANSFORM, Some(&floats(&t)));
+        assert_eq!(moved.points(), [(6.0, 22.0), (2.0, 26.0)]);
+        assert_eq!(moved.width(), 13.0);
+        assert_eq!(then(&IDENTITY, &t), t);
+        assert_eq!(apply(&then(&t, &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]), (1.0, 2.0)), (7.0, 23.0));
+        // a transform that doesn't hold up is none
+        assert_eq!(item.with_field(field::TRANSFORM, Some(&[1, 2, 3])).transform(), IDENTITY);
+        assert_eq!(item.with_field(field::TRANSFORM, None).points(), item.points());
+    }
+
+    #[test]
+    fn an_item_with_samples_of_its_own_is_laid_in_one_go() {
+        let item = a_stroke(0, &[(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]);
+        let samples = item.samples();
+        assert_eq!(samples[1].time, 8.0);
+        let half = samples[0].toward(&samples[1], 0.5);
+        assert_eq!((half.x, half.y, half.time), (2.0, 3.0, 4.0));
+        let piece = item.with_samples(&samples[1..]);
+        assert_eq!(piece.points(), [(3.0, 4.0), (5.0, 6.0)]);
+        assert_eq!(piece.samples()[0].time, 0.0, "its time from its first");
+        assert_eq!(piece.field(field::STARTED), Some(&8.0f64.to_le_bytes()[..]));
+        assert_eq!(piece.field(field::BATCHES), Some(&(2 | LIFTED).to_le_bytes()[..]));
+        assert_eq!(piece.field(900), Some(&b"later"[..]), "the rest as it was");
+    }
+
+    #[test]
+    fn a_symmetric_item_s_paths_are_its_own_and_its_copies() {
+        let item = a_stroke(0, &[(10.0, 0.0)]);
+        // mirrored left to right about x = 50 (vertical symmetry at no turn)
+        let mut sym = vec![0u8, 0];
+        sym.extend(floats(&[50.0, 50.0, 0.0]));
+        sym.extend(2u32.to_le_bytes());
+        let paths = item.with_field(field::SYMMETRY, Some(&sym)).paths();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], [(10.0, 0.0)]);
+        assert!((paths[1][0].0 - 90.0).abs() < 1e-4 && paths[1][0].1.abs() < 1e-4, "{:?}", paths[1]);
+        // radial in four, turned only: a quarter, a half and three quarters round
+        let mut radial = vec![3u8, 1];
+        radial.extend(floats(&[0.0, 0.0, 0.0]));
+        radial.extend(4u32.to_le_bytes());
+        let paths = item.with_field(field::SYMMETRY, Some(&radial)).paths();
+        assert_eq!(paths.len(), 4);
+        assert!((paths[2][0].0 + 10.0).abs() < 1e-4, "{:?}", paths[2]);
+    }
+
+    #[test]
+    fn a_selection_s_area_and_an_edit_s_changes_are_read() {
+        let mut area = Record::default();
+        area.field(1, &5u32.to_le_bytes()).field(2, &6u32.to_le_bytes());
+        area.field(3, &2u32.to_le_bytes()).field(4, &1u32.to_le_bytes()).field(5, &[0, 255]);
+        let area = Area::read(&area.bytes());
+        assert_eq!((area.at((6.5, 6.5)), area.at((5.5, 6.5)), area.at((8.0, 6.5))), (255, 0, 0));
+        let mut fields_set = Record::default();
+        fields_set.field(field::COLOUR, &floats(&[1.0, 0.0, 0.0]));
+        let mut one = Record::default();
+        one.field(1, &7u32.to_le_bytes()).field(3, &fields_set.bytes());
+        let mut gone = Record::default();
+        gone.field(1, &8u32.to_le_bytes()).field(2, &[1]);
+        let mut edit = Record::default();
+        edit.field(1, &one.bytes()).field(1, &gone.bytes());
+        let changes = Change::read_all(&edit.bytes());
+        assert_eq!(changes.len(), 2);
+        assert_eq!((changes[0].id, changes[0].delete, changes[1].id, changes[1].delete), (7, false, 8, true));
+        let recoloured = changes[0].applied(&a_stroke(0, &[(1.0, 1.0)]));
+        assert_eq!(recoloured.field(field::COLOUR), Some(&floats(&[1.0, 0.0, 0.0])[..]));
+    }
+
+    #[test]
+    fn a_layer_s_items_to_draw_name_their_brushes_and_ids() {
         let item = a_stroke(0, &[(1.0, 2.0)]);
         let mut list = Drawn::default();
         let b = list.brush(item.brush().unwrap());
-        list.item(&item.without_brush(), b);
+        list.item(9, &item.without_brush(), b);
         let bytes = list.bytes();
         let read: Vec<(u16, &[u8])> = fields(&bytes).collect();
         assert_eq!(read[0], (1, &b"brush"[..]));
         assert_eq!(read[1].0, 2);
-        let named = fields(read[1].1).find(|(id, _)| *id == field::BRUSH_REF).unwrap().1;
-        assert_eq!(named, 0u32.to_le_bytes());
+        let named = |id: u16| fields(read[1].1).find(|(f, _)| *f == id).unwrap().1.to_vec();
+        assert_eq!(named(field::BRUSH_REF), 0u32.to_le_bytes());
+        assert_eq!(named(field::ID), 9u32.to_le_bytes());
     }
 
     struct Strokes(Vec<Item>);
@@ -395,9 +788,9 @@ mod tests {
             Added::Kept
         }
         fn draw(&self, list: &mut Drawn) {
-            for item in &self.0 {
+            for (i, item) in self.0.iter().enumerate() {
                 let b = list.brush(item.brush().unwrap_or_default());
-                list.item(&item.without_brush(), b);
+                list.item(i as u32, &item.without_brush(), b);
             }
         }
     }
@@ -417,5 +810,7 @@ mod tests {
         *held.input.lock().unwrap() = saved;
         assert_eq!(held.load(0, len), 0);
         assert_eq!(held.layer.lock().unwrap().as_ref().unwrap().0, [item]);
+        // one that selects and edits nothing says so
+        assert_eq!((held.select(0), held.edit(0)), (0, 0));
     }
 }

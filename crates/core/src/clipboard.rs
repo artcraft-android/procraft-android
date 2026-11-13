@@ -276,20 +276,31 @@ impl CanvasSession {
         if st.canvas.is_none() {
             return;
         }
-        // plugins' layers' items stay where they were drawn: flipped, their layers become ordinary
-        // ones, in the same step
+        // plugins' layers' items mirrored with their pixels, in the same step (those whose plugin
+        // can't move them become ordinary layers)
         let before = st.doc.clone();
-        let plugin_layers: Vec<LayerId> = st.doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
-        for id in &plugin_layers {
-            st.doc.rasterize(*id);
-        }
+        let (w, h) = (st.doc.width() as f32, st.doc.height() as f32);
+        let flip = if horizontal {
+            procraft_engine::geom::Affine { a: -1.0, b: 0.0, c: 0.0, d: 1.0, e: w, f: 0.0 }
+        } else {
+            procraft_engine::geom::Affine { a: 1.0, b: 0.0, c: 0.0, d: -1.0, e: 0.0, f: h }
+        };
+        let mut doc = st.doc.clone();
+        let moved = st.move_all_items(flip, &mut doc);
+        let rasterized =
+            doc.layers().iter().zip(before.layers()).any(|(a, b)| a.plugin.is_none() && b.plugin.is_some());
+        st.doc = doc;
         let Some(canvas) = st.canvas.as_mut() else { return };
         canvas.name_next_step(if horizontal { "flip canvas horizontally" } else { "flip canvas vertically" });
         // mirrored on the GPU, nothing read back
-        if plugin_layers.is_empty() {
-            canvas.flip_layers(ids, horizontal);
-        } else {
+        if rasterized {
             canvas.flip_layers_and_document(ids, horizontal, before);
+        } else {
+            canvas.flip_layers(ids, horizontal);
+        }
+        st.flush();
+        if let Some(made) = st.canvas.as_ref().and_then(procraft_gpu::Canvas::undo_step) {
+            st.note_moved_data(made, moved);
         }
         st.revision += 1;
         self.shared.frame(st);

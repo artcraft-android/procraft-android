@@ -195,10 +195,49 @@ fn snap_bounds(
         .collect()
 }
 
+/// The affine map taking corners `from` to corners `to` (top left, top right, bottom right, bottom
+/// left): exact where they are a parallelogram moved as one, else what the top left, top right and
+/// bottom left corners say.
+fn corners_affine(from: [Vec2; 4], to: [Vec2; 4]) -> Option<Affine> {
+    let ([s0, s1, _, s3], [c0, c1, _, c3]) = (from, to);
+    let (u, v, u2, v2) = (s1 - s0, s3 - s0, c1 - c0, c3 - c0);
+    let det = u.x * v.y - u.y * v.x;
+    if !det.is_finite() || det.abs() < 1e-9 {
+        return None;
+    }
+    // the linear part takes u to u2 and v to v2
+    let (ia, ib, ic, id) = (v.y / det, -u.y / det, -v.x / det, u.x / det);
+    let a = u2.x * ia + v2.x * ib;
+    let b = u2.y * ia + v2.y * ib;
+    let c = u2.x * ic + v2.x * id;
+    let d = u2.y * ic + v2.y * id;
+    let t = Affine { a, b, c, d, e: c0.x - (a * s0.x + c * s0.y), f: c0.y - (b * s0.x + d * s0.y) };
+    t.is_finite().then_some(t)
+}
+
 impl State {
     /// Ends an open transform: `commit` keeps it as one undo step, otherwise the layer is put back.
+    /// A plugin's layer's items are moved as items, by where the box's corners went, and the layer
+    /// laid again exactly.
     pub(crate) fn end_transform(&mut self, commit: bool) {
         self.snap_pending = None;
+        if let Some((layer, ids)) = self.transform_items.take()
+            && let Some(t) = self.transform.take()
+        {
+            let moved = corners_affine(t.source(), t.content()).filter(|_| commit);
+            if let Some(canvas) = self.canvas.as_mut() {
+                canvas.end_transform(false);
+            }
+            if let Some(moved) = moved {
+                let name = match self.transform_mode {
+                    procraft_engine::transform::TransformMode::Uniform => "uniform transform",
+                    _ => "non-uniform transform",
+                };
+                self.flush();
+                self.move_taken_items(layer, Some(&ids), moved, name);
+            }
+            return;
+        }
         let within = if commit && self.transform.is_some() { self.changed_since_begin() } else { None };
         if self.transform.take().is_some()
             && let Some(canvas) = self.canvas.as_mut()
@@ -346,6 +385,17 @@ impl CanvasSession {
         let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && !l.drawn_from_data();
         // with layers picked, every paint layer chosen (those in a chosen group too) moves
         let chosen = st.doc.chosen();
+        // a plugin's layer alone moves its items as items: those the selection takes
+        st.transform_items = None;
+        let shown = st.doc.layer(current).is_some_and(|l| l.visible) && !st.doc.is_locked(current);
+        if chosen.len() <= 1 && st.plugin_layer_kind(current).is_some() && shown {
+            let ids: Vec<u32> = st.taken_items(current).unwrap_or_default().iter().filter_map(|i| i.id).collect();
+            if ids.is_empty() {
+                return None;
+            }
+            st.transform_items = Some((current, ids));
+        }
+        let movable = |l: &Layer| movable(l) || st.transform_items.as_ref().is_some_and(|(id, _)| *id == l.id);
         let targets: Vec<LayerId> = if chosen.len() > 1 {
             st.doc
                 .layers()
@@ -358,6 +408,7 @@ impl CanvasSession {
             st.doc.layer(current).filter(|l| movable(l)).map(|_| current).into_iter().collect()
         };
         if targets.is_empty() {
+            st.transform_items = None;
             return None;
         }
         st.flush();

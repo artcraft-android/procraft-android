@@ -100,6 +100,9 @@
 //!   takes an item recorded on that layer (0: kept as drawn, 1: kept, and the layer is drawn again
 //!   from its items); `procraft_layer_save() -> i32` gives the layer's data now and
 //!   `procraft_layer_draw() -> i32` its items to draw, each its length at `procraft_layer_out()`.
+//!   If it has them, `procraft_layer_select(len: i32) -> i32` gives the ids of the items a selection
+//!   (`len` bytes) takes, and `procraft_layer_edit(len: i32) -> i32` makes the changes `len` bytes
+//!   ask of its items (not 0: something changed).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
@@ -220,6 +223,8 @@ const LAYER_LOAD: &str = "procraft_layer_load";
 const LAYER_ADD: &str = "procraft_layer_add";
 const LAYER_SAVE: &str = "procraft_layer_save";
 const LAYER_DRAW: &str = "procraft_layer_draw";
+const LAYER_SELECT: &str = "procraft_layer_select";
+const LAYER_EDIT: &str = "procraft_layer_edit";
 /// What a call on a plugin's own artwork may spend (its drawing, its saving), and how long; a touch,
 /// which comes with each sample while the canvas waits, far less.
 const CANVAS_FUEL: u64 = 800_000_000;
@@ -583,6 +588,9 @@ struct LayerCalls {
     add: TypedFunc<i32, i32>,
     save: TypedFunc<(), i32>,
     draw: TypedFunc<(), i32>,
+    /// Which items a selection takes, and changes to items, if it has them.
+    select: Option<TypedFunc<i32, i32>>,
+    edit: Option<TypedFunc<i32, i32>>,
 }
 
 /// What a plugin says of an item recorded on its layer.
@@ -856,6 +864,8 @@ impl Running {
                     add: instance.get_typed_func(&store, LAYER_ADD).ok()?,
                     save: instance.get_typed_func(&store, LAYER_SAVE).ok()?,
                     draw: instance.get_typed_func(&store, LAYER_DRAW).ok()?,
+                    select: instance.get_typed_func(&store, LAYER_SELECT).ok(),
+                    edit: instance.get_typed_func(&store, LAYER_EDIT).ok(),
                 })
             })();
             let key_buffer = instance.get_typed_func(&store, KEY_BUFFER).ok();
@@ -1234,6 +1244,43 @@ impl Running {
     /// The items the layer it works on draws, in order (at most `most` bytes).
     pub(crate) fn layer_draw(&mut self, most: usize) -> Result<Vec<u8>, Stop> {
         self.layer_out(|calls| &calls.draw, most)
+    }
+
+    /// Whether it says which items a selection takes and changes them.
+    pub(crate) fn layer_edits(&self) -> bool {
+        self.layers.as_ref().is_some_and(|calls| calls.select.is_some() && calls.edit.is_some())
+    }
+
+    /// The ids of the items of the layer it works on that `area` (a selection) takes, at most
+    /// `most` of them.
+    pub(crate) fn layer_select(&mut self, area: &[u8], most: usize) -> Result<Vec<u32>, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(area, &mut left, until)?;
+        let Running { store, layers, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (layers.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let Some(select) = calls.select.as_ref() else { return Ok(Vec::new()) };
+        guarded(|| {
+            let bytes =
+                usize::try_from(long_call(store, select, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            if bytes % 4 != 0 || bytes / 4 > most {
+                return Err(Stop::Nonsense);
+            }
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut out = vec![0_u8; bytes];
+            memory.read(&*store, at, &mut out).map_err(|_| Stop::Nonsense)?;
+            Ok(out.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect())
+        })
+    }
+
+    /// The changes `changes` asks of the items of the layer it works on, made: whether anything
+    /// changed.
+    pub(crate) fn layer_edit(&mut self, changes: &[u8]) -> Result<bool, Stop> {
+        let (mut left, until) = (LAYER_FUEL, Instant::now() + MOST_LAYER_TIME);
+        let len = self.layer_in(changes, &mut left, until)?;
+        let Running { store, layers, .. } = self;
+        let Some(edit) = layers.as_ref().and_then(|calls| calls.edit.as_ref()) else { return Ok(false) };
+        Ok(guarded(|| long_call(store, edit, len, &mut left, until))? != 0)
     }
 
     /// The panel it asked to show since last asked (none if it didn't), and whether it asked to

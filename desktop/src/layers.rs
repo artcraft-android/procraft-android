@@ -1397,7 +1397,13 @@ impl Layers {
             LayerOption::EditText => self.edit_text = Some(l.id),
             LayerOption::Rasterize => {
                 session.rasterize_layer(l.id);
-                self.notice = Some(("Text rasterized".into(), true));
+                self.notice = Some((if l.text { "Text rasterized" } else { "Layer rasterized" }.into(), true));
+            }
+            // a plugin's layer: its strokes recoloured, or given the paint brush, as strokes
+            LayerOption::Recolour | LayerOption::ApplyBrush => {
+                let colour = does == LayerOption::Recolour;
+                session.select_layer(l.id);
+                session.restyle_plugin_items(colour, !colour, !colour, !colour);
             }
             LayerOption::MergeDown => _ = session.merge_down(l.id),
             LayerOption::CombineDown => _ = session.combine_down(l.id),

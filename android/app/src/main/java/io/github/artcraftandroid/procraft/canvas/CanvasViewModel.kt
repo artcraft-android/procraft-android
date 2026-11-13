@@ -4449,7 +4449,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun rasterize(l: LayerInfo) {
         layerChange { it.rasterizeLayer(l.id) }
-        showNotice("Text rasterized", warning = true)
+        showNotice(if (l.text) "Text rasterized" else "Layer rasterized", warning = true)
+    }
+
+    /**
+     * A plugin's layer [l]: the strokes the selection takes (every one with nothing selected) given
+     * the paint colour ([colour]), or the paint brush with its size and opacity, as strokes.
+     */
+    fun restyleStrokes(l: LayerInfo, colour: Boolean) = layerChange {
+        it.selectLayer(l.id)
+        it.restylePluginItems(colour, !colour, !colour, !colour)
     }
 
     // editing the library

@@ -66,16 +66,23 @@ impl CanvasSession {
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
-        let (Some(old), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return false };
+        if st.canvas.is_none() || st.gpu.is_none() {
+            return false;
+        }
         let (sw, sh) = (st.doc.width(), st.doc.height());
         let c = crop([x, y, width, height], angle, resample_to.then_some((new_width, new_height)));
         let mut doc = st.doc.resized(c.width, c.height);
-        // plugins' layers' items stay where they were drawn: cropped, their layers become ordinary
-        // ones (undoing the crop brings them back)
-        let plugin_layers: Vec<_> = doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
-        for id in plugin_layers {
-            doc.rasterize(id);
+        // plugins' layers' items moved with their pixels (those whose plugin can't move them become
+        // ordinary layers); undoing the crop brings back the document as it was
+        if let Some(to_new) = c.to_old.inverse() {
+            st.move_all_items(to_new, &mut doc);
+        } else {
+            let plugin_layers: Vec<_> = doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
+            for id in plugin_layers {
+                doc.rasterize(id);
+            }
         }
+        let (Some(old), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return false };
         let ids: Vec<_> = st.doc.pixel_layer_ids().collect();
         // the old canvas stays for undo, so this is all more: refused while there is still room,
         // not left to the system to find out

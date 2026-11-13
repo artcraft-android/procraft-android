@@ -2,10 +2,10 @@
   "schema": 1,
   "id": "io.github.artcraftandroid.vector-layers",
   "name": "Vector layers",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "holds": ["hooks"],
   "publisher": { "name": "ProCraft" },
-  "description": "Layers whose strokes stay strokes: drawn with any brush, the eraser hiding them until its stroke is gone.",
+  "description": "Layers whose strokes stay strokes: drawn with any brush, then moved, restyled, cut or hidden as strokes.",
   "compat": { "procraft": { "interface": 3 } },
   "permissions": [],
   "hooks": [],
@@ -13,6 +13,8 @@
     { "key": "vector", "label": "Vector layer" }
   ],
   "controls": [
-    { "key": "eraser", "type": "slider", "label": "Eraser", "least": 0, "most": 1, "step": 1, "starts": 0, "names": ["Mask", "Whole"] }
+    { "key": "eraser", "type": "slider", "label": "Eraser", "least": 0, "most": 2, "step": 1, "starts": 0, "names": ["Mask", "Whole", "Cut"] },
+    { "key": "touching", "type": "switch", "label": "Selections take touching strokes", "starts": false },
+    { "key": "masks", "type": "switch", "label": "Selections take masks", "starts": true }
   ]
 }

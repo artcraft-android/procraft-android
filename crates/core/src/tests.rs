@@ -11968,3 +11968,263 @@ fn an_artwork_with_a_vector_layer_exports_to_the_package_format_as_pixels_and_op
     assert!(most_apart(&layer_rgba(&opened, red.id), &pixels) <= 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Layer `id`'s pixels moved `dx` across (whole pixels; what comes in from the edge is clear).
+fn shifted(rgba: &[u8], side: u32, dx: i32) -> Vec<u8> {
+    let mut out = vec![0; rgba.len()];
+    for y in 0..side as i32 {
+        for x in 0..side as i32 {
+            let from = x - dx;
+            if (0..side as i32).contains(&from) {
+                let (to, at) = (((y * side as i32 + x) * 4) as usize, ((y * side as i32 + from) * 4) as usize);
+                out[to..to + 4].copy_from_slice(&rgba[at..at + 4]);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_cut_eraser_cuts_vector_strokes_into_pieces_and_lays_them_again() {
+    let Some((s, plugins, dir)) = vector_session(160, "cut") else { return };
+    assert!(plugins.set_slider(format!("{VECTOR_ID}.eraser"), 2.0).is_some());
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.3);
+    stroke_across(&s, 50.0, 10.0, 150.0);
+    stroke_across(&s, 110.0, 10.0, 150.0);
+    let both = layer_rgba(&s, vector);
+    // a short eraser stroke over the first one's middle: the middle goes, both ends stay as strokes
+    s.set_tool(ToolKind::Erase);
+    s.set_brush_size(0.1);
+    stroke_down(&s, 80.0, 40.0, 60.0);
+    let rgba = layer_rgba(&s, vector);
+    assert_eq!(alpha_in(&rgba, 160, 80, 50), 0, "the middle cut away");
+    assert!(alpha_in(&rgba, 160, 20, 50) > 0 && alpha_in(&rgba, 160, 140, 50) > 0, "the ends left");
+    let items = vector_items(&s, vector);
+    assert_eq!(items.len(), 3, "the first in two pieces, and the second");
+    assert!(items[0].samples.last().unwrap().pos.x < 80.0 && items[1].samples[0].pos.x > 80.0);
+    assert_eq!(items[0].samples[0].time_ms, 0.0);
+    // one step: undo brings the stroke back whole
+    assert_eq!(s.undo().as_deref(), Some("Erase stroke"));
+    assert_eq!(layer_rgba(&s, vector), both);
+    assert_eq!(vector_items(&s, vector).len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_selection_takes_vector_strokes_inside_it_or_touching_it_and_deleting_a_mask_brings_back_what_it_hid() {
+    let Some((s, plugins, dir)) = vector_session(160, "select") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.3);
+    stroke_across(&s, 40.0, 20.0, 140.0);
+    stroke_across(&s, 100.0, 20.0, 140.0);
+    let inked = layer_rgba(&s, vector);
+    // a mask down across both
+    s.set_tool(ToolKind::Erase);
+    s.set_brush_size(0.15);
+    stroke_down(&s, 80.0, 10.0, 150.0);
+    let masked = layer_rgba(&s, vector);
+    assert!(alpha_in(&masked, 160, 80, 40) < alpha_in(&inked, 160, 80, 40));
+    let ids: Vec<u32> = vector_items(&s, vector).iter().filter_map(|i| i.id).collect();
+    assert_eq!(ids.len(), 3);
+    // with nothing selected, every stroke is taken
+    assert_eq!(s.taken_plugin_items(), ids);
+    // a box round the top stroke takes it alone; touching strokes taken too with the switch on
+    s.select_shape(false, 5.0, 20.0, 155.0, 60.0, crate::SelectionJoin::Add);
+    assert_eq!(s.taken_plugin_items(), [ids[0]]);
+    let reach = s.taken_plugin_items_reach();
+    assert!(reach[0] < 20.0 && reach[2] > 140.0 && reach[1] < 40.0 && reach[3] > 40.0, "{reach:?}");
+    assert!(plugins.set_switch(format!("{VECTOR_ID}.touching"), true));
+    assert_eq!(s.taken_plugin_items(), [ids[0], ids[2]], "the mask touches it too");
+    assert!(plugins.set_switch(format!("{VECTOR_ID}.touching"), false));
+    s.select_none();
+    // a box round the mask alone, deleted: what it hid shows again, as one step
+    s.select_shape(false, 70.0, 0.0, 90.0, 160.0, crate::SelectionJoin::Add);
+    assert_eq!(s.taken_plugin_items(), [ids[2]]);
+    assert!(s.delete_plugin_items());
+    assert_eq!(layer_rgba(&s, vector), inked, "the ink back as it was");
+    assert_eq!(vector_items(&s, vector).len(), 2);
+    assert_eq!(s.undo().as_deref(), Some("Delete strokes"));
+    assert_eq!(layer_rgba(&s, vector), masked);
+    // Clear with nothing selected deletes every stroke
+    s.select_none();
+    s.clear_layer();
+    assert!(vector_items(&s, vector).is_empty());
+    assert!(layer_rgba(&s, vector).iter().all(|b| *b == 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn vector_strokes_moved_as_strokes_are_laid_again_exactly_in_one_step() {
+    let Some((s, _plugins, dir)) = vector_session(160, "move") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.3);
+    stroke_across(&s, 50.0, 20.0, 110.0);
+    let drawn = layer_rgba(&s, vector);
+    // moved 30 pixels across: the same stroke there
+    assert!(s.transform_plugin_items(vec![1.0, 0.0, 0.0, 1.0, 30.0, 0.0]));
+    assert_eq!(most_apart(&layer_rgba(&s, vector), &shifted(&drawn, 160, 30)), 0, "laid again, moved");
+    let item = &vector_items(&s, vector)[0];
+    assert_eq!(item.transform.map(|t| (t.e, t.f)), Some((30.0, 0.0)));
+    assert_eq!(s.undo().as_deref(), Some("Move strokes"));
+    assert_eq!(layer_rgba(&s, vector), drawn);
+    // doubled about its start: twice as long and as wide
+    assert!(s.transform_plugin_items(vec![2.0, 0.0, 0.0, 2.0, -20.0, -50.0]));
+    let rgba = layer_rgba(&s, vector);
+    assert!(alpha_in(&rgba, 160, 190 - 40, 50) > 0, "reaching twice as far");
+    let tall = |p: &[u8]| (0..160).filter(|y| alpha_in(p, 160, 60, *y) > 0).count();
+    assert!(tall(&rgba) > tall(&drawn) * 3 / 2, "{} by {}", tall(&rgba), tall(&drawn));
+    s.undo();
+    // the transform tool on it moves its strokes as strokes: one pixel across
+    assert!(s.transform_begin().is_some());
+    s.transform_nudge(150.0, 50.0);
+    s.transform_end(true);
+    assert_eq!(vector_items(&s, vector)[0].transform.map(|t| (t.e, t.f)), Some((1.0, 0.0)));
+    assert_eq!(most_apart(&layer_rgba(&s, vector), &shifted(&drawn, 160, 1)), 0, "laid again a pixel across");
+    s.undo();
+    assert_eq!(layer_rgba(&s, vector), drawn);
+    assert_eq!(vector_items(&s, vector)[0].transform, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn vector_strokes_are_recoloured_restyled_and_smoothed_as_strokes() {
+    let Some((s, _plugins, dir)) = vector_session(160, "restyle") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(0.2);
+    stroke_across(&s, 50.0, 20.0, 140.0);
+    let drawn = layer_rgba(&s, vector);
+    let colour_at = |p: &[u8]| p[((50 * 160 + 80) * 4) as usize..((50 * 160 + 80) * 4 + 3) as usize].to_vec();
+    assert_eq!(colour_at(&drawn), [255, 0, 0]);
+    // the colour now given it, as one step
+    s.set_color(0.0, 0.0, 1.0);
+    assert!(s.restyle_plugin_items(true, false, false, false));
+    assert_eq!(colour_at(&layer_rgba(&s, vector)), [0, 0, 255]);
+    assert_eq!(vector_items(&s, vector)[0].colour, [0.0, 0.0, 1.0]);
+    assert_eq!(s.undo().as_deref(), Some("Restyle strokes"));
+    assert_eq!(layer_rgba(&s, vector), drawn);
+    // a bigger size: wider, its width for hit tests with it
+    let width = vector_items(&s, vector)[0].width;
+    s.set_brush_size(0.6);
+    assert!(s.restyle_plugin_items(false, false, true, false));
+    let item = &vector_items(&s, vector)[0];
+    assert!(item.width > width * 1.5 && (item.size - 0.6).abs() < 1e-6);
+    let tall = |p: &[u8]| (0..160).filter(|y| alpha_in(p, 160, 80, *y) > 0).count();
+    assert!(tall(&layer_rgba(&s, vector)) > tall(&drawn));
+    s.undo();
+    // another brush, and its own smoothing
+    let other = library_brush(&s, |b| b.grain.image.is_some() && b.secondary.is_none()).unwrap();
+    assert!(s.select_brush(other.0, other.1));
+    assert!(s.restyle_plugin_items(false, true, false, false));
+    let name = s.shared.lock().library[other.0 as usize].brushes[other.1 as usize].name.clone();
+    assert_eq!(vector_items(&s, vector)[0].brush_name, name);
+    assert_ne!(layer_rgba(&s, vector), drawn);
+    assert!(s.smooth_plugin_items(1.0));
+    assert_eq!(vector_items(&s, vector)[0].smoothing, Some(1.0));
+    assert_eq!(s.undo().as_deref(), Some("Smooth strokes"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_vector_stroke_drawn_inside_a_selection_is_laid_again_within_it() {
+    let Some((s, _plugins, dir)) = vector_session(160, "clip") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.4);
+    s.select_shape(false, 0.0, 0.0, 80.0, 160.0, crate::SelectionJoin::Add);
+    stroke_across(&s, 50.0, 20.0, 140.0);
+    let drawn = layer_rgba(&s, vector);
+    assert!(alpha_in(&drawn, 160, 40, 50) > 0 && alpha_in(&drawn, 160, 120, 50) == 0, "kept within it");
+    assert!(vector_items(&s, vector)[0].clip.is_some());
+    // with nothing selected, laid again within it all the same
+    s.select_none();
+    assert!(s.draw_plugin_layer_again(vector));
+    assert_eq!(layer_rgba(&s, vector), drawn);
+    // moved, its selection moves with it
+    assert!(s.transform_plugin_items(vec![1.0, 0.0, 0.0, 1.0, 0.0, 40.0]));
+    let moved = layer_rgba(&s, vector);
+    assert!(alpha_in(&moved, 160, 40, 90) > 0 && alpha_in(&moved, 160, 120, 90) == 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_whole_and_cut_erasers_reach_a_symmetric_vector_stroke_s_copies() {
+    let Some((s, plugins, dir)) = vector_session(160, "symmetry") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_guide_on(true);
+    s.set_guide_kind(crate::GuideType::Symmetry);
+    s.set_guide_symmetry(crate::SymmetryType::Vertical, false);
+    s.set_guide_assisted(true);
+    s.set_brush_size(0.3);
+    // drawn on the left, copied on the right
+    stroke_down(&s, 30.0, 30.0, 130.0);
+    let rgba = layer_rgba(&s, vector);
+    assert!(alpha_in(&rgba, 160, 30, 80) > 0 && alpha_in(&rgba, 160, 130, 80) > 0);
+    // Cut across the copy's middle: the stroke and its copy both lose their middles
+    assert!(plugins.set_slider(format!("{VECTOR_ID}.eraser"), 2.0).is_some());
+    s.set_tool(ToolKind::Erase);
+    s.set_brush_size(0.1);
+    s.stroke_begin(PointerKind::Stylus, vec![sample(115.0, 80.0, 0.0)]);
+    s.stroke_add((1..8).map(|i| sample(115.0 + i as f32 * 4.0, 80.0, f64::from(i) * 8.0)).collect());
+    s.stroke_end(vec![sample(147.0, 80.0, 64.0)]);
+    let cut = layer_rgba(&s, vector);
+    assert_eq!((alpha_in(&cut, 160, 30, 80), alpha_in(&cut, 160, 130, 80)), (0, 0), "both cut");
+    assert!(alpha_in(&cut, 160, 30, 40) > 0 && alpha_in(&cut, 160, 130, 120) > 0, "the rest of both left");
+    assert_eq!(vector_items(&s, vector).len(), 2);
+    // Whole on the copy alone: the stroke goes with it
+    assert!(plugins.set_slider(format!("{VECTOR_ID}.eraser"), 1.0).is_some());
+    s.stroke_begin(PointerKind::Stylus, vec![sample(115.0, 40.0, 0.0)]);
+    s.stroke_add((1..8).map(|i| sample(115.0 + i as f32 * 4.0, 40.0, f64::from(i) * 8.0)).collect());
+    s.stroke_end(vec![sample(147.0, 40.0, 64.0)]);
+    assert_eq!(vector_items(&s, vector).len(), 1, "the top piece gone, copy and all");
+    assert_eq!(alpha_in(&layer_rgba(&s, vector), 160, 30, 40), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn flipping_or_cropping_the_canvas_moves_vector_strokes_as_strokes() {
+    let Some((s, _plugins, dir)) = vector_session(160, "flip") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.3);
+    stroke_across(&s, 50.0, 20.0, 100.0);
+    let drawn = layer_rgba(&s, vector);
+    // mirrored across: still a vector layer, its stroke mirrored with its pixels
+    s.flip_canvas(true);
+    assert!(s.layers().iter().any(|l| l.id == vector && l.plugin_kind.is_some()));
+    let item = &vector_items(&s, vector)[0];
+    assert_eq!(item.transform.map(|t| (t.a, t.e)), Some((-1.0, 160.0)));
+    let flipped = layer_rgba(&s, vector);
+    assert!(alpha_in(&flipped, 160, 120, 50) > 0 && alpha_in(&flipped, 160, 40, 50) == 0);
+    // laid again as strokes, it stays where its pixels went (within a level or so of the mirror)
+    assert!(s.draw_plugin_layer_again(vector));
+    let again = layer_rgba(&s, vector);
+    assert!(alpha_in(&again, 160, 120, 50) > 0 && alpha_in(&again, 160, 40, 50) == 0);
+    s.undo();
+    s.undo();
+    assert_eq!(layer_rgba(&s, vector), drawn);
+    assert_eq!(vector_items(&s, vector)[0].transform, None, "the flip undone, data and all");
+    // cropped 40 pixels off the left: the stroke moves with its pixels
+    assert!(s.crop_canvas(40.0, 0.0, 120.0, 160.0, 0.0, false, 0, 0));
+    assert!(s.layers().iter().any(|l| l.id == vector && l.plugin_kind.is_some()));
+    assert_eq!(vector_items(&s, vector)[0].transform.map(|t| (t.e, t.f)), Some((-40.0, 0.0)));
+    assert!(s.draw_plugin_layer_again(vector));
+    let cropped = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(vector)).unwrap();
+    assert!(alpha_in(&cropped, 120, 20, 50) > 0, "its start now 40 pixels further left");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn laying_a_vector_layer_again_keeps_one_copy_of_it_for_undo() {
+    let Some((s, _plugins, dir)) = vector_session(160, "budget") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.2);
+    for y in (20..150).step_by(10) {
+        stroke_across(&s, y as f32, 10.0, 150.0);
+    }
+    let bytes = |s: &CanvasSession| s.shared.lock().canvas.as_ref().unwrap().history_bytes();
+    let before = bytes(&s);
+    assert!(s.draw_plugin_layer_again(vector));
+    // thirteen strokes laid again, the step keeping the layer once
+    assert_eq!(bytes(&s) - before, 160 * 160 * 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
