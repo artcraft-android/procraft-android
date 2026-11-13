@@ -946,7 +946,8 @@ fn dump_brush_comparisons() {
 /// `PROCRAFT_DUMP` (beside the file's own thumbnail, `<brush>-thumbnail.png`, when it has one).
 /// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p procraft-core dump_brush_strokes -- --ignored`
 /// (`BRUSH_SET` can be another app's brush file too: .abr, .sut, .kpp and the rest; or
-/// `bundled:Name,Other Name` for those of the brushes the app comes with.)
+/// `bundled:Name,Other Name` for those of the brushes the app comes with; `DUMP_FINGER=1` draws
+/// with a finger.)
 #[test]
 #[ignore]
 fn dump_brush_strokes() {
@@ -1015,6 +1016,9 @@ fn dump_brush_strokes() {
             Err(_) => vec![start, 0.3, 1.0],
         };
         let rows = sizes.len() as f32;
+        // with DUMP_FINGER, drawn with a finger (full pressure, no lean), as a stroke on another
+        // app's canvas may have been
+        let finger = std::env::var_os("DUMP_FINGER").is_some();
         // at full opacity, as a thumbnail is drawn (the opacity a brush file keeps is where its
         // slider was left)
         s.set_brush_opacity(1.0);
@@ -1033,9 +1037,13 @@ fn dump_brush_strokes() {
                 // leaning as the brush's own preview leans the pen, as its thumbnail was drawn (a
                 // shape that follows the azimuth turns as there)
                 p.orientation = lean;
+                if finger {
+                    p.pressure = 1.0;
+                    p.orientation = 0.0;
+                }
                 p
             };
-            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            s.stroke_begin(if finger { PointerKind::Finger } else { PointerKind::Stylus }, vec![at(0)]);
             s.stroke_add((1..120).map(at).collect());
             s.stroke_end(vec![at(120)]);
         }
