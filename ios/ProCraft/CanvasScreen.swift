@@ -386,6 +386,12 @@ private struct BlockedDialog: View {
                 title: "Mesh is locked", message: "\u{201C}\(model.session.meantMeshName() ?? "")\u{201D} can't be painted while it is locked.",
                 action: "Open Layers", icon: PcIcons.pageLocked, destructive: false, extra: "Unlock"
             )
+        // Liquify on a layer whose alpha is locked
+        case .alphaLocked:
+            return AlertContent(
+                title: "Alpha Lock is on", message: "\u{201C}\(name)\u{201D} can't be liquified while its alpha is locked.",
+                action: "Open Layers", icon: PcIcons.pageLocked, destructive: false, extra: "Turn Off"
+            )
         }
     }
 

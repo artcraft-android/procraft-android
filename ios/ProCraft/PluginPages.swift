@@ -105,6 +105,8 @@ private struct PluginCard: View {
             RowView(row: .toggle(one.label, on: one.on, change: { PluginsModel.shared.setSwitch(one.key, $0) }))
         case let .slider(one):
             PluginSliderRow(slider: one) { PluginsModel.shared.setSlider($0, $1) }
+        case let .file(one):
+            PluginFileRow(file: one) { model.showNotice($0, warning: true) }
         }
     }
 
@@ -133,6 +135,54 @@ private struct PluginCard: View {
         }
         .background(shape.fill(Pc.actionsGroup))
         .clipShape(shape)
+    }
+}
+
+/// A file control on a card (a sound): its label, then the name of what was picked and Clear, or
+/// Import; a tap on the row picks another.
+private struct PluginFileRow: View {
+    let file: PluginFile
+    let told: (String) -> Void
+
+    @State private var picking = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(verbatim: file.label)
+                .font(.system(size: 17))
+                .foregroundStyle(Pc.actionsRow)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if let chosen = file.chosen {
+                Text(verbatim: chosen)
+                    .font(.system(size: 15))
+                    .foregroundStyle(Pc.slideValue)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.leading, 12)
+                Text(verbatim: "Clear")
+                    .font(.system(size: 17))
+                    .foregroundStyle(Pc.accent)
+                    .lineLimit(1)
+                    .padding(.leading, 12)
+                    .contentShape(Rectangle())
+                    .onTapGesture { PluginsModel.shared.clearFile(file.key) }
+            } else {
+                Text(verbatim: "Import")
+                    .font(.system(size: 17))
+                    .foregroundStyle(Pc.accent)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 44)
+        .contentShape(Rectangle())
+        .onTapGesture { picking = true }
+        .fileImporter(isPresented: $picking, allowedContentTypes: [.audio]) { result in
+            if case let .success(url) = result {
+                PluginsModel.shared.pickSound(file.key, from: url, told: told)
+            }
+        }
     }
 }
 

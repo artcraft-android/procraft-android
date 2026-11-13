@@ -17,6 +17,7 @@ private extension QuickShapeKind {
         case .quadrilateral: "Quadrilateral"
         case .rectangle: "Rectangle"
         case .square: "Square"
+        case .curve: "Curve"
         }
     }
 
@@ -32,6 +33,8 @@ private extension QuickShapeKind {
         case .quadrilateral: PcIcons.shapeQuad
         case .rectangle: PcIcons.shapeRect
         case .square: PcIcons.shapeSquare
+        // a plugin's curve
+        case .curve: PcIcons.shapeArc
         }
     }
 }
@@ -105,16 +108,71 @@ struct QuickShapeHandles: View {
             let pixels = model.pixels
             Canvas { context, _ in
                 let h = info.handles
-                for i in 0 ..< h.count / 2 {
-                    let x = CGFloat(h[i * 2]) / pixels
-                    let y = CGFloat(h[i * 2 + 1]) / pixels
-                    context.fill(Path(ellipseIn: CGRect(x: x - 6.5, y: y - 6.5, width: 13, height: 13)), with: .color(.white))
-                    context.fill(Path(ellipseIn: CGRect(x: x - 5, y: y - 5, width: 10, height: 10)), with: .color(Pc.accent))
+                let points = (0 ..< h.count / 2).map { CGPoint(x: CGFloat(h[$0 * 2]) / pixels, y: CGFloat(h[$0 * 2 + 1]) / pixels) }
+                // a curve's (a plugin's): each control on a line to its anchor, each anchor as it
+                // sits (round smooth, a triangle free, a square a corner, whose controls aren't shown)
+                let curve = info.kind == .curve
+                if curve {
+                    for i in points.indices {
+                        if let anchor = curveOwner(i), !curveFolded(i, info), points.indices.contains(anchor) {
+                            var line = Path()
+                            line.move(to: points[anchor])
+                            line.addLine(to: points[i])
+                            context.stroke(line, with: .color(curveControl), lineWidth: 1.5)
+                        }
+                    }
+                }
+                for (i, at) in points.enumerated() where !(curve && curveFolded(i, info)) {
+                    let ink = curve && i % 3 != 0 ? curveControl : Pc.accent
+                    let anchor = curve && i % 3 == 0 && info.anchors.indices.contains(i / 3) ? info.anchors[i / 3] : nil
+                    handle(context, at: at, ink: ink, anchor: anchor)
                 }
             }
             .allowsHitTesting(false)
         }
     }
+
+    /// A handle at `at` in `ink`: a dot ringed in white, or a curve's anchor as it sits.
+    private func handle(_ context: GraphicsContext, at: CGPoint, ink: Color, anchor: QuickShapeAnchor?) {
+        switch anchor {
+        case .some(.broken):
+            let r: CGFloat = 7.5
+            var tri = Path()
+            tri.move(to: CGPoint(x: at.x, y: at.y - r))
+            tri.addLine(to: CGPoint(x: at.x - r * 0.87, y: at.y + r * 0.5))
+            tri.addLine(to: CGPoint(x: at.x + r * 0.87, y: at.y + r * 0.5))
+            tri.closeSubpath()
+            context.fill(tri, with: .color(ink))
+            context.stroke(tri, with: .color(.white), lineWidth: 1.5)
+        case .some(.corner):
+            context.fill(Path(CGRect(x: at.x - 6.5, y: at.y - 6.5, width: 13, height: 13)), with: .color(.white))
+            context.fill(Path(CGRect(x: at.x - 5, y: at.y - 5, width: 10, height: 10)), with: .color(ink))
+        case .some(.smooth), .none:
+            context.fill(Path(ellipseIn: CGRect(x: at.x - 6.5, y: at.y - 6.5, width: 13, height: 13)), with: .color(.white))
+            context.fill(Path(ellipseIn: CGRect(x: at.x - 5, y: at.y - 5, width: 10, height: 10)), with: .color(ink))
+        }
+    }
+}
+
+/// A curve's controls' green.
+private let curveControl = Color(argb: 0xFF60_E078)
+
+/// The anchor a curve's handle `i` belongs to, if it is a control (anchors are every third).
+private func curveOwner(_ i: Int) -> Int? {
+    switch i % 3 {
+    case 1:
+        return i - 1
+    case 2:
+        return i + 1
+    default:
+        return nil
+    }
+}
+
+/// Whether a curve's handle `i` is a control of a corner, worked out and so not shown.
+private func curveFolded(_ i: Int, _ info: QuickShapeInfo) -> Bool {
+    guard let anchor = curveOwner(i), info.anchors.indices.contains(anchor / 3) else { return false }
+    return info.anchors[anchor / 3] == .corner
 }
 
 /// With the interface hidden, the button in the top left that brings it back.

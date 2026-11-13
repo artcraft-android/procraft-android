@@ -1052,7 +1052,7 @@ final class CanvasModel {
 
     /// Opens adjustment `a` on the current layer (keeping one already open).
     func startAdjustment(_ a: Adjustment) {
-        guard currentTakesChanges() else { return }
+        guard currentTakesChanges(adjustment: a) else { return }
         _ = switchModes(.adjustment)
         closeForAdjustment()
         // Gradient Map maps by the library
@@ -1825,9 +1825,16 @@ final class CanvasModel {
     /// Whether the current layer takes a change (a stroke, a transform, an adjustment, clearing,
     /// cutting); if not (locked, hidden, or an empty group), a dialog says why. What was tried is
     /// not done afterwards. With `paint` (a stroke or a fill) a group current says so too.
-    func currentTakesChanges(paint: Bool = false) -> Bool {
-        guard let l = layers.first(where: { $0.current }),
-              let why = paint ? session.whyUnpainted() : session.whyBlocked() else { return true }
+    func currentTakesChanges(paint: Bool = false, adjustment: Adjustment? = nil) -> Bool {
+        // the shared core decides
+        let asked: Blocked? = if paint {
+            session.whyUnpainted()
+        } else if let adjustment {
+            session.whyNotAdjusted(adjustment: adjustment)
+        } else {
+            session.whyBlocked()
+        }
+        guard let l = layers.first(where: { $0.current }), let why = asked else { return true }
         blocked = BlockedLayer(why: why, layer: l, by: session.hiddenBy())
         return false
     }
@@ -1850,6 +1857,10 @@ final class CanvasModel {
                 break
             case .meshHidden, .meshLocked:
                 session.freeMeantMeshes()
+            case .alphaLocked:
+                if b.layer.alphaLock {
+                    toggleAlphaLock(b.layer)
+                }
             }
         }
         if openLayers {
@@ -1968,6 +1979,7 @@ final class CanvasModel {
         case .quadrilateral: shape = "a quadrilateral"
         case .rectangle: shape = "a rectangle"
         case .square: shape = "a square"
+        case .curve: shape = "a curve"
         }
         return "Snapped to \(shape)"
     }

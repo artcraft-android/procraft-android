@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Observation
 import SwiftUI
@@ -149,6 +150,90 @@ final class PluginsModel {
         guard let landed = store.setSlider(key: slider.key, value: value) else { return }
         keep(slider.key, "\(landed)")
         changed()
+    }
+
+    /// A sound picked at `url` for a plugin's file control `key`: read in the background (any sound
+    /// the system can play, a minute of it at most), then kept with the plugin; `told` if it can't be
+    /// used.
+    func pickSound(_ key: String, from url: URL, told: @escaping (String) -> Void) {
+        let name = url.deletingPathExtension().lastPathComponent
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let wav = Self.wav(of: url)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let wav, self.store.setSoundFile(key: key, name: name.isEmpty ? "Recording" : name, wav: wav) {
+                    self.changed()
+                } else {
+                    told("This sound couldn't be used.")
+                }
+            }
+        }
+    }
+
+    /// A plugin's file control `key` lets its file go.
+    func clearFile(_ key: String) {
+        if store.clearFile(key: key) {
+            changed()
+        }
+    }
+
+    /// The sound at `url` as a WAV file's bytes: one channel (all of them mixed), 16 bits, at its
+    /// own rate, a minute of it at most. None if the system can't read it.
+    private static func wav(of url: URL) -> Data? {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if scoped {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        let format = file.processingFormat
+        let rate = format.sampleRate
+        guard rate >= 1 else { return nil }
+        let frames = AVAudioFrameCount(max(0, min(file.length, AVAudioFramePosition(rate * 60))))
+        guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
+              (try? file.read(into: buffer, frameCount: frames)) != nil,
+              let channels = buffer.floatChannelData else { return nil }
+        let count = Int(format.channelCount)
+        let length = Int(buffer.frameLength)
+        guard count > 0, length > 0 else { return nil }
+        var samples = [Int16](repeating: 0, count: length)
+        for i in 0 ..< length {
+            var sum: Float = 0
+            for c in 0 ..< count {
+                sum += channels[c][i]
+            }
+            samples[i] = Int16((min(max(sum / Float(count), -1), 1) * 32767).rounded())
+        }
+        var wav = Data()
+        func put(_ text: String) {
+            wav.append(contentsOf: Array(text.utf8))
+        }
+        func put32(_ v: UInt32) {
+            withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) }
+        }
+        func put16(_ v: UInt16) {
+            withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) }
+        }
+        let bytes = UInt32(length * 2)
+        let hertz = UInt32(rate.rounded())
+        put("RIFF")
+        put32(36 + bytes)
+        put("WAVE")
+        put("fmt ")
+        put32(16)
+        put16(1)
+        put16(1)
+        put32(hertz)
+        put32(hertz * 2)
+        put16(2)
+        put16(16)
+        put("data")
+        put32(bytes)
+        for v in samples {
+            put16(UInt16(bitPattern: v))
+        }
+        return wav
     }
 
     /// Removes an imported plugin, its folder and its values; it goes at once. Whether it could be.
