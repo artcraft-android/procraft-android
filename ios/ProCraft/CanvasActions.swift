@@ -122,6 +122,16 @@ extension CanvasModel {
         }
     }
 
+    /// The file a plugin makes of the artwork's layers of a kind it adds (`e`), to share.
+    func sharePlugin(_ e: PluginExport) {
+        exporting(failed: "The artwork couldn't be exported.") { session in
+            let base = exportFileName(name: session.name(), package: false)
+            let out = Sharing.exportsDir.appendingPathComponent(base).appendingPathExtension(e.`extension`)
+            let made = (try? session.exportPlugin(key: e.key, path: out.path)) != nil
+            return made ? [out] : []
+        }
+    }
+
     /// The bytes of a picture on a new layer, fitted to the canvas (a moving GIF's frames on the
     /// timeline instead), with `transform` ready to transform; a message if it couldn't be.
     func insertPicture(_ data: Data?, name: String?, isPrivate: Bool, transform: Bool = true) {

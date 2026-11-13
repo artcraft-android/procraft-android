@@ -195,7 +195,11 @@ struct ActionsPanel: View {
                 })],
             ]
         case 2:
-            return [
+            // files plugins make of the artwork's layers of kinds they add, under their own names
+            let made: [ActionRow] = model.session.pluginExports().map { e in
+                ActionRow.act(e.label, action: { model.sharePlugin(e) })
+            }
+            var share: [[ActionRow]] = [
                 [
                     .heading("Share Image"),
                     // ours first, then the same package named for the other app
@@ -217,6 +221,8 @@ struct ActionsPanel: View {
                     .act("Animated HEVC", action: { model.openAnimatedExport(.hevc) }),
                 ],
             ]
+            share[0] += made
+            return share
         case 3:
             return [
                 [
