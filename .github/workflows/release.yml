@@ -14,16 +14,20 @@
 #   procraft-<version>-macos-universal.dmg        Apple silicon and Intel Macs (packaging/macos):
 #                                                 signed with a Developer ID and notarized when
 #                                                 the APPLE_* secrets exist, else ad hoc
+#   procraft-<version>-harmonyos-arm64.hap        HarmonyOS 5.0.3+ tablets (harmony/), signed with
+#                                                 the HARMONY_* secrets (harmony/SIGNING.md)
 #   SHA256SUMS.txt                                each file's SHA-256
 #
 # The Mac file is built on the public repository alone (a private one pays for macOS runners'
-# minutes, ten times Linux's), and only once the repository's variable RELEASE_MAC is true. While
-# it is new, its failing leaves its file out rather than holding up the release; so does Windows
-# on ARM's.
+# minutes, ten times Linux's), and only once the repository's variable RELEASE_MAC is true. The
+# HarmonyOS file likewise, once RELEASE_HARMONY is true (with its secrets set; without the signing
+# ones it is built but not released). While they are new, their failing leaves their file out
+# rather than holding up the release; so does Windows on ARM's.
 #
 # A manual run (Actions › Release › Run workflow) is a dry run: it builds them at the version in
 # gradle.properties and keeps them as the run's artifacts, and releases nothing. It also builds
-# the iPad app's unsigned .ipa (ios/), which stays out of releases until that app is finished.
+# the iPad app's unsigned .ipa (ios/), which stays out of releases until that app is finished, and
+# (with RELEASE_HARMONY) the HarmonyOS app's unsigned .hap, for people to sign themselves.
 name: Release
 
 on:
@@ -270,6 +274,133 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # HarmonyOS: the desktop app's interface in the canvas component (harmony/), built with Huawei's
+  # command-line tools (the maintainer's own copy: their download needs a Huawei ID) and signed
+  # with the certificate and profile AppGallery Connect issued (harmony/SIGNING.md)
+  harmony:
+    name: HarmonyOS (arm64)
+    # only once the HarmonyOS app is to ship: the repository's variable RELEASE_HARMONY set to true
+    if: ${{ !github.event.repository.private && vars.RELEASE_HARMONY == 'true' }}
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    env:
+      DIST: ${{ github.workspace }}/dist
+      # signed (and released) only with the signing secrets; else the unsigned .hap alone
+      SIGNED: ${{ secrets.HARMONY_P12 != '' && secrets.HARMONY_CER != '' && secrets.HARMONY_P7B != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        name: Resolve version
+        run: |
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-unknown-linux-ohos
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-harmonyos
+
+      # hvigor's tools run on Java (21 for the 26.0 tools and later); its texture compression needs
+      # libGL
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Runner dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 unzip
+
+      - name: Huawei's command-line tools
+        env:
+          HARMONY_TOOLS_URL: ${{ secrets.HARMONY_TOOLS_URL }}
+          HARMONY_TOOLS_SHA256: ${{ vars.HARMONY_TOOLS_SHA256 }}
+        run: |
+          if [ -z "$HARMONY_TOOLS_URL" ] || [ -z "$HARMONY_TOOLS_SHA256" ]; then
+            echo "::error::HARMONY_TOOLS_URL (secret) and HARMONY_TOOLS_SHA256 (variable) aren't set: see harmony/SIGNING.md"
+            exit 1
+          fi
+          curl -fsSL "$HARMONY_TOOLS_URL" -o "$RUNNER_TEMP/tools.zip"
+          echo "$HARMONY_TOOLS_SHA256  $RUNNER_TEMP/tools.zip" | sha256sum -c
+          unzip -q "$RUNNER_TEMP/tools.zip" -d "$RUNNER_TEMP/hos"
+          rm "$RUNNER_TEMP/tools.zip"
+          tools="$(dirname "$(find "$RUNNER_TEMP/hos" -maxdepth 3 -type f -name hvigorw | head -n 1)")/.."
+          tools="$(cd "$tools" && pwd)"
+          echo "$tools/bin" >>"$GITHUB_PATH"
+          echo "$tools/tool/node/bin" >>"$GITHUB_PATH"
+          echo "DEVECO_SDK_HOME=$tools/sdk" >>"$GITHUB_ENV"
+          echo "OHOS_NDK_HOME=$tools/sdk/default/openharmony" >>"$GITHUB_ENV"
+          echo "HAP_SIGN_TOOL=$tools/sdk/default/openharmony/toolchains/lib/hap-sign-tool.jar" >>"$GITHUB_ENV"
+
+      - name: The native library and the icons
+        run: bash harmony/build-rust.sh arm64
+
+      - name: The .hap, unsigned
+        working-directory: harmony/app
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          ohpm install
+          hvigorw assembleHap --mode module -p module=entry@default -p product=default -p buildMode=release --no-daemon
+          unsigned="$(find entry/build -name '*-unsigned.hap' | head -n 1)"
+          test -n "$unsigned"
+          mkdir -p "$GITHUB_WORKSPACE/unsigned"
+          cp "$unsigned" "$GITHUB_WORKSPACE/unsigned/procraft-$VERSION-harmonyos-arm64-unsigned.hap"
+
+      # a dry run keeps the unsigned .hap too: someone can sign it with their own Huawei ID
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: harmonyos-unsigned
+          path: unsigned/*
+          if-no-files-found: error
+
+      - name: Sign the .hap
+        if: env.SIGNED == 'true'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          HARMONY_P12: ${{ secrets.HARMONY_P12 }}
+          HARMONY_CER: ${{ secrets.HARMONY_CER }}
+          HARMONY_P7B: ${{ secrets.HARMONY_P7B }}
+          HARMONY_KEY_ALIAS: ${{ secrets.HARMONY_KEY_ALIAS }}
+          HARMONY_KEY_PASSWORD: ${{ secrets.HARMONY_KEY_PASSWORD }}
+          HARMONY_STORE_PASSWORD: ${{ secrets.HARMONY_STORE_PASSWORD }}
+        run: |
+          keys="$RUNNER_TEMP/harmony-keys"
+          mkdir -p "$keys" "$DIST"
+          printf '%s' "$HARMONY_P12" | base64 -d >"$keys/signing.p12"
+          printf '%s' "$HARMONY_CER" | base64 -d >"$keys/signing.cer"
+          printf '%s' "$HARMONY_P7B" | base64 -d >"$keys/signing.p7b"
+          hap="$DIST/procraft-$VERSION-harmonyos-arm64.hap"
+          java -jar "$HAP_SIGN_TOOL" sign-app -mode localSign -signAlg SHA256withECDSA \
+            -keyAlias "$HARMONY_KEY_ALIAS" -keyPwd "$HARMONY_KEY_PASSWORD" \
+            -keystoreFile "$keys/signing.p12" -keystorePwd "$HARMONY_STORE_PASSWORD" \
+            -appCertFile "$keys/signing.cer" -profileFile "$keys/signing.p7b" \
+            -inFile "unsigned/procraft-$VERSION-harmonyos-arm64-unsigned.hap" -outFile "$hap"
+          java -jar "$HAP_SIGN_TOOL" verify-app -inFile "$hap" \
+            -outCertchain "$keys/chain.cer" -outProfile "$keys/profile.p7b"
+
+      - name: Remove the signing files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/harmony-keys"
+
+      - name: Files
+        run: ls -l dist unsigned >>"$GITHUB_STEP_SUMMARY" 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: env.SIGNED == 'true'
+        with:
+          name: release-harmonyos
+          path: dist/*
+          if-no-files-found: error
+
   # the iPad app is unfinished: built on manual runs only, never released
   ipados:
     name: iPadOS (unsigned IPA)
@@ -367,9 +498,9 @@ jobs:
 
   release:
     name: GitHub Release
-    needs: [apk, desktop, windows-arm64, macos, ipados]
-    # the Mac and Windows on ARM jobs may have been skipped (a private repository) or left out
-    # their files; the iPad's is skipped
+    needs: [apk, desktop, windows-arm64, macos, harmony, ipados]
+    # the Mac, HarmonyOS and Windows on ARM jobs may have been skipped (a private repository, their
+    # variable unset) or left out their files; the iPad's is skipped
     if: ${{ github.ref_type == 'tag' && !cancelled() && needs.apk.result == 'success' && needs.desktop.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
