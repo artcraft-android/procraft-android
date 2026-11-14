@@ -2342,6 +2342,10 @@ impl Interface {
                     self.open = None;
                     self.text.edit(session, id);
                 }
+                if let Some(id) = self.layers.edit_adjustment.take() {
+                    self.open = None;
+                    session.adjustment_layer_start(id);
+                }
                 if std::mem::take(&mut self.layers.layer_opacity) {
                     self.start_layer_opacity(session);
                 }

@@ -32,6 +32,9 @@ pub struct LayerInfo {
     pub collapsed: bool,
     /// A text layer, its text still editable.
     pub text: bool,
+    /// Non-destructive adjustment layer kind, if this is an adjustment layer.
+    #[uniffi(default = None)]
+    pub adjustment: Option<crate::Adjustment>,
     /// The kind of layer a plugin adds (`<id>.<key>`), if it is one: its strokes are kept as items
     /// too. Shown locked while its plugin is off.
     pub plugin_kind: Option<String>,
@@ -104,6 +107,7 @@ pub enum LayerOption {
     Invert,
     Reference,
     EditText,
+    EditAdjustment,
     Rasterize,
     /// A plugin's layer: the strokes the selection takes (every one with nothing selected) given
     /// the paint colour.
@@ -171,7 +175,7 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
             row(O::Copy, "Copy", None);
             // a text layer's pixels come from its text, a plugin's layer's from its items: nothing to
             // fill, clear, lock or invert
-            let drawn_from_data = l.text || l.plugin_kind.is_some();
+            let drawn_from_data = l.text || l.plugin_kind.is_some() || l.adjustment.is_some();
             if !drawn_from_data && unlocked {
                 row(O::Fill, "Fill Layer", None);
                 row(O::Clear, "Clear", None);
@@ -199,6 +203,10 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
                     row(O::Recolour, "Recolour", None);
                     row(O::ApplyBrush, "Apply Brush", None);
                     row(O::Rasterize, "Rasterize", None);
+                }
+            } else if l.adjustment.is_some() {
+                if unlocked {
+                    row(O::EditAdjustment, "Edit Adjustment", None);
                 }
             } else {
                 // offered once the canvas's drawing guide has been on (on or off since), or while
@@ -402,6 +410,12 @@ impl CanvasSession {
                 },
                 collapsed: l.collapsed,
                 text: l.text.is_some(),
+                adjustment: l.adjustment.as_ref().map(|a| match a {
+                    procraft_engine::document::LayerAdjustment::Hsb { .. } => crate::Adjustment::Hsb,
+                    procraft_engine::document::LayerAdjustment::ColorBalance { .. } => crate::Adjustment::ColorBalance,
+                    procraft_engine::document::LayerAdjustment::Curves { .. } => crate::Adjustment::Curves,
+                    procraft_engine::document::LayerAdjustment::GradientMap { .. } => crate::Adjustment::GradientMap,
+                }),
                 plugin_kind: l.plugin.as_ref().map(|p| p.kind.clone()),
                 plugin_badge: l.plugin.as_ref().map(|p| {
                     let badge = st.hooks.as_ref().and_then(|hooks| hooks.layer_kind_badge(&p.kind));

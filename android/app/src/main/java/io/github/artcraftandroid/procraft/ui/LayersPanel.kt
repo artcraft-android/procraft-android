@@ -195,11 +195,11 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         ) {
             val kinds = vm.layerKinds()
             Box(
-                Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { if (kinds.isEmpty()) vm.addLayer() else addMenu = true },
+                Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { addMenu = true },
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(PcIcons.PlusMedium, contentDescription = "New layer", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
-                NewLayerMenu(addMenu && kinds.isNotEmpty(), kinds, vm, onDismiss = { addMenu = false })
+                NewLayerMenu(addMenu, kinds, vm, onDismiss = { addMenu = false })
             }
         }
         // a layer added at the top of what shows comes in there, the rows under it sliding down,
@@ -524,6 +524,18 @@ private fun NewLayerMenu(open: Boolean, kinds: List<io.github.artcraftandroid.pr
         MenuItem(PcIcons.MenuNewSet, "Layer") {
             onDismiss()
             vm.addLayer()
+        }
+        val adjKinds = listOf(
+            io.github.artcraftandroid.procraft.core.Adjustment.HSB to "HSB Adjustment",
+            io.github.artcraftandroid.procraft.core.Adjustment.COLOR_BALANCE to "Color Balance Adjustment",
+            io.github.artcraftandroid.procraft.core.Adjustment.CURVES to "Curves Adjustment",
+            io.github.artcraftandroid.procraft.core.Adjustment.GRADIENT_MAP to "Gradient Map Adjustment",
+        )
+        for ((kind, label) in adjKinds) {
+            MenuItem(PcIcons.Adjustments, label) {
+                onDismiss()
+                vm.addAdjustmentLayer(kind)
+            }
         }
         for (kind in kinds) {
             MenuItem(PcIcons.MenuNewBrush, kind.label) {
@@ -1087,6 +1099,7 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         LayerOption.INVERT -> { { vm.invertLayer(l) } }
                         LayerOption.REFERENCE -> { { vm.toggleReference(l) } }
                         LayerOption.EDIT_TEXT -> { { vm.editText(l) } }
+                        LayerOption.EDIT_ADJUSTMENT -> { { vm.editAdjustment(l.id) } }
                         LayerOption.RASTERIZE -> { { vm.rasterize(l) } }
                         LayerOption.RECOLOUR -> { { vm.restyleStrokes(l, colour = true) } }
                         LayerOption.APPLY_BRUSH -> { { vm.restyleStrokes(l, colour = false) } }

@@ -52,6 +52,11 @@ struct LayerUniform {
     // where this one's top left is in those (x: the scale, yz: the point): grain fixed to the
     // canvas is read where it is on that canvas
     scaled: vec4<f32>,
+    // 1: an adjustment layer whose filtered backdrop is in layer_tex
+    adjustment: u32,
+    _pad_adj0: u32,
+    _pad_adj1: u32,
+    _pad_adj2: u32,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -246,11 +251,37 @@ fn fs_layer(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return layer_color(vec2<i32>(pos.xy));
 }
 
+// mask, clipping and opacity weight for an adjustment layer
+fn layer_weight(p: vec2<i32>) -> f32 {
+    var w = lu.opacity;
+    if (lu.masked > 0.5) {
+        var m = textureLoad(mask_tex, p, 0);
+        if (lu.stroke_on_mask > 0.5) {
+            m = with_stroke(m, p);
+        }
+        w = w * clamp(dot(m.rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
+    }
+    if (lu.clipped != 0u) {
+        var base = textureLoad(clip_tex, p, 0).a;
+        if (lu.clip_masked > 0.5) {
+            base = base * clamp(dot(textureLoad(clip_mask_tex, p, 0).rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
+        }
+        w = w * base;
+    }
+    return clamp(w, 0.0, 1.0);
+}
+
 // other modes: read what is below and write the result
 @fragment
 fn fs_blend(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<i32>(pos.xy);
-    return blend(textureLoad(backdrop_tex, p, 0), layer_color(p), lu.blend);
+    let backdrop = textureLoad(backdrop_tex, p, 0);
+    if (lu.adjustment != 0u) {
+        let filtered = textureLoad(layer_tex, p, 0);
+        let blended = select(blend(backdrop, filtered, lu.blend), filtered, lu.blend == 0u);
+        return mix(backdrop, blended, layer_weight(p));
+    }
+    return blend(backdrop, layer_color(p), lu.blend);
 }
 
 // the background colour (written, not blended)

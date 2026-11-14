@@ -267,6 +267,73 @@ impl LayerText {
     }
 }
 
+/// A colour stop of a gradient map adjustment layer: position (0..1) and sRGB colour (0..1).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AdjustmentGradientStop {
+    pub position: f32,
+    pub color: [f32; 3],
+}
+
+/// A non-destructive adjustment held by a layer and applied live to what is below it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LayerAdjustment {
+    /// Hue, saturation and brightness sliders (0..1, 0.5 none).
+    Hsb { hue: f32, saturation: f32, brightness: f32 },
+    /// Shifts in shadows, midtones and highlights (0..1, 0.5 none; red, green, blue).
+    ColorBalance { shadows: [f32; 3], midtones: [f32; 3], highlights: [f32; 3] },
+    /// Points `[x, y]` (0..1) for each channel: all, red, green, blue.
+    Curves { curves: [Vec<[f32; 2]>; 4] },
+    /// Gradient stops and blend amount (0..1).
+    GradientMap { stops: Vec<AdjustmentGradientStop>, amount: f32 },
+}
+
+impl LayerAdjustment {
+    /// The same adjustment with every number clamped to a valid range.
+    pub fn sanitized(self) -> LayerAdjustment {
+        let unit = |v: f32, fallback: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { fallback };
+        match self {
+            LayerAdjustment::Hsb { hue, saturation, brightness } => LayerAdjustment::Hsb {
+                hue: unit(hue, 0.5),
+                saturation: unit(saturation, 0.5),
+                brightness: unit(brightness, 0.5),
+            },
+            LayerAdjustment::ColorBalance { shadows, midtones, highlights } => LayerAdjustment::ColorBalance {
+                shadows: shadows.map(|v| unit(v, 0.5)),
+                midtones: midtones.map(|v| unit(v, 0.5)),
+                highlights: highlights.map(|v| unit(v, 0.5)),
+            },
+            LayerAdjustment::Curves { curves } => LayerAdjustment::Curves {
+                curves: curves.map(|pts| {
+                    let mut clean: Vec<[f32; 2]> =
+                        pts.into_iter().take(64).map(|[x, y]| [unit(x, 0.0), unit(y, 0.0)]).collect();
+                    if clean.len() < 2 {
+                        clean = vec![[0.0, 0.0], [1.0, 1.0]];
+                    }
+                    clean
+                }),
+            },
+            LayerAdjustment::GradientMap { stops, amount } => {
+                let mut clean: Vec<AdjustmentGradientStop> = stops
+                    .into_iter()
+                    .take(64)
+                    .map(|s| AdjustmentGradientStop {
+                        position: unit(s.position, 0.0),
+                        color: s.color.map(|c| unit(c, 0.0)),
+                    })
+                    .collect();
+                if clean.len() < 2 {
+                    clean = vec![
+                        AdjustmentGradientStop { position: 0.0, color: [0.0; 3] },
+                        AdjustmentGradientStop { position: 1.0, color: [1.0; 3] },
+                    ];
+                }
+                LayerAdjustment::GradientMap { stops: clean, amount: unit(amount, 1.0) }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Layer {
     pub id: LayerId,
@@ -306,6 +373,9 @@ pub struct Layer {
     /// its pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<PluginLayer>,
+    /// A non-destructive adjustment applied live to what is below this layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjustment: Option<LayerAdjustment>,
 }
 
 /// What makes a layer one of a kind a plugin adds: the kind, and the plugin's data for it. The app
@@ -342,14 +412,15 @@ impl Layer {
             private: false,
             assisted: false,
             plugin: None,
+            adjustment: None,
         }
     }
 
-    /// Whether its pixels are drawn from what it holds besides them (its text, or a plugin's items):
-    /// only that changes them, so edits to its pixels alone (a fill, an adjustment, a transform)
-    /// wait until it is rasterized.
+    /// Whether its pixels are drawn from what it holds besides them (its text, a plugin's items, or
+    /// a live adjustment): only that changes them, so edits to its pixels alone (a fill, an
+    /// adjustment, a transform) wait until it is rasterized.
     pub fn drawn_from_data(&self) -> bool {
-        self.text.is_some() || self.plugin.is_some()
+        self.text.is_some() || self.plugin.is_some() || self.adjustment.is_some()
     }
 
     /// A group as groups are made (normal, fully opaque): its members blend with what is below
@@ -1084,14 +1155,34 @@ impl Document {
         true
     }
 
-    /// Makes a text layer, or a layer of a plugin's kind, an ordinary one, its pixels kept; false
-    /// if it wasn't one.
+    /// Makes a text layer, an adjustment layer, or a layer of a plugin's kind, an ordinary one, its
+    /// pixels kept; false if it wasn't one.
     pub fn rasterize(&mut self, id: LayerId) -> bool {
         self.layer_mut(id).is_some_and(|l| {
             let text = l.text.take().is_some();
             let plugin = l.plugin.take().is_some();
-            text || plugin
+            let adjustment = l.adjustment.take().is_some();
+            text || plugin || adjustment
         })
+    }
+
+    /// Adds a non-destructive adjustment layer above the current one (in its group), named `name`,
+    /// and makes it current.
+    pub fn add_adjustment_layer(&mut self, adjustment: LayerAdjustment, name: &str) -> LayerId {
+        let id = self.add_layer();
+        if let Some(l) = self.layer_mut(id) {
+            l.name = name.chars().take(64).collect();
+            l.adjustment = Some(adjustment.sanitized());
+        }
+        id
+    }
+
+    /// Replaces `id`'s adjustment; false if `id` isn't an adjustment layer.
+    pub fn set_adjustment(&mut self, id: LayerId, adjustment: LayerAdjustment) -> bool {
+        self.layer_mut(id)
+            .filter(|l| l.adjustment.is_some())
+            .map(|l| l.adjustment = Some(adjustment.sanitized()))
+            .is_some()
     }
 
     /// Adds a layer of a plugin's `kind` (`<plugin id>.<key>`) above the current one (in its
@@ -1631,6 +1722,9 @@ impl Document {
             l.opacity = if l.opacity.is_finite() { l.opacity.clamp(0.0, 1.0) } else { 1.0 };
             if l.name.trim().is_empty() {
                 l.name = "Layer".to_owned();
+            }
+            if let Some(adj) = l.adjustment.take() {
+                l.adjustment = Some(adj.sanitized());
             }
         }
         let top = self.layers.iter().map(|l| l.id.0).max().unwrap_or(0);
@@ -2474,5 +2568,39 @@ mod tests {
         assert!(d.finish_merge_chosen(one, &[three]));
         assert_eq!(ids(&d), vec![one, two]);
         assert!(d.layer(one_mask).is_none() && d.layer(three_mask).is_none());
+    }
+
+    #[test]
+    fn adjustment_layers_sanitize_serialize_and_rasterize() {
+        let mut d = Document::new(20, 20);
+        let adj = LayerAdjustment::Hsb { hue: 2.0, saturation: -5.0, brightness: f32::NAN };
+        let clean = adj.clone().sanitized();
+        assert_eq!(clean, LayerAdjustment::Hsb { hue: 1.0, saturation: 0.0, brightness: 0.5 });
+
+        let id = d.add_adjustment_layer(adj, "HSB Adjustment");
+        assert_eq!(d.current(), id);
+        let layer = d.layer(id).unwrap();
+        assert_eq!(layer.kind, LayerKind::Paint);
+        assert_eq!(layer.adjustment, Some(clean));
+        assert!(layer.drawn_from_data());
+
+        let next = LayerAdjustment::Curves {
+            curves: [
+                vec![[0.0, 0.0], [1.0, 1.0]],
+                vec![[0.0, 0.0], [1.0, 1.0]],
+                vec![[0.0, 0.0], [1.0, 1.0]],
+                vec![[0.0, 0.0], [1.0, 1.0]],
+            ],
+        };
+        assert!(d.set_adjustment(id, next.clone()));
+        assert_eq!(d.layer(id).unwrap().adjustment, Some(next));
+
+        let json = serde_json::to_value(&d).unwrap();
+        let back = serde_json::from_value::<Document>(json).unwrap().repaired();
+        assert_eq!(back.layer(id).unwrap().adjustment, d.layer(id).unwrap().adjustment);
+
+        assert!(d.rasterize(id));
+        assert_eq!(d.layer(id).unwrap().adjustment, None);
+        assert!(!d.layer(id).unwrap().drawn_from_data());
     }
 }

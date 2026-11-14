@@ -43,7 +43,7 @@ const MULTIPLY_MODE: u32 = 1;
 const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
-const UNIFORM_SIZE: u64 = 144;
+const UNIFORM_SIZE: u64 = 160;
 const _: () = assert!(
     size_of::<LayerUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<StampUniform>() as u64 <= UNIFORM_SIZE
@@ -789,6 +789,9 @@ struct LayerUniform {
     /// where its top left is in those (see [`Canvas::draw_scaled`]): what grain fixed to the
     /// canvas is read by.
     scaled: [f32; 4],
+    /// 1 for an adjustment layer whose filtered backdrop is in `layer_tex`.
+    adjustment: u32,
+    _pad_adj: [u32; 3],
 }
 
 impl Default for LayerUniform {
@@ -821,6 +824,8 @@ impl Default for LayerUniform {
             clip_masked: 0.0,
             grain_side: TEXTURE_SIZE as f32,
             scaled: [1.0, 0.0, 0.0, 0.0],
+            adjustment: 0,
+            _pad_adj: [0; 3],
         }
     }
 }
@@ -1959,6 +1964,9 @@ pub struct Canvas {
     /// The curves or gradient adjustments read (256 RGBA8 entries).
     table: wgpu::Texture,
     table_view: wgpu::TextureView,
+    /// Per-layer cached 256x1 RGBA8 LUT textures for Curves/GradientMap adjustment layers:
+    /// `(hash, texture, view)`.
+    adjustment_tables: Mutex<HashMap<LayerId, (u64, wgpu::Texture, wgpu::TextureView)>>,
     selection: Option<SelectionGpu>,
     /// Shapes, grains and the selection for the stamp shader.
     brush_bind: wgpu::BindGroup,
@@ -2303,6 +2311,7 @@ impl Canvas {
             filter_keeps_alpha: false,
             table,
             table_view,
+            adjustment_tables: Mutex::new(HashMap::new()),
             selection: None,
             brush_bind,
             stroke_bind,
@@ -5090,7 +5099,7 @@ impl Canvas {
                         drop_lower,
                         within,
                     );
-                    self.blend_layer_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
+                    self.blend_layer_into(gpu, &mut encoder, &mut uniforms, &before, upper, lower);
                     self.push_step(Step {
                         made: 0,
                         name: None,
@@ -5115,9 +5124,9 @@ impl Canvas {
                     );
                     for upper in uppers {
                         if before.layer(upper).is_some_and(|l| l.kind == LayerKind::Group) {
-                            self.draw_group_onto(device, &mut encoder, &mut uniforms, &before, upper, lower);
+                            self.draw_group_onto(gpu, &mut encoder, &mut uniforms, &before, upper, lower);
                         } else {
-                            self.blend_layer_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
+                            self.blend_layer_into(gpu, &mut encoder, &mut uniforms, &before, upper, lower);
                         }
                     }
                     self.push_step(Step {
@@ -5147,7 +5156,7 @@ impl Canvas {
                 }
                 Op::Flatten { group, into, before } => {
                     // a new layer: no pixels of its own to keep
-                    self.flatten(device, &mut encoder, &mut uniforms, &before, group, into);
+                    self.flatten(gpu, &mut encoder, &mut uniforms, &before, group, into);
                     let pixels = Vec::new();
                     self.push_step(Step {
                         made: 0,
@@ -5184,7 +5193,7 @@ impl Canvas {
         // while caches are remade the composite stays as it was, what changed kept for after
         if self.remake.is_none() {
             if !dirty.is_empty() {
-                self.composite(device, doc, &mut encoder, &mut uniforms, dirty);
+                self.composite(gpu, doc, &mut encoder, &mut uniforms, dirty);
                 self.composites = self.composites.wrapping_add(1);
             }
             self.dirty = IRect::EMPTY;
@@ -5904,15 +5913,32 @@ impl Canvas {
     /// Layer `upper` of `doc` blended into layer `lower` with its opacity, mode and clipping.
     fn blend_layer_into(
         &self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
         doc: &Document,
         upper: LayerId,
         lower: LayerId,
     ) -> Option<()> {
+        let device = &gpu.device;
         let settings = doc.layer(upper)?;
         let clip = doc.clip_base(upper).and_then(|id| self.layers.get(&id));
+        if let Some(adj) = &settings.adjustment {
+            let low = self.layers.get(&lower)?;
+            let temp = texture(device, "adjustment merge", self.width, self.height, LAYER_FORMAT);
+            let temp_view = temp.create_view(&wgpu::TextureViewDescriptor::default());
+            if !self.run_adjustment_filter(gpu, encoder, uniforms, self.full(), upper, adj, &low.view, &temp_view) {
+                return None;
+            }
+            let uniform = LayerUniform {
+                opacity: if settings.visible { settings.opacity.clamp(0.0, 1.0) } else { 0.0 },
+                blend: settings.blend.id(),
+                clipped: u32::from(clip.is_some()),
+                adjustment: 1,
+                ..Default::default()
+            };
+            return self.blend_down(device, encoder, uniforms, &temp_view, clip.map(|c| &c.view), uniform, lower);
+        }
         let up = self.layers.get(&upper)?;
         let uniform = LayerUniform {
             opacity: if settings.visible { settings.opacity.clamp(0.0, 1.0) } else { 0.0 },
@@ -6007,7 +6033,7 @@ impl Canvas {
     /// Group `group` of `doc` composited and copied into layer `into` (a new layer).
     fn flatten(
         &self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
         doc: &Document,
@@ -6015,7 +6041,7 @@ impl Canvas {
         into: LayerId,
     ) -> Option<()> {
         let full = self.full();
-        self.composite_group(device, doc, encoder, uniforms, full, group)?;
+        self.composite_group(gpu, doc, encoder, uniforms, full, group)?;
         let (textures, _) = self.groups.get(doc.depth(group))?;
         let target = self.layers.get(&into)?;
         encoder.copy_texture_to_texture(
@@ -6030,7 +6056,7 @@ impl Canvas {
     /// and mode.
     fn draw_group_onto(
         &self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
         doc: &Document,
@@ -6038,13 +6064,13 @@ impl Canvas {
         into: LayerId,
     ) -> Option<()> {
         let settings = doc.layer(group)?;
-        let view = self.composite_group(device, doc, encoder, uniforms, self.full(), group)?;
+        let view = self.composite_group(gpu, doc, encoder, uniforms, self.full(), group)?;
         let uniform = LayerUniform {
             opacity: if settings.visible { settings.opacity.clamp(0.0, 1.0) } else { 0.0 },
             blend: settings.blend.id(),
             ..Default::default()
         };
-        self.blend_down(device, encoder, uniforms, view, None, uniform, into)
+        self.blend_down(&gpu.device, encoder, uniforms, view, None, uniform, into)
     }
 
     /// Makes sure there is a pair of group textures for each of `depth` levels.
@@ -6573,12 +6599,13 @@ impl Canvas {
     /// Normal layers blend in place; other modes read what is below and write the other texture.
     fn composite(
         &self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         doc: &Document,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
         rect: IRect,
     ) {
+        let device = &gpu.device;
         let [r, g, b] = doc.background;
         let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
         {
@@ -6604,7 +6631,7 @@ impl Canvas {
                 extent(rect.width(), rect.height()),
             );
             let mut current = 0;
-            self.composite_items(device, doc, encoder, uniforms, rect, &c.live, true, &main, &mut current);
+            self.composite_items(gpu, doc, encoder, uniforms, rect, &c.live, true, &main, &mut current);
             if !c.above_items.is_empty() {
                 let uniform = LayerUniform {
                     opacity: 1.0,
@@ -6630,7 +6657,7 @@ impl Canvas {
             main.settle(encoder, rect, current);
             return;
         }
-        let current = self.composite_members(device, doc, encoder, uniforms, rect, None, &main);
+        let current = self.composite_members(gpu, doc, encoder, uniforms, rect, None, &main);
         main.settle(encoder, rect, current);
     }
 
@@ -6851,7 +6878,7 @@ impl Canvas {
             }
             let stack = Stack::pair(&caches.below, &caches.below_views);
             let mut current = 0;
-            self.composite_items(device, doc, encoder, uniforms, full, &below_items, true, &stack, &mut current);
+            self.composite_items(gpu, doc, encoder, uniforms, full, &below_items, true, &stack, &mut current);
             stack.settle(encoder, full, current);
             caches.below_items = below_items;
             caches.below_key = below_key;
@@ -6860,7 +6887,7 @@ impl Canvas {
             drop(render_pass(encoder, "above", &caches.above_views[0], wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
             let stack = Stack::pair(&caches.above, &caches.above_views);
             let mut current = 0;
-            self.composite_items(device, doc, encoder, uniforms, full, &above_items, true, &stack, &mut current);
+            self.composite_items(gpu, doc, encoder, uniforms, full, &above_items, true, &stack, &mut current);
             stack.settle(encoder, full, current);
             caches.above_items = above_items;
             caches.above_key = above_key;
@@ -7030,7 +7057,7 @@ impl Canvas {
             let mut uniforms = UniformData::default();
             for (item, rect) in &part {
                 self.composite_items(
-                    device,
+                    gpu,
                     doc,
                     &mut encoder,
                     &mut uniforms,
@@ -7198,7 +7225,7 @@ impl Canvas {
     #[allow(clippy::too_many_arguments)]
     fn composite_members(
         &self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         doc: &Document,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
@@ -7208,7 +7235,7 @@ impl Canvas {
     ) -> usize {
         let mut current = 0usize;
         self.composite_items(
-            device,
+            gpu,
             doc,
             encoder,
             uniforms,
@@ -7226,7 +7253,7 @@ impl Canvas {
     #[allow(clippy::too_many_arguments)]
     fn composite_items(
         &self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         doc: &Document,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
@@ -7236,6 +7263,7 @@ impl Canvas {
         stack: &Stack<'_>,
         current: &mut usize,
     ) {
+        let device = &gpu.device;
         // Animation Assist: the top level's frames show around the current (or played) one
         let animation = if top { doc.animation.as_ref() } else { None };
         let frames = animation.map(|_| animation::frames(doc)).unwrap_or_default();
@@ -7261,7 +7289,11 @@ impl Canvas {
             match layer.kind {
                 LayerKind::Mask => {}
                 LayerKind::Paint => {
-                    self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, stack, current)
+                    if let Some(adj) = &layer.adjustment {
+                        self.composite_adjustment(gpu, doc, encoder, uniforms, rect, layer, adj, look, stack, current);
+                    } else {
+                        self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, stack, current);
+                    }
                 }
                 LayerKind::Group => {
                     if !layer.visible || layer.opacity <= 0.0 {
@@ -7271,10 +7303,10 @@ impl Canvas {
                     // to be tinted whole)
                     if layer.passes_through() && look.tint[3] == 0.0 {
                         let members = doc.members(Some(id));
-                        self.composite_items(device, doc, encoder, uniforms, rect, &members, false, stack, current);
+                        self.composite_items(gpu, doc, encoder, uniforms, rect, &members, false, stack, current);
                         continue;
                     }
-                    let Some(view) = self.composite_group(device, doc, encoder, uniforms, rect, id) else { continue };
+                    let Some(view) = self.composite_group(gpu, doc, encoder, uniforms, rect, id) else { continue };
                     let uniform = LayerUniform {
                         opacity: layer.opacity.clamp(0.0, 1.0) * look.opacity,
                         blend: layer.blend.id(),
@@ -7303,7 +7335,7 @@ impl Canvas {
     /// the view holding the result.
     fn composite_group(
         &self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         doc: &Document,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
@@ -7313,9 +7345,215 @@ impl Canvas {
         let (textures, views) = self.groups.get(doc.depth(id))?;
         let inner = Stack::pair(textures, views);
         drop(render_pass(encoder, "group clear", &views[0], wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
-        let at = self.composite_members(device, doc, encoder, uniforms, rect, Some(id), &inner);
+        let at = self.composite_members(gpu, doc, encoder, uniforms, rect, Some(id), &inner);
         inner.settle(encoder, rect, at);
         Some(&views[0])
+    }
+
+    /// Updates the cached 256-entry RGBA8 LUT texture for adjustment layer `id` when `entries`
+    /// changed.
+    fn update_adjustment_table(&self, gpu: &Gpu, id: LayerId, entries: &[u8]) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        entries.hash(&mut h);
+        let key = h.finish();
+        let Ok(mut tables) = self.adjustment_tables.lock() else { return };
+        if let Some((prev, tex, _)) = tables.get_mut(&id) {
+            if *prev == key {
+                return;
+            }
+            gpu.queue.write_texture(
+                copy_at(tex, 0, 0),
+                entries,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(1) },
+                extent(256, 1),
+            );
+            *prev = key;
+            return;
+        }
+        let tex = texture(&gpu.device, "adjustment layer table", 256, 1, LAYER_FORMAT);
+        gpu.queue.write_texture(
+            copy_at(&tex, 0, 0),
+            entries,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(1) },
+            extent(256, 1),
+        );
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        tables.insert(id, (key, tex, view));
+    }
+
+    /// Returns the filter pass name, `FilterUniform`, and whether it reads `id`'s cached LUT.
+    fn adjustment_pass(
+        &self,
+        gpu: &Gpu,
+        id: LayerId,
+        adj: &procraft_engine::document::LayerAdjustment,
+    ) -> (&'static str, FilterUniform, bool) {
+        use procraft_engine::document::LayerAdjustment;
+        let full = [self.width as f32, self.height as f32, 0.0, 1.0];
+        let values = |a: [f32; 4], b: [f32; 4]| FilterUniform { a, b, size: full, c: [0.0; 4] };
+        match adj {
+            LayerAdjustment::Hsb { hue, saturation, brightness } => {
+                let [h, s, b] = [*hue, *saturation, *brightness]
+                    .map(|v| if v.is_finite() { (v.clamp(0.0, 1.0) - 0.5) * 2.0 } else { 0.0 });
+                ("fs_hsb", values([h * std::f32::consts::PI, 1.0 + s, b, 0.0], [0.0; 4]), false)
+            }
+            LayerAdjustment::ColorBalance { shadows, midtones, highlights } => {
+                let [s0, s1, s2] = *shadows;
+                let [m0, m1, m2] = *midtones;
+                let [h0, h1, h2] = *highlights;
+                (
+                    "fs_balance",
+                    FilterUniform { a: [s0, s1, s2, 0.0], b: [m0, m1, m2, 0.0], size: full, c: [h0, h1, h2, 0.0] },
+                    false,
+                )
+            }
+            LayerAdjustment::Curves { curves } => {
+                let [a, r, g, b] = [0, 1, 2, 3].map(|i| {
+                    let pts: Vec<(f32, f32)> =
+                        curves.get(i).map_or_else(Vec::new, |v| v.iter().map(|&[x, y]| (x, y)).collect());
+                    procraft_engine::tone::curve_table(&pts)
+                });
+                let entries: Vec<u8> =
+                    r.iter().zip(&g).zip(&b).zip(&a).flat_map(|(((&r, &g), &b), &a)| [r, g, b, a]).collect();
+                self.update_adjustment_table(gpu, id, &entries);
+                ("fs_curves", values([0.0; 4], [0.0; 4]), true)
+            }
+            LayerAdjustment::GradientMap { stops, amount } => {
+                let raw: Vec<(f32, [f32; 3])> = stops.iter().map(|s| (s.position, s.color)).collect();
+                let table = procraft_engine::tone::gradient_table(&raw);
+                let entries: Vec<u8> = table.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
+                self.update_adjustment_table(gpu, id, &entries);
+                let a = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 1.0 };
+                ("fs_gradient", values([a, 0.0, 0.0, 0.0], [0.0; 4]), true)
+            }
+        }
+    }
+
+    /// Runs an adjustment layer's filter on `src_view` into `dst_view` within `rect`.
+    #[allow(clippy::too_many_arguments)]
+    fn run_adjustment_filter(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        id: LayerId,
+        adj: &procraft_engine::document::LayerAdjustment,
+        src_view: &wgpu::TextureView,
+        dst_view: &wgpu::TextureView,
+    ) -> bool {
+        let (pass, filter_uniform, uses_table) = self.adjustment_pass(gpu, id, adj);
+        let Some(pipeline) = self.pipelines.filters.get(pass) else { return false };
+        let device = &gpu.device;
+        let offset = uniforms.push(&filter_uniform);
+        let src_bind = self.adjustment_bind(device, src_view, false);
+        let before_bind = if uses_table {
+            let tables = self.adjustment_tables.lock().ok();
+            let table_view = tables.as_ref().and_then(|t| t.get(&id)).map_or(&self.table_view, |(_, _, v)| v);
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("adjustment layer lut"),
+                layout: &self.pipelines.before_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(table_view) },
+                ],
+            })
+        } else {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("adjustment layer copy"),
+                layout: &self.pipelines.before_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.table_view) },
+                ],
+            })
+        };
+        let mut out = render_pass(encoder, "adjustment layer", dst_view, wgpu::LoadOp::Load);
+        scissor(&mut out, rect);
+        out.set_pipeline(pipeline);
+        out.set_bind_group(0, &src_bind, &[]);
+        out.set_bind_group(1, &self.uniform_bind, &[offset]);
+        out.set_bind_group(2, &before_bind, &[]);
+        out.draw(0..3, 0..1);
+        true
+    }
+
+    /// One adjustment layer composited over the current stack backdrop (through its mask,
+    /// clipping, opacity, and blend mode).
+    #[allow(clippy::too_many_arguments)]
+    fn composite_adjustment(
+        &self,
+        gpu: &Gpu,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        layer: &Layer,
+        adj: &procraft_engine::document::LayerAdjustment,
+        look: Look,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        let clip = doc.clip_base(layer.id);
+        let clip_visible = clip.is_none_or(|id| doc.layer(id).is_some_and(|l| l.visible));
+        if !layer.visible || !clip_visible || layer.opacity <= 0.0 {
+            return;
+        }
+        let device = &gpu.device;
+        let clip_view = clip.and_then(|id| self.layers.get(&id)).map_or(&self.stroke_view, |c| &c.view);
+        let clip_mask_view = clip
+            .and_then(|b| doc.mask_of(b))
+            .filter(|m| doc.layer(*m).is_some_and(|l| l.visible))
+            .and_then(|m| self.layers.get(&m))
+            .map(|m| &m.view);
+        let mask = doc.mask_of(layer.id).filter(|m| doc.layer(*m).is_some_and(|l| l.visible));
+        let mask_view = mask.and_then(|m| self.layers.get(&m)).map(|m| &m.view);
+        let stroke = self.active.filter(|s| Some(s.layer) == mask && !s.pencil);
+
+        let backdrop_view = if *current == 0 { stack.first.1 } else { stack.second().1 };
+        let (_, scratch_view) = self.scratch.get(device);
+        if !self.run_adjustment_filter(gpu, encoder, uniforms, rect, layer.id, adj, backdrop_view, scratch_view) {
+            return;
+        }
+
+        let uniform = LayerUniform {
+            opacity: layer.opacity.clamp(0.0, 1.0) * look.opacity,
+            tint: look.tint,
+            stroke_mode: match stroke.map(|s| s.style.tool) {
+                None => STROKE_NONE,
+                _ if stroke.is_some_and(|s| s.style.in_place()) => STROKE_NONE,
+                Some(StrokeTool::Paint) if stroke.is_some_and(|s| s.style.preserve_alpha) => STROKE_PAINT_LOCKED,
+                Some(StrokeTool::Paint) => STROKE_PAINT,
+                Some(StrokeTool::Erase) => STROKE_ERASE,
+                Some(StrokeTool::Laid) => STROKE_LAID,
+                Some(StrokeTool::Smudge) => STROKE_NONE,
+            },
+            stroke_opacity: stroke.map_or(0.0, |s| s.style.opacity.clamp(0.0, 1.0)),
+            blend: layer.blend.id(),
+            clipped: u32::from(clip.is_some()),
+            clip_masked: if clip_mask_view.is_some() { 1.0 } else { 0.0 },
+            masked: if mask_view.is_some() { 1.0 } else { 0.0 },
+            stroke_on_mask: if stroke.is_some() { 1.0 } else { 0.0 },
+            adjustment: 1,
+            ..Default::default()
+        }
+        .with_grain(stroke.as_ref().map(|s| &s.style))
+        .with_dual(stroke.as_ref());
+        let mask_view = mask_view.unwrap_or(&self.stroke_view);
+        self.draw_onto(
+            device,
+            encoder,
+            uniforms,
+            rect,
+            scratch_view,
+            Some((clip_view, clip_mask_view.unwrap_or(&self.stroke_view))),
+            mask_view,
+            uniform,
+            layer.blend,
+            stack,
+            current,
+        );
     }
 
     /// One paint layer (through its mask, with the stroke being drawn on it or its mask) onto a
@@ -7411,7 +7649,7 @@ impl Canvas {
         // the base clipped to and its mask
         let (clip, clip_mask) = clip.unwrap_or((&self.stroke_view, &self.stroke_view));
         let first = stack.first.1;
-        if blend == BlendMode::Normal {
+        if blend == BlendMode::Normal && uniform.adjustment == 0 {
             let bind = self.quad_masked(device, [view, &self.stroke_view, clip, &self.stroke_view], mask, clip_mask);
             let target = if *current == 0 { first } else { stack.second().1 };
             let mut pass = render_pass(encoder, "layer", target, wgpu::LoadOp::Load);
@@ -9911,6 +10149,7 @@ fn group_levels(doc: &Document) -> usize {
 fn plain(doc: &Document, id: LayerId) -> bool {
     match doc.layer(id) {
         Some(l) if l.kind == LayerKind::Mask => true,
+        Some(l) if l.adjustment.is_some() => false,
         Some(l) if l.blend != BlendMode::Normal => false,
         Some(l) if l.passes_through() => doc.members(Some(id)).iter().all(|m| plain(doc, *m)),
         _ => true,

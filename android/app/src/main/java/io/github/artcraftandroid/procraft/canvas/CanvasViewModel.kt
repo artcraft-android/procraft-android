@@ -7664,6 +7664,27 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** A new layer of a plugin's [kind] above the current one. */
     fun addPluginLayer(kind: String) = layerChange { if (it.addPluginLayer(kind) == 0uL) message = noRoom() }
 
+    /** Adds a new non-destructive adjustment layer of [kind] and opens it for live editing. */
+    fun addAdjustmentLayer(kind: Adjustment) {
+        var added: ULong? = null
+        layerChange {
+            added = it.addAdjustmentLayer(kind)
+            if (added == null) message = noRoom()
+        }
+        added?.let { editAdjustment(it) }
+    }
+
+    /** Opens live editing for non-destructive adjustment layer [id]. */
+    fun editAdjustment(id: ULong) {
+        val s = session ?: return
+        switchModes(ModeButton.Adjustment)
+        panel = Panel.NONE
+        if (!s.adjustmentLayerStart(id)) return
+        adjustModesOpen = false
+        liquifyPopup = 0
+        readAdjust()
+    }
+
     // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
     fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
 
