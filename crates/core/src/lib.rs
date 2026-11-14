@@ -106,7 +106,8 @@ use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
 
 pub use adjust::{
-    ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind, SwipeAdjustment,
+    AdjustmentLayerData, ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind,
+    PerspectiveKind, SwipeAdjustment,
 };
 pub use adjust_menu::{
     Adjustment, adjustment_groups, adjustment_label, adjustment_paintable, adjustment_pencil_amount, adjustment_swiped,
@@ -627,6 +628,12 @@ pub(crate) struct State {
     colour_source: Option<(Vec<u8>, procraft_engine::selection::ColourFlood)>,
     /// An adjustment is open on the current layer, and what it last drew.
     adjusting: bool,
+    /// Non-destructive adjustment layer being edited live (`layer`, `before_doc`, `before_adj`).
+    adjusting_layer: Option<(
+        procraft_engine::document::LayerId,
+        procraft_engine::document::Document,
+        procraft_engine::document::LayerAdjustment,
+    )>,
     /// The open adjustment's values, as the apps show them (adjusting.rs).
     adjust: adjusting::Adjusting,
     filters: plugin_filter::Filters,
@@ -1540,6 +1547,7 @@ impl CanvasSession {
             colour_source: None,
             feather_base: None,
             adjusting: false,
+            adjusting_layer: None,
             adjust: adjusting::Adjusting::default(),
             filters: plugin_filter::Filters::default(),
             crop_edit: crop_edit::CropEdit::default(),

@@ -715,6 +715,7 @@ fn paint_layer(id: LayerId, name: String, parent: Option<LayerId>) -> Layer {
         private: false,
         assisted: false,
         plugin: None,
+        adjustment: None,
     }
 }
 

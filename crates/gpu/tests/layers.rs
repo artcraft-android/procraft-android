@@ -1188,3 +1188,77 @@ fn the_gpu_memory_set_aside_stays_near_what_is_used() {
     assert!(between >= before);
     assert_eq!(gpu.errors(), 0);
 }
+
+#[test]
+fn adjustment_layer_hsb_mask_opacity_and_live_edit() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let base = doc.current();
+    fill(&mut canvas, &doc, base, [255, 0, 0]);
+
+    let adj_id = doc.add_adjustment_layer(
+        procraft_engine::document::LayerAdjustment::Hsb { hue: 0.5, saturation: 0.0, brightness: 0.5 },
+        "HSB",
+    );
+    canvas.invalidate();
+    let grey = composite_at(&gpu, &mut doc, &mut canvas, 8, 8);
+    assert!((grey[0] as i32 - grey[1] as i32).abs() <= 2 && (grey[1] as i32 - grey[2] as i32).abs() <= 2);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, base, 8, 8), [255, 0, 0, 255]);
+
+    // Mask: left side black (unadjusted), right side white (adjusted).
+    let mask = doc.add_mask(adj_id).unwrap();
+    paint(&mut canvas, &doc, mask, [0, 0, 0], Vec2::new(2.0, 8.0), 3.0, StrokeTool::Paint);
+    paint(&mut canvas, &doc, mask, [255, 255, 255], Vec2::new(14.0, 8.0), 3.0, StrokeTool::Paint);
+    canvas.invalidate();
+
+    let left = composite_at(&gpu, &mut doc, &mut canvas, 2, 8);
+    let right = composite_at(&gpu, &mut doc, &mut canvas, 14, 8);
+    assert!(left[0] > 200 && left[1] < 20 && left[2] < 20, "masked-out side should stay red: {left:?}");
+    assert!((right[0] as i32 - right[1] as i32).abs() <= 2, "unmasked side should be grey: {right:?}");
+
+    // Live re-edit back to neutral restores red on the right side too.
+    assert!(doc.set_adjustment(
+        adj_id,
+        procraft_engine::document::LayerAdjustment::Hsb { hue: 0.5, saturation: 0.5, brightness: 0.5 },
+    ));
+    canvas.invalidate();
+    let restored = composite_at(&gpu, &mut doc, &mut canvas, 14, 8);
+    assert!(restored[0] > 200 && restored[1] < 20 && restored[2] < 20, "restored: {restored:?}");
+}
+
+#[test]
+fn adjustment_layer_curves_and_merge_down() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let base = doc.current();
+    fill(&mut canvas, &doc, base, [200, 100, 50]);
+
+    let adj_id = doc.add_adjustment_layer(
+        procraft_engine::document::LayerAdjustment::Curves {
+            curves: [
+                vec![[0.0, 1.0], [1.0, 0.0]],
+                vec![[0.0, 0.0], [1.0, 1.0]],
+                vec![[0.0, 0.0], [1.0, 1.0]],
+                vec![[0.0, 0.0], [1.0, 1.0]],
+            ],
+        },
+        "Curves",
+    );
+    canvas.invalidate();
+    let inverted = composite_at(&gpu, &mut doc, &mut canvas, 8, 8);
+    assert!(
+        (inverted[0] as i32 - 55).abs() <= 3
+            && (inverted[1] as i32 - 155).abs() <= 3
+            && (inverted[2] as i32 - 205).abs() <= 3,
+        "expected inverted ~[55, 155, 205], got {inverted:?}"
+    );
+
+    let before = doc.clone();
+    canvas.merge_down(adj_id, base, before, None);
+    assert!(doc.finish_merge_down(adj_id));
+    let merged = layer_at(&gpu, &mut doc, &mut canvas, base, 8, 8);
+    assert!(
+        (merged[0] as i32 - 55).abs() <= 3
+            && (merged[1] as i32 - 155).abs() <= 3
+            && (merged[2] as i32 - 205).abs() <= 3,
+        "expected merged ~[55, 155, 205], got {merged:?}"
+    );
+}

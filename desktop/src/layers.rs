@@ -172,6 +172,7 @@ pub struct Layers {
     pub copied: Option<ThumbnailImage>,
     pub share: bool,
     pub edit_text: Option<u64>,
+    pub edit_adjustment: Option<u64>,
     /// The plugins' actions for the current layer's options, and the one tapped there, to run.
     pub plugin_actions: Vec<procraft_core::PluginAction>,
     /// The kinds of layer the plugins on add, which the + offers beside a plain layer.
@@ -399,12 +400,7 @@ impl Layers {
                 plus = Rect::from_min_size(pos2(body.right() - 18.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
                 look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
                 if ui.interact(plus, ui.scope_id().with("new layer"), Sense::click()).clicked() {
-                    // with plugins' kinds of layer on, it asks which
-                    if !self.layer_kinds.is_empty() {
-                        self.add_menu.open();
-                    } else if session.add_layer() == 0 {
-                        crate::files::no_room(session);
-                    }
+                    self.add_menu.open();
                 }
                 let list = Rect::from_min_max(
                     pos2(body.left() + 12.0, body.top() + HEADER_HEIGHT),
@@ -678,11 +674,17 @@ impl Layers {
         plus: Rect,
         backdrops: &mut Vec<f32>,
     ) {
-        if self.layer_kinds.is_empty() {
-            self.add_menu.close();
-        }
         let ink = menu::INK;
+        let adj_kinds = [
+            (procraft_core::Adjustment::Hsb, "HSB Adjustment", &icons::ADJUST_HSB),
+            (procraft_core::Adjustment::ColorBalance, "Color Balance Adjustment", &icons::ADJUST_BALANCE),
+            (procraft_core::Adjustment::Curves, "Curves Adjustment", &icons::ADJUST_CURVES),
+            (procraft_core::Adjustment::GradientMap, "Gradient Map Adjustment", &icons::ADJUST_GRADIENT),
+        ];
         let mut entries = vec![Entry::Item(&icons::MENU_NEW_SET, "Layer", ink)];
+        for &(_, label, icon) in &adj_kinds {
+            entries.push(Entry::Item(icon, label, ink));
+        }
         entries.extend(self.layer_kinds.iter().map(|k| Entry::Item(&icons::MENU_NEW_BRUSH, k.label.as_str(), ink)));
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let screen = ctx.content_rect();
@@ -702,11 +704,19 @@ impl Layers {
         );
         let Some(at) = tapped.filter(|i| *i < entries.len()) else { return };
         self.add_menu.close();
-        let added = match at.checked_sub(1).and_then(|k| self.layer_kinds.get(k)) {
-            Some(kind) => session.add_plugin_layer(kind.key.clone()),
-            None => session.add_layer(),
-        };
-        if added == 0 {
+        if at == 0 {
+            if session.add_layer() == 0 {
+                crate::files::no_room(session);
+            }
+        } else if let Some(&(kind, _, _)) = at.checked_sub(1).and_then(|k| adj_kinds.get(k)) {
+            if let Some(id) = session.add_adjustment_layer(kind) {
+                self.edit_adjustment = Some(id);
+            } else {
+                crate::files::no_room(session);
+            }
+        } else if let Some(kind) = at.checked_sub(1 + adj_kinds.len()).and_then(|k| self.layer_kinds.get(k))
+            && session.add_plugin_layer(kind.key.clone()) == 0
+        {
             crate::files::no_room(session);
         }
     }
@@ -1395,6 +1405,7 @@ impl Layers {
             LayerOption::DrawingAssist => _ = session.set_guide_assisted(!l.assisted),
             LayerOption::Reference => _ = session.set_layer_reference(l.id, !l.reference),
             LayerOption::EditText => self.edit_text = Some(l.id),
+            LayerOption::EditAdjustment => self.edit_adjustment = Some(l.id),
             LayerOption::Rasterize => {
                 session.rasterize_layer(l.id);
                 self.notice = Some((if l.text { "Text rasterized" } else { "Layer rasterized" }.into(), true));
@@ -1748,6 +1759,10 @@ impl Layers {
         // a plugin's layer: its kind's badge in its corner, as its manifest draws it
         if let Some(badge) = &l.plugin_badge {
             plugin_badge(&painter, rect, badge);
+        } else if l.adjustment.is_some() {
+            let area = Rect::from_min_size(rect.right_bottom() - vec2(3.0 + 24.0, 3.0 + 14.0), vec2(24.0, 14.0));
+            painter.rect_filled(area, 4u8, Color32::from_black_alpha(0x99));
+            text(&painter, area.center(), Align2::CENTER_CENTER, "ADJ", 9.0, Weight::SemiBold, Color32::WHITE);
         }
     }
 }

@@ -1,6 +1,7 @@
 //! Adjustments: the current layer redrawn through a filter while its values are dragged, kept as
 //! one undo step or put back; only what is selected changes.
 
+use procraft_engine::document::{AdjustmentGradientStop, LayerAdjustment, LayerId};
 use procraft_engine::geom::Vec2;
 use procraft_engine::selection::feather_radius;
 use procraft_engine::tone;
@@ -11,6 +12,87 @@ use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
 
 use crate::liquify::{self, LiquifyRun, Point};
 use crate::{CanvasSession, PenSample, PointerKind, Shared, State, ToolKind};
+
+/// Parameters of an adjustment layer, for initializing the live adjustments panel.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct AdjustmentLayerData {
+    pub kind: crate::Adjustment,
+    pub hsb: Vec<f32>,
+    pub balance_shadows: Vec<f32>,
+    pub balance_midtones: Vec<f32>,
+    pub balance_highlights: Vec<f32>,
+    pub curves_all: Vec<f32>,
+    pub curves_red: Vec<f32>,
+    pub curves_green: Vec<f32>,
+    pub curves_blue: Vec<f32>,
+    pub gradient_stops: Vec<f32>,
+    pub gradient_amount: f32,
+}
+
+fn default_layer_adjustment(kind: crate::Adjustment) -> Option<LayerAdjustment> {
+    match kind {
+        crate::Adjustment::Hsb => Some(LayerAdjustment::Hsb { hue: 0.5, saturation: 0.5, brightness: 0.5 }),
+        crate::Adjustment::ColorBalance => {
+            Some(LayerAdjustment::ColorBalance { shadows: [0.0; 3], midtones: [0.0; 3], highlights: [0.0; 3] })
+        }
+        crate::Adjustment::Curves => {
+            let line = || vec![[0.0, 0.0], [1.0, 1.0]];
+            Some(LayerAdjustment::Curves { curves: [line(), line(), line(), line()] })
+        }
+        crate::Adjustment::GradientMap => Some(LayerAdjustment::GradientMap {
+            stops: vec![
+                AdjustmentGradientStop { position: 0.0, color: [0.0, 0.0, 0.0] },
+                AdjustmentGradientStop { position: 1.0, color: [1.0, 1.0, 1.0] },
+            ],
+            amount: 1.0,
+        }),
+        _ => None,
+    }
+}
+
+fn adjustment_to_data(adj: &LayerAdjustment) -> AdjustmentLayerData {
+    let mut data = AdjustmentLayerData {
+        kind: match adj {
+            LayerAdjustment::Hsb { .. } => crate::Adjustment::Hsb,
+            LayerAdjustment::ColorBalance { .. } => crate::Adjustment::ColorBalance,
+            LayerAdjustment::Curves { .. } => crate::Adjustment::Curves,
+            LayerAdjustment::GradientMap { .. } => crate::Adjustment::GradientMap,
+        },
+        hsb: vec![0.5, 0.5, 0.5],
+        balance_shadows: vec![0.0, 0.0, 0.0],
+        balance_midtones: vec![0.0, 0.0, 0.0],
+        balance_highlights: vec![0.0, 0.0, 0.0],
+        curves_all: vec![0.0, 0.0, 1.0, 1.0],
+        curves_red: vec![0.0, 0.0, 1.0, 1.0],
+        curves_green: vec![0.0, 0.0, 1.0, 1.0],
+        curves_blue: vec![0.0, 0.0, 1.0, 1.0],
+        gradient_stops: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        gradient_amount: 1.0,
+    };
+    match adj {
+        LayerAdjustment::Hsb { hue, saturation, brightness } => {
+            data.hsb = vec![*hue, *saturation, *brightness];
+        }
+        LayerAdjustment::ColorBalance { shadows, midtones, highlights } => {
+            data.balance_shadows = shadows.to_vec();
+            data.balance_midtones = midtones.to_vec();
+            data.balance_highlights = highlights.to_vec();
+        }
+        LayerAdjustment::Curves { curves } => {
+            let flat = |pts: &Vec<[f32; 2]>| pts.iter().flat_map(|&[x, y]| [x, y]).collect();
+            let [a, r, g, b] = curves;
+            data.curves_all = flat(a);
+            data.curves_red = flat(r);
+            data.curves_green = flat(g);
+            data.curves_blue = flat(b);
+        }
+        LayerAdjustment::GradientMap { stops, amount } => {
+            data.gradient_stops = stops.iter().flat_map(|s| [s.position, s.color[0], s.color[1], s.color[2]]).collect();
+            data.gradient_amount = *amount;
+        }
+    }
+    data
+}
 
 /// The adjustments whose one amount (0..1) is dragged across the canvas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -344,14 +426,50 @@ impl CanvasSession {
         true
     }
 
+    /// Adds a non-destructive adjustment layer above the current layer and returns its id.
+    pub fn add_adjustment_layer(&self, kind: crate::Adjustment) -> Option<u64> {
+        let adj = default_layer_adjustment(kind)?;
+        let label = crate::adjustment_label(kind);
+        self.change(&format!("add {label} layer"), |d| d.has_room(1).then(|| d.add_adjustment_layer(adj, &label).0))
+    }
+
+    /// Starts live editing an existing non-destructive adjustment layer `id`, returning its current
+    /// parameters for the UI. Returns `None` if `id` is not an adjustment layer or is locked.
+    pub fn adjust_layer_begin(&self, id: u64) -> Option<AdjustmentLayerData> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let lid = LayerId(id);
+        if st.doc.is_locked(lid) {
+            return None;
+        }
+        let adj = st.doc.layer(lid)?.adjustment.clone()?;
+        let data = adjustment_to_data(&adj);
+        st.adjusting_layer = Some((lid, st.doc.clone(), adj));
+        Some(data)
+    }
+
     /// Hue, saturation and brightness, each 0..1 with 0.5 leaving the layer as it is: the hue turns
     /// the colour up to half a turn either way, saturation scales it from grey to twice as strong,
     /// brightness lightens or darkens it all the way.
     pub fn adjust_hsb(&self, hue: f32, saturation: f32, brightness: f32) {
-        let [h, s, b] =
-            [hue, saturation, brightness].map(|v| if v.is_finite() { (v.clamp(0.0, 1.0) - 0.5) * 2.0 } else { 0.0 });
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if let Some((lid, _, _)) = &st.adjusting_layer {
+            let lid = *lid;
+            let adj = LayerAdjustment::Hsb { hue, saturation, brightness }.sanitized();
+            if st.doc.set_adjustment(lid, adj)
+                && let Some(canvas) = st.canvas.as_mut()
+            {
+                canvas.invalidate();
+            }
+            st.revision += 1;
+            self.shared.frame(st);
+            return;
+        }
+        let [h, s, b] =
+            [hue, saturation, brightness].map(|v| if v.is_finite() { (v.clamp(0.0, 1.0) - 0.5) * 2.0 } else { 0.0 });
         st.adjust(Filter::Hsb { hue: h * std::f32::consts::PI, saturation: 1.0 + s, brightness: b });
         self.shared.frame(st);
     }
@@ -399,11 +517,25 @@ impl CanvasSession {
     /// Curves: the points (x, y pairs in 0..1) of the curve for all three channels and of the red,
     /// green and blue curves; each runs through its points as a smooth spline.
     pub fn adjust_curves(&self, all: Vec<f32>, red: Vec<f32>, green: Vec<f32>, blue: Vec<f32>) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if let Some((lid, _, _)) = &st.adjusting_layer {
+            let lid = *lid;
+            let pairs = |v: &[f32]| v.as_chunks::<2>().0.to_vec();
+            let adj =
+                LayerAdjustment::Curves { curves: [pairs(&all), pairs(&red), pairs(&green), pairs(&blue)] }.sanitized();
+            if st.doc.set_adjustment(lid, adj)
+                && let Some(canvas) = st.canvas.as_mut()
+            {
+                canvas.invalidate();
+            }
+            st.revision += 1;
+            self.shared.frame(st);
+            return;
+        }
         let points = |v: &[f32]| v.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect::<Vec<_>>();
         let [a, r, g, b] = [&all, &red, &green, &blue].map(|v| tone::curve_table(&points(v)));
         let entries: Vec<u8> = r.iter().zip(&g).zip(&b).zip(&a).flat_map(|(((&r, &g), &b), &a)| [r, g, b, a]).collect();
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
         if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
             canvas.set_table(gpu, &entries);
         }
@@ -499,6 +631,23 @@ impl CanvasSession {
         };
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if let Some((lid, _, _)) = &st.adjusting_layer {
+            let lid = *lid;
+            let adj = LayerAdjustment::ColorBalance {
+                shadows: three(&shadows),
+                midtones: three(&midtones),
+                highlights: three(&highlights),
+            }
+            .sanitized();
+            if st.doc.set_adjustment(lid, adj)
+                && let Some(canvas) = st.canvas.as_mut()
+            {
+                canvas.invalidate();
+            }
+            st.revision += 1;
+            self.shared.frame(st);
+            return;
+        }
         st.adjust(Filter::ColorBalance {
             shadows: three(&shadows),
             midtones: three(&midtones),
@@ -510,12 +659,30 @@ impl CanvasSession {
     /// A gradient map: the gradient through `stops` (position and red, green, blue, all 0..1, four
     /// numbers a stop) by brightness, `amount` (0..1) of the way.
     pub fn adjust_gradient_map(&self, stops: Vec<f32>, amount: f32) {
-        let stops: Vec<(f32, [f32; 3])> = stops.as_chunks::<4>().0.iter().map(|&[p, r, g, b]| (p, [r, g, b])).collect();
-        let table = tone::gradient_table(&stops);
-        let entries: Vec<u8> = table.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
         let a = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 1.0 };
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if let Some((lid, _, _)) = &st.adjusting_layer {
+            let lid = *lid;
+            let raw: Vec<AdjustmentGradientStop> = stops
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&[p, r, g, b]| AdjustmentGradientStop { position: p, color: [r, g, b] })
+                .collect();
+            let adj = LayerAdjustment::GradientMap { stops: raw, amount: a }.sanitized();
+            if st.doc.set_adjustment(lid, adj)
+                && let Some(canvas) = st.canvas.as_mut()
+            {
+                canvas.invalidate();
+            }
+            st.revision += 1;
+            self.shared.frame(st);
+            return;
+        }
+        let stops: Vec<(f32, [f32; 3])> = stops.as_chunks::<4>().0.iter().map(|&[p, r, g, b]| (p, [r, g, b])).collect();
+        let table = tone::gradient_table(&stops);
+        let entries: Vec<u8> = table.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
         if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
             canvas.set_table(gpu, &entries);
         }
@@ -630,6 +797,23 @@ impl CanvasSession {
     pub fn adjust_end(&self, commit: bool) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if let Some((lid, before_doc, before_adj)) = st.adjusting_layer.take() {
+            if commit {
+                let changed = st.doc.layer(lid).and_then(|l| l.adjustment.as_ref()) != Some(&before_adj);
+                if changed && let Some(canvas) = st.canvas.as_mut() {
+                    canvas.name_next_step("edit adjustment");
+                    canvas.record_document(before_doc);
+                }
+            } else {
+                st.doc = before_doc;
+                if let Some(canvas) = st.canvas.as_mut() {
+                    canvas.invalidate();
+                }
+            }
+            st.revision += 1;
+            self.shared.frame(st);
+            return;
+        }
         if st.adjusting {
             st.end_adjustment(commit);
             st.flush();

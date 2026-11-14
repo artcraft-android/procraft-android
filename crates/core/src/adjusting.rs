@@ -575,6 +575,50 @@ impl CanvasSession {
         true
     }
 
+    /// Starts live editing an existing non-destructive adjustment layer `id`, populating the
+    /// adjustments panel with its current parameters.
+    pub fn adjustment_layer_start(&self, id: u64) -> bool {
+        if self.shared.lock().adjust.open.is_some() {
+            self.adjustment_end(true);
+        }
+        let Some(data) = self.adjust_layer_begin(id) else {
+            return false;
+        };
+        self.adjusting(|a, _| {
+            a.open = Some(data.kind);
+            a.preview = false;
+            a.pencil = false;
+            a.puck = None;
+            a.touched = false;
+            let [h, s, b] = [
+                data.hsb.first().copied().unwrap_or(0.5),
+                data.hsb.get(1).copied().unwrap_or(0.5),
+                data.hsb.get(2).copied().unwrap_or(0.5),
+            ];
+            a.hsb = [h, s, b];
+            let bal = |v: Option<&f32>| v.copied().unwrap_or(0.0) * 0.5 + 0.5;
+            a.balance = [
+                bal(data.balance_shadows.first()),
+                bal(data.balance_shadows.get(1)),
+                bal(data.balance_shadows.get(2)),
+                bal(data.balance_midtones.first()),
+                bal(data.balance_midtones.get(1)),
+                bal(data.balance_midtones.get(2)),
+                bal(data.balance_highlights.first()),
+                bal(data.balance_highlights.get(1)),
+                bal(data.balance_highlights.get(2)),
+            ];
+            let pairs = |v: &[f32]| -> Vec<(f32, f32)> {
+                let pts: Vec<(f32, f32)> = v.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect();
+                if pts.len() >= 2 { pts } else { vec![(0.0, 0.0), (1.0, 1.0)] }
+            };
+            a.curves =
+                [pairs(&data.curves_all), pairs(&data.curves_red), pairs(&data.curves_green), pairs(&data.curves_blue)];
+            a.amount = data.gradient_amount;
+        });
+        true
+    }
+
     /// Ends the open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
     /// Returns whether one was open.
     pub fn adjustment_end(&self, commit: bool) -> bool {
